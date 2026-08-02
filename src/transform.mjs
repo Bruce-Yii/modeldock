@@ -53,23 +53,29 @@ function ensureItemIds(input) {
 
 const TEXT_PART_TYPES = new Set(["output_text", "text", "input_text"]);
 
-function assistantMessageHasContent(item) {
+function assistantMessageText(item) {
   const content = item.content;
-  if (typeof content === "string") return content.length > 0;
+  if (typeof content === "string") return content;
   if (Array.isArray(content)) {
-    return content.some(
-      (part) => part && typeof part === "object" && TEXT_PART_TYPES.has(part.type) && typeof part.text === "string" && part.text.length > 0,
-    );
+    return content
+      .filter((part) => part && typeof part === "object" && TEXT_PART_TYPES.has(part.type) && typeof part.text === "string" && part.text.length > 0)
+      .map((part) => part.text)
+      .join("\n");
   }
-  return false;
+  return "";
 }
 
 function normalizeAssistantMessages(input) {
   if (!Array.isArray(input)) return input;
-  return input.filter((item) => {
-    if (!item || typeof item !== "object" || item.role !== "assistant") return true;
-    if (assistantMessageHasContent(item)) return true;
-    return Array.isArray(item.tool_calls) && item.tool_calls.length > 0;
+  return input.flatMap((item) => {
+    if (!item || typeof item !== "object" || item.role !== "assistant") return [item];
+    const text = assistantMessageText(item);
+    if (text) return [{ ...item, content: text }];
+    if (Array.isArray(item.tool_calls) && item.tool_calls.length > 0) {
+      const { content, ...toolMessage } = item;
+      return [toolMessage];
+    }
+    return [];
   });
 }
 
@@ -137,6 +143,7 @@ function describeInput(input) {
     role: item?.role || null,
     hasId: Boolean(item?.id),
     keys: item && typeof item === "object" ? Object.keys(item).sort() : [],
+    contentKind: Array.isArray(item?.content) ? "array" : typeof item?.content === "string" ? "string" : "missing",
     contentTypes: Array.isArray(item?.content) ? item.content.map((part) => part?.type || null) : [],
     contentCount: Array.isArray(item?.content) ? item.content.length : typeof item?.content === "string" ? 1 : 0,
     nonEmptyTextParts: Array.isArray(item?.content)
@@ -194,6 +201,9 @@ export function transformResponsesRequest(source, { mediaStore, defaultModel }) 
   const imageRefs = [];
   const rewrittenInput = rewriteImages(normalizeInput(payload.input), mediaStore, imageRefs);
   const compacted = compactCompletedToolHistory(rewrittenInput);
+  const stringifiedAssistantMessages = Array.isArray(compacted.input)
+    ? compacted.input.filter((item) => item?.role === "assistant" && Array.isArray(item.content) && assistantMessageText(item).length > 0).length
+    : 0;
   const normalizedInput = normalizeAssistantMessages(compacted.input);
   const droppedAssistantMessages = Array.isArray(compacted.input) ? compacted.input.length - normalizedInput.length : 0;
   payload.input = ensureItemIds(normalizedInput);
@@ -223,6 +233,7 @@ export function transformResponsesRequest(source, { mediaStore, defaultModel }) 
       inputShape: describeInput(payload.input),
       compactedToolResults: compacted.compacted,
       droppedAssistantMessages,
+      stringifiedAssistantMessages,
     },
   };
 }

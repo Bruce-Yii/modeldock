@@ -359,6 +359,28 @@ test("streaming relay hides a harness web round and streams only the final answe
   assert.equal(instance.services.metrics.responses.outputTokens, 5);
 });
 
+test("streaming upstream errors preserve the provider message in the trace", async (t) => {
+  const upstream = createServer((req, res) => {
+    res.statusCode = 400;
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({ error: { type: "invalid_request_error", message: "specific provider validation failure" } }));
+  });
+  const port = await listen(upstream);
+  t.after(() => upstream.close());
+  const instance = await startApp({ goBaseUrl: `http://127.0.0.1:${port}` });
+  t.after(instance.stop);
+
+  const response = await fetch(`${instance.base}/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ input: "bad history", stream: true }),
+  });
+  assert.equal(response.status, 400);
+  assert.equal((await response.json()).error.message, "specific provider validation failure");
+  const trace = instance.services.metrics.recent.find((item) => item.kind === "responses");
+  assert.equal(trace.error, "specific provider validation failure");
+});
+
 test("function calls from Go map to custom tool calls for Codex", async (t) => {
   const upstream = createServer((req, res) => {
     res.setHeader("content-type", "text/event-stream");

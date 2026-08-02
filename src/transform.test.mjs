@@ -240,6 +240,7 @@ test("reports input shape for inspection", () => {
   const { report } = transformResponsesRequest(source, { mediaStore: fakeStore(), defaultModel: "d" });
   assert.ok(Array.isArray(report.inputShape));
   assert.equal(report.inputShape[0].role, "user");
+  assert.equal(report.inputShape[0].contentKind, "array");
   assert.deepEqual(report.inputShape[0].contentTypes, ["input_text"]);
 });
 
@@ -265,6 +266,20 @@ test("keeps assistant messages with text content", () => {
   };
   const { payload } = transformResponsesRequest(source, { mediaStore: fakeStore(), defaultModel: "d" });
   assert.equal(payload.input.length, 1);
+  assert.equal(payload.input[0].content, "I will check", "Go accepts historical assistant content only as a string");
+});
+
+test("joins multiple assistant text parts into Go-compatible string content", () => {
+  const source = {
+    input: [{ type: "message", id: "msg_old", role: "assistant", content: [
+      { type: "output_text", text: "first" },
+      { type: "output_text", text: "second" },
+    ] }],
+  };
+  const { payload, report } = transformResponsesRequest(source, { mediaStore: fakeStore(), defaultModel: "d" });
+  assert.equal(payload.input[0].content, "first\nsecond");
+  assert.equal(report.stringifiedAssistantMessages, 1);
+  assert.equal(report.inputShape[0].contentKind, "string");
 });
 
 test("keeps assistant messages that carry tool_calls", () => {
@@ -273,6 +288,7 @@ test("keeps assistant messages that carry tool_calls", () => {
   };
   const { payload } = transformResponsesRequest(source, { mediaStore: fakeStore(), defaultModel: "d" });
   assert.equal(payload.input.length, 1);
+  assert.equal("content" in payload.input[0], false);
 });
 
 test("drops assistant messages with reasoning-only content", () => {

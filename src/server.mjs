@@ -218,6 +218,16 @@ async function fetchGoResponses(payload, services, signal, accept = "application
   });
 }
 
+function upstreamError(body, status) {
+  try {
+    const parsed = JSON.parse(body.toString("utf8"));
+    if (typeof parsed?.error?.message === "string") return parsed.error.message.slice(0, 2_000);
+  } catch {
+    // Fall back to the status-only message for non-JSON provider errors.
+  }
+  return `Upstream returned ${status}`;
+}
+
 async function relayLiveResponses(payload, res, services, signal) {
   const writer = new LiveResponsesWriter(res, payload);
   const customTools = new Set((payload.tools || []).filter((tool) => tool?.type === "custom").map((tool) => tool.name));
@@ -229,12 +239,13 @@ async function relayLiveResponses(payload, res, services, signal) {
     const upstream = await fetchGoResponses(currentPayload, services, signal, "text/event-stream");
     if (!upstream.ok || !upstream.body || !upstream.headers.get("content-type")?.includes("text/event-stream")) {
       const body = Buffer.from(await upstream.arrayBuffer());
+      const error = upstreamError(body, upstream.status);
       if (!res.headersSent) {
         res.status(upstream.status);
         copyUpstreamHeaders(upstream, res);
         res.send(body);
       }
-      return { ok: false, httpStatus: upstream.status, bytesOut: body.byteLength, usage, rounds, error: `Upstream returned ${upstream.status}` };
+      return { ok: false, httpStatus: upstream.status, bytesOut: body.byteLength, usage, rounds, error };
     }
 
     if (!res.headersSent) {
@@ -341,13 +352,14 @@ async function relayResponses(req, res, services) {
         streamMode: "live-normalized",
         inputShape: transformed.report.inputShape,
         droppedAssistantMessages: transformed.report.droppedAssistantMessages,
+        stringifiedAssistantMessages: transformed.report.stringifiedAssistantMessages,
         responseShape: describeResponse(live.response),
         harnessToolRounds: live.rounds,
         error: live.ok ? undefined : live.error,
       });
       return;
     } catch (error) {
-      finish({ ok: false, error: error.message, streamMode: "live-normalized", inputShape: transformed.report.inputShape, droppedAssistantMessages: transformed.report.droppedAssistantMessages });
+      finish({ ok: false, error: error.message, streamMode: "live-normalized", inputShape: transformed.report.inputShape, droppedAssistantMessages: transformed.report.droppedAssistantMessages, stringifiedAssistantMessages: transformed.report.stringifiedAssistantMessages });
       if (!res.headersSent) return res.status(502).json({ error: { message: `OpenCode Go request failed: ${error.message}`, type: "upstream_error" } });
       return res.end();
     }
@@ -437,6 +449,7 @@ async function relayResponses(req, res, services) {
     imageRefs: transformed.report.imageRefs,
     inputShape: transformed.report.inputShape,
     droppedAssistantMessages: transformed.report.droppedAssistantMessages,
+    stringifiedAssistantMessages: transformed.report.stringifiedAssistantMessages,
     responseShape: describeResponse(parsed),
     harnessToolRounds: Number(upstream.headers.get("x-modeldock-tool-rounds") || 0),
     error: upstream.ok ? undefined : parsed?.error?.message || `Upstream returned ${upstream.status}`,
