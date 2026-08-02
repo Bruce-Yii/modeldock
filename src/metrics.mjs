@@ -22,6 +22,8 @@ export class Metrics extends EventEmitter {
       rewrittenToolChoice: 0,
       droppedAssistantMessages: 0,
       imageAttachments: 0,
+      directVisionRoutes: 0,
+      lunaToolContinuations: 0,
     };
     this.web = emptyBucket();
     this.vision = { ...emptyBucket(), fallback: 0, byModel: {} };
@@ -59,13 +61,15 @@ export class Metrics extends EventEmitter {
     };
   }
 
-  recordResponseTransform(report, { bytesIn = 0, streaming = false } = {}) {
+  recordResponseTransform(report, { bytesIn = 0, streaming = false, routeReason } = {}) {
     this.responses.bytesIn += bytesIn;
     this.responses.filteredToolSearch += report.blocked.tool_search;
     this.responses.filteredWebSearch += report.blocked.web_search;
     this.responses.rewrittenToolChoice += report.toolChoiceRewritten ? 1 : 0;
     this.responses.droppedAssistantMessages += Number(report.droppedAssistantMessages || 0);
     this.responses.imageAttachments += report.imageRefs.length;
+    this.responses.directVisionRoutes += report.directVision ? 1 : 0;
+    this.responses.lunaToolContinuations += routeReason === "luna_tool_continuation" ? 1 : 0;
     this.responses.streaming += streaming ? 1 : 0;
   }
 

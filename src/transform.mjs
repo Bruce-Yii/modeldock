@@ -155,25 +155,40 @@ function describeInput(input) {
   }));
 }
 
-function rewriteImages(input, mediaStore, imageRefs) {
+function currentTurnStart(input) {
+  if (!Array.isArray(input)) return 0;
+  let lastAssistant = -1;
+  for (let index = 0; index < input.length; index += 1) {
+    if (input[index]?.role === "assistant") lastAssistant = index;
+  }
+  return lastAssistant + 1;
+}
+
+function rewriteImages(input, mediaStore, imageRefs, currentImageRefs, { preserveImages = false } = {}) {
   if (!Array.isArray(input)) return input;
-  return input.map((item) => {
+  const turnStart = currentTurnStart(input);
+  return input.map((item, index) => {
     if (!item || typeof item !== "object" || !Array.isArray(item.content)) return item;
     const content = item.content.map((part) => {
       if (!part || part.type !== "input_image") return part;
       const imageUrl = part.image_url;
       const ref = mediaStore.put(imageUrl);
       imageRefs.push(ref);
+      const current = index >= turnStart;
+      if (current) currentImageRefs.push(ref);
+      if (preserveImages) return part;
       return {
         type: "input_text",
-        text: `[Image attachment ${ref}. The main model cannot inspect it directly. Use harness_vision_inspect with image_ref "${ref}" before making visual claims.]`,
+        text: current
+          ? `[Image attachment ${ref}. The main model cannot inspect it directly. Use harness_vision_inspect with image_ref "${ref}" before making visual claims.]`
+          : `[Earlier image attachment ${ref}. Its visual contents were handled in a prior turn. Use the following assistant observation as context; do not re-inspect it unless the user asks a new visual question.]`,
       };
     });
     return { ...item, content };
   });
 }
 
-export function transformResponsesRequest(source, { mediaStore, defaultModel }) {
+export function transformResponsesRequest(source, { mediaStore, defaultModel, targetModel, directVision = false }) {
   if (!source || typeof source !== "object" || Array.isArray(source)) {
     throw new Error("Responses request body must be a JSON object");
   }
@@ -199,7 +214,8 @@ export function transformResponsesRequest(source, { mediaStore, defaultModel }) 
   payload.parallel_tool_calls = false;
 
   const imageRefs = [];
-  const rewrittenInput = rewriteImages(normalizeInput(payload.input), mediaStore, imageRefs);
+  const currentImageRefs = [];
+  const rewrittenInput = rewriteImages(normalizeInput(payload.input), mediaStore, imageRefs, currentImageRefs, { preserveImages: directVision });
   const compacted = compactCompletedToolHistory(rewrittenInput);
   const stringifiedAssistantMessages = Array.isArray(compacted.input)
     ? compacted.input.filter((item) => item?.role === "assistant" && Array.isArray(item.content) && assistantMessageText(item).length > 0).length
@@ -213,12 +229,21 @@ export function transformResponsesRequest(source, { mediaStore, defaultModel }) 
     payload.tools.push(structuredClone(HARNESS_WEB_SEARCH_TOOL));
     injectedHarnessTools.push(HARNESS_WEB_SEARCH_TOOL.name);
   }
-  if (imageRefs.length > 0) {
+  if (currentImageRefs.length > 0 && !directVision) {
     if (!Array.isArray(payload.tools)) payload.tools = [];
     payload.tools.push(structuredClone(HARNESS_VISION_TOOL));
     injectedHarnessTools.push(HARNESS_VISION_TOOL.name);
   }
-  if (!payload.model) payload.model = defaultModel;
+  payload.model = targetModel || payload.model || defaultModel;
+  if (directVision) {
+    const routeInstruction = [
+      "ModelDock visual route: you are the active vision-capable model for this complete turn.",
+      "Inspect attached images directly and use the normal Codex tools when useful.",
+      "Do not call harness_vision_inspect; it is reserved for the text-only main model.",
+      "Return visual conclusions in your assistant response so the next main-model turn receives them in conversation history.",
+    ].join(" ");
+    payload.instructions = [payload.instructions, routeInstruction].filter((value) => typeof value === "string" && value.trim()).join("\n\n");
+  }
 
   return {
     payload,
@@ -230,10 +255,12 @@ export function transformResponsesRequest(source, { mediaStore, defaultModel }) 
       toolChoiceRewritten,
       parallelToolCallsRewritten,
       imageRefs: [...new Set(imageRefs)],
+      currentImageRefs: [...new Set(currentImageRefs)],
       inputShape: describeInput(payload.input),
       compactedToolResults: compacted.compacted,
       droppedAssistantMessages,
       stringifiedAssistantMessages,
+      directVision,
     },
   };
 }

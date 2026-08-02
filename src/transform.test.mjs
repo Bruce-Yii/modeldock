@@ -115,6 +115,44 @@ test("replaces input_image with placeholder text and registers media ref", () =>
   assert.deepEqual(store.puts, [IMAGE_DATA_URL]);
 });
 
+test("direct Luna routing preserves image content and omits the fallback vision tool", () => {
+  const store = fakeStore();
+  const source = baseRequest();
+  source.input = [{ role: "user", content: [
+    { type: "input_text", text: "inspect this" },
+    { type: "input_image", image_url: IMAGE_DATA_URL },
+  ] }];
+  const { payload, report } = transformResponsesRequest(source, {
+    mediaStore: store,
+    defaultModel: "deepseek-v4-flash",
+    targetModel: "gpt-5.6-luna",
+    directVision: true,
+  });
+  assert.equal(payload.model, "gpt-5.6-luna");
+  assert.equal(payload.input[0].content[1].type, "input_image");
+  assert.equal(payload.input[0].content[1].image_url, IMAGE_DATA_URL);
+  assert.match(payload.instructions, /active vision-capable model/i);
+  assert.match(payload.instructions, /Do not call harness_vision_inspect/i);
+  assert.equal(payload.tools.some((tool) => tool.name === "harness_vision_inspect"), false);
+  assert.deepEqual(report.imageRefs, ["img_1"]);
+  assert.equal(report.directVision, true);
+});
+
+test("historical images do not re-advertise the fallback vision tool after a Luna observation", () => {
+  const source = baseRequest();
+  source.input = [
+    { role: "user", content: [{ type: "input_image", image_url: IMAGE_DATA_URL }] },
+    { role: "assistant", content: [{ type: "output_text", text: "The image shows a covered button." }] },
+    { role: "user", content: [{ type: "input_text", text: "Now implement the fix." }] },
+  ];
+  const { payload, report } = transformResponsesRequest(source, { mediaStore: fakeStore(), defaultModel: "deepseek-v4-flash" });
+  assert.match(payload.input[0].content[0].text, /Earlier image attachment/);
+  assert.match(payload.input[0].content[0].text, /following assistant observation/);
+  assert.equal(payload.tools.some((tool) => tool.name === "harness_vision_inspect"), false);
+  assert.deepEqual(report.imageRefs, ["img_1"]);
+  assert.deepEqual(report.currentImageRefs, []);
+});
+
 test("handles multiple images across multiple messages", () => {
   const store = fakeStore();
   const source = {

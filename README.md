@@ -3,19 +3,21 @@
 A narrow, loopback-only bridge for running the Codex harness against OpenCode Go's Responses facade.
 
 ```text
-Codex --Responses--> 127.0.0.1:4097 --Responses--> OpenCode Go / deepseek-v4-flash
+Codex --Responses--> 127.0.0.1:4097 --text/code turn--> Go / deepseek-v4-flash
+                               |--visual turn---------> Go / gpt-5.6-luna
                                |--local function loop--> Exa hosted MCP
-                               `--local function loop--> Go / gpt-5.6-luna (Kimi fallback)
+                               `--DeepSeek vision tool--> Go / gpt-5.6-luna (Kimi fallback)
 ```
 
 The gate does four jobs:
 
 - removes hosted `tool_search` and `web_search` schemas that OpenCode Go rejects;
+- routes a current image or explicit user visual task to Luna for the complete turn, then returns the next independent turn to DeepSeek;
 - exposes web search and image inspection to DeepSeek as ordinary functions executed by the local harness;
 - normalizes Codex Responses history for Go, including removing empty assistant placeholder messages;
 - turns Go's partial SSE into a live, complete Responses lifecycle for Codex.
 
-It is not a model router, a Chat Completions converter, or a local search engine. Exa and all Go models are cloud services; only the orchestration and metering run locally.
+It is not a general-purpose model router, a Chat Completions converter, or a local search engine. Its only routing policy is the DeepSeek/Luna visual handoff. Exa and all Go models are cloud services; only the orchestration and metering run locally.
 
 ## Start
 
@@ -59,15 +61,19 @@ For each request, the gate:
 5. compacts completed local tool call/output pairs into marked untrusted-data messages;
 6. drops assistant messages with neither non-empty text nor tool calls;
 7. adds stable IDs and the non-empty reasoning marker required by Go's facade;
-8. replaces images with opaque `img_` references and injects `harness_vision_inspect`;
+8. preserves images for a direct Luna visual turn, or replaces them with opaque `img_` references for DeepSeek;
 9. executes up to four internal web/vision tool rounds;
 10. forwards JSON responses directly or emits live normalized SSE.
+
+Luna tool calls are pinned to Luna by `call_id` until that tool chain completes. The following independent user turn returns to DeepSeek, which receives Luna's assistant observation through normal conversation history. Historical images are marked as already handled and do not re-advertise the fallback vision tool.
+
+The DeepSeek fallback remains available: if DeepSeek calls `harness_vision_inspect`, the local loop invokes Luna and returns a marked `VISION_INSPECTION_COMPLETED` observation as Go-compatible user text. After the first vision observation, that tool is removed from the remainder of the internal loop to prevent repeated inspection of the same image.
 
 Go streams text deltas in real time but omits several lifecycle events expected by Codex. ModelDock forwards each delta as it arrives and supplies `response.created`, item/content start and done events, `response.completed`, and `[DONE]`. Successful streaming traces report `streamMode: "live-normalized"`.
 
 ## Dashboard and diagnostics
 
-`GET /` shows request, token, byte, schema-filter, search, vision, and fallback meters. Click any recent trace row to inspect its sanitized raw evidence, including `inputShape`, `responseShape`, stream mode, filtered tool count, and internal tool rounds. Prompt text, tool output, images, and credentials are excluded.
+`GET /` shows request, token, byte, schema-filter, search, vision, and fallback meters. Recent rows show the actual upstream model. Click a row to inspect sanitized evidence including `routeReason`, `directVision`, `inputShape`, `responseShape`, stream mode, filtered tool count, and internal tool rounds. Prompt text, tool output, images, and credentials are excluded.
 
 Other endpoints:
 
@@ -84,7 +90,7 @@ npm test
 npm run probe:live
 ```
 
-The deterministic suite includes a timing-controlled assertion that the downstream client receives a text delta before the mock upstream completes. The live probe exercises OpenCode Go, Exa, MCP, streaming, and vision without printing the bearer token.
+The deterministic suite includes direct visual routing, Luna tool-chain affinity, return-to-DeepSeek history, fallback observation wrapping, and a timing-controlled assertion that the downstream client receives a text delta before the mock upstream completes. The live probe exercises both routes, OpenCode Go, Exa, MCP, streaming, and vision without printing the bearer token.
 
 ## Security boundary
 

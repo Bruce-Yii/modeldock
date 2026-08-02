@@ -480,6 +480,161 @@ test("images are replaced and stored in media store", async (t) => {
   assert.equal(instance.services.mediaStore.snapshot().entries, 1);
 });
 
+test("a visual turn is sent intact to Luna and exposed in route evidence", async (t) => {
+  let received;
+  const upstream = createServer(async (req, res) => {
+    received = await jsonBody(req);
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({
+      id: "resp_luna",
+      output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "I can see it." }] }],
+      usage: { input_tokens: 10, output_tokens: 4 },
+    }));
+  });
+  const port = await listen(upstream);
+  t.after(() => upstream.close());
+  const instance = await startApp({ goBaseUrl: `http://127.0.0.1:${port}` });
+  t.after(instance.stop);
+
+  const dataUrl = "data:image/png;base64,iVBORw0KGgo=";
+  const response = await fetch(`${instance.base}/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "deepseek-v4-flash",
+      input: [{ role: "user", content: [
+        { type: "input_text", text: "What is visible?" },
+        { type: "input_image", image_url: dataUrl },
+      ] }],
+    }),
+  });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("x-modeldock-route"), "current_turn_image");
+  assert.equal(response.headers.get("x-modeldock-model"), "gpt-5.6-luna");
+  assert.equal(received.model, "gpt-5.6-luna");
+  assert.equal(received.input[0].content[1].type, "input_image");
+  assert.equal(received.tools?.some((tool) => tool.name === "harness_vision_inspect") || false, false);
+  const trace = instance.services.metrics.recent.find((item) => item.kind === "responses");
+  assert.equal(trace.model, "gpt-5.6-luna");
+  assert.equal(trace.directVision, true);
+  assert.equal(trace.routeReason, "current_turn_image");
+});
+
+test("Luna tool calls stay on Luna, then the next independent turn returns to DeepSeek", async (t) => {
+  const receivedModels = [];
+  const receivedBodies = [];
+  let call = 0;
+  const upstream = createServer(async (req, res) => {
+    const body = await jsonBody(req);
+    receivedBodies.push(body);
+    receivedModels.push(body.model);
+    call += 1;
+    res.setHeader("content-type", "application/json");
+    if (call === 1) {
+      res.end(JSON.stringify({ id: "resp_luna_call", output: [{
+        id: "fc_luna", type: "function_call", name: "shell_command", call_id: "call_luna", arguments: "{}",
+      }] }));
+      return;
+    }
+    res.end(JSON.stringify({ id: `resp_${call}`, output: [{
+      type: "message", role: "assistant", content: [{ type: "output_text", text: call === 2 ? "Visual tool work finished." : "Back on main." }],
+    }] }));
+  });
+  const port = await listen(upstream);
+  t.after(() => upstream.close());
+  const instance = await startApp({ goBaseUrl: `http://127.0.0.1:${port}` });
+  t.after(instance.stop);
+  const dataUrl = "data:image/png;base64,iVBORw0KGgo=";
+
+  const first = await fetch(`${instance.base}/v1/responses`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ input: [{ role: "user", content: [{ type: "input_image", image_url: dataUrl }] }] }),
+  });
+  assert.equal(first.status, 200);
+  assert.equal(instance.services.routeAffinity.snapshot().activeCallIds, 1);
+
+  const second = await fetch(`${instance.base}/v1/responses`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ input: [
+      { role: "user", content: [{ type: "input_image", image_url: dataUrl }] },
+      { role: "assistant", content: [] },
+      { type: "custom_tool_call", name: "shell_command", call_id: "call_luna", input: "{}" },
+      { type: "custom_tool_call_output", call_id: "call_luna", output: "ok" },
+    ] }),
+  });
+  assert.equal(second.status, 200);
+  assert.equal(second.headers.get("x-modeldock-route"), "luna_tool_continuation");
+
+  const third = await fetch(`${instance.base}/v1/responses`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ input: [
+      { role: "user", content: [{ type: "input_image", image_url: dataUrl }] },
+      { role: "assistant", content: [{ type: "output_text", text: "Visual tool work finished." }] },
+      { role: "user", content: [{ type: "input_text", text: "Now implement the fix." }] },
+    ] }),
+  });
+  assert.equal(third.status, 200);
+  assert.equal(third.headers.get("x-modeldock-route"), "default_main");
+  assert.deepEqual(receivedModels, ["gpt-5.6-luna", "gpt-5.6-luna", "deepseek-v4-flash"]);
+  assert.equal(receivedBodies[2].tools?.some((tool) => tool.name === "harness_vision_inspect") || false, false);
+  assert.match(receivedBodies[2].input[0].content[0].text, /Earlier image attachment/);
+});
+
+test("DeepSeek fallback vision receives an explicit Luna observation and cannot repeat it in the same loop", async (t) => {
+  let mainCalls = 0;
+  let continuation;
+  let actualRef;
+  const upstream = createServer(async (req, res) => {
+    const body = await jsonBody(req);
+    res.setHeader("content-type", "application/json");
+    if (body.model === "gpt-5.6-luna") {
+      assert.equal(body.max_output_tokens, 4_096);
+      res.end(JSON.stringify({ id: "resp_small_luna", output: [{
+        type: "message", role: "assistant", content: [{ type: "output_text", text: "The button is covered by a modal." }],
+      }] }));
+      return;
+    }
+    mainCalls += 1;
+    if (mainCalls === 1) {
+      res.end(JSON.stringify({ id: "resp_vision_call", output: [{
+        type: "function_call",
+        name: "harness_vision_inspect",
+        call_id: "call_vision",
+        arguments: JSON.stringify({ image_ref: actualRef, question: "Why is the button hidden?", mode: "ui" }),
+      }] }));
+      return;
+    }
+    continuation = body;
+    res.end(JSON.stringify({ id: "resp_final", output: [{
+      type: "message", role: "assistant", content: [{ type: "output_text", text: "Use a higher z-index." }],
+    }] }));
+  });
+  const port = await listen(upstream);
+  t.after(() => upstream.close());
+  const instance = await startApp({ goBaseUrl: `http://127.0.0.1:${port}` });
+  t.after(instance.stop);
+  actualRef = instance.services.mediaStore.put("data:image/png;base64,iVBORw0KGgo=");
+
+  const response = await fetch(`${instance.base}/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      input: "Continue the task.",
+      tools: [{ type: "function", name: "harness_vision_inspect", description: "vision", parameters: { type: "object", properties: {} } }],
+    }),
+  });
+  assert.equal(response.status, 200);
+  assert.equal(mainCalls, 2);
+  const observation = continuation.input.at(-1).content[0].text;
+  assert.match(observation, /LOCAL VISION OBSERVATION/);
+  assert.match(observation, /VISION_INSPECTION_COMPLETED/);
+  assert.match(observation, /vision_model: gpt-5\.6-luna/);
+  assert.match(observation, /visual_evidence_begin[\s\S]*button is covered by a modal[\s\S]*visual_evidence_end/);
+  assert.equal(continuation.tools.some((tool) => tool.name === "harness_vision_inspect"), false);
+  const trace = instance.services.metrics.recent.find((item) => item.kind === "responses");
+  assert.equal(trace.harnessToolRounds, 1);
+});
+
 test("models endpoint serves the local Codex catalog", async (t) => {
   const instance = await startApp();
   t.after(instance.stop);

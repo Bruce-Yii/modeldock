@@ -118,6 +118,57 @@ try {
     throw new Error(`Second-turn assistant history probe failed with HTTP ${secondTurn.status}`);
   }
 
+  const visualDataUrl = solidBluePngDataUrl();
+  const directVision = await fetch(`${baseUrl}/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: config.mainModel,
+      input: [{ role: "user", content: [
+        { type: "input_text", text: "Describe the dominant visible color in one short sentence." },
+        { type: "input_image", image_url: visualDataUrl },
+      ] }],
+      max_output_tokens: 256,
+      stream: false,
+    }),
+  });
+  const directVisionBody = await directVision.json();
+  const directVisionOutput = extractOutputText(directVisionBody);
+  result.responses.directVision = {
+    status: directVision.status,
+    route: directVision.headers.get("x-modeldock-route"),
+    model: directVision.headers.get("x-modeldock-model"),
+    output: directVisionOutput,
+  };
+  if (directVision.status !== 200 || result.responses.directVision.model !== config.visionModel) {
+    throw new Error(`Direct visual routing probe failed with HTTP ${directVision.status}`);
+  }
+
+  const returnToMain = await fetch(`${baseUrl}/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: config.mainModel,
+      input: [
+        { role: "user", content: [{ type: "input_image", image_url: visualDataUrl }] },
+        { role: "assistant", content: [{ type: "output_text", text: directVisionOutput || "The image was inspected by Luna." }] },
+        { role: "user", content: [{ type: "input_text", text: "Reply with exactly RETURN_MAIN_OK." }] },
+      ],
+      max_output_tokens: 256,
+      stream: false,
+    }),
+  });
+  const returnToMainBody = await returnToMain.json();
+  result.responses.returnToMain = {
+    status: returnToMain.status,
+    route: returnToMain.headers.get("x-modeldock-route"),
+    model: returnToMain.headers.get("x-modeldock-model"),
+    output: extractOutputText(returnToMainBody),
+  };
+  if (returnToMain.status !== 200 || result.responses.returnToMain.model !== config.mainModel) {
+    throw new Error(`Return-to-main routing probe failed with HTTP ${returnToMain.status}`);
+  }
+
   client = new Client({ name: "modeldock-live-probe", version: "0.1.0" });
   await client.connect(new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp`)));
   const tools = await client.listTools();
@@ -130,7 +181,7 @@ try {
   const webText = web.content?.find((item) => item.type === "text")?.text || "";
   result.web = { isError: Boolean(web.isError), outputBytes: Buffer.byteLength(webText), hasUrl: /https?:\/\//.test(webText) };
 
-  const imageRef = instance.services.mediaStore.put(solidBluePngDataUrl());
+  const imageRef = instance.services.mediaStore.put(visualDataUrl);
   const vision = await client.callTool({
     name: "vision_inspect",
     arguments: { image_ref: imageRef, question: "Describe the dominant visible color in one short sentence.", mode: "general" },
