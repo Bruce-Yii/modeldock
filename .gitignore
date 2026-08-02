@@ -3,3 +3,6 @@ node_modules/
 coverage/
 *.log
 .modeldock-media/
+
+# Generated shortcut (machine-local, absolute path)
+ModelDock.lnk
