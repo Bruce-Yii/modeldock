@@ -1,410 +1,242 @@
-let state = null;
+const $ = (id) => document.getElementById(id);
 
-const ids = [
-  "codexHome",
-  "currentProvider",
-  "currentModel",
-  "currentReasoning",
-  "presetSelect",
-  "providerId",
-  "providerName",
-  "model",
-  "reasoningEffort",
-  "verbosity",
-  "wireApi",
-  "wireApiHint",
-  "baseUrl",
-  "envKey",
-  "envKeyHint",
-  "profileName",
-  "aliasNotice",
-  "applyBtn",
-  "saveProfileBtn",
-  "providerModelStatus",
-  "providerModelFilter",
-  "providerModelSelect",
-  "providerModelOutput",
-  "testCwd",
-  "testPrompt",
-  "testOutput",
-  "restoreDefaultBtn",
-  "defaultRestoreStatus",
-  "configPreview",
-  "toast",
-  "restartNote"
-];
-
-const el = Object.fromEntries(ids.map((id) => [id, document.getElementById(id)]));
-let providerModels = [];
-
-async function api(path, options = {}) {
-  const response = await fetch(path, {
-    ...options,
-    headers: {
-      "content-type": "application/json",
-      ...(options.headers || {})
-    }
-  });
-  const data = await response.json();
-  if (!response.ok || data.error) throw new Error(data.error || response.statusText);
-  return data;
+function number(value) {
+  return new Intl.NumberFormat("en-US", { notation: value >= 100_000 ? "compact" : "standard", maximumFractionDigits: 1 }).format(value || 0);
 }
 
-function showToast(message, isError = false) {
-  el.toast.textContent = message;
-  el.toast.classList.toggle("error", isError);
-  el.toast.hidden = false;
-  window.clearTimeout(showToast.timer);
-  showToast.timer = window.setTimeout(() => {
-    el.toast.hidden = true;
-  }, 5200);
+function bytes(value) {
+  if (!value) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  const index = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1);
+  return `${(value / 1024 ** index).toFixed(index ? 1 : 0)} ${units[index]}`;
 }
 
-function activeFormData() {
-  const data = {
-    providerId: el.providerId.value,
-    providerName: el.providerName.value,
-    model: el.model.value,
-    reasoningEffort: el.reasoningEffort.value,
-    verbosity: el.verbosity.value,
-    wireApi: el.wireApi.value,
-    baseUrl: el.baseUrl.value,
-    envKey: el.envKey.value,
-    profileName: el.profileName.value
-  };
-  if (isModelDockProxy(data)) data.envKey = "";
-  return data;
+function duration(value) {
+  if (!value) return "0 ms";
+  if (value < 1_000) return `${Math.round(value)} ms`;
+  return `${(value / 1_000).toFixed(1)} s`;
 }
 
-const reservedProviderIds = new Set(["openai", "ollama", "lmstudio", "amazon-bedrock"]);
-
-function isModelDockProxy(data) {
-  const providerId = String(data.providerId || "").trim().toLowerCase();
-  const baseUrl = String(data.baseUrl || "").trim().toLowerCase();
-  return providerId.endsWith("_proxy") || baseUrl.includes("127.0.0.1") && baseUrl.includes("/proxy/");
+function uptime(value) {
+  const seconds = Math.floor((value || 0) / 1_000);
+  const hours = Math.floor(seconds / 3_600);
+  const minutes = Math.floor((seconds % 3_600) / 60);
+  return hours ? `${hours}h ${minutes}m` : `${minutes}m ${seconds % 60}s`;
 }
 
-function isReservedProviderOverride(data) {
-  return reservedProviderIds.has(data.providerId.trim().toLowerCase()) && Boolean(data.baseUrl.trim() || data.envKey.trim());
+function set(id, value) {
+  const node = $(id);
+  if (node) node.textContent = value;
 }
 
-function isDirectAnthropic(data) {
-  const providerId = data.providerId.trim().toLowerCase();
-  const baseUrl = data.baseUrl.trim().toLowerCase();
-  return providerId === "anthropic" || baseUrl.includes("api.anthropic.com");
+function percent(ok, total) {
+  return total ? Math.round((ok / total) * 100) : 0;
 }
 
-function isUnsupportedChatWire(data) {
-  return data.wireApi.trim().toLowerCase() === "chat";
+function health(id, bucket) {
+  const node = $(id);
+  const text = bucket.active ? `${bucket.active} active` : bucket.errors ? `${bucket.errors} errors` : bucket.total ? "healthy" : "idle";
+  node.textContent = text;
+  node.style.color = bucket.active ? "var(--amber)" : bucket.errors ? "#ff7b7b" : bucket.total ? "var(--green)" : "var(--muted)";
 }
 
-function wireEndpoint(wireApi) {
-  if (wireApi === "responses") return "/responses";
-  if (wireApi === "chat") return "/chat/completions";
-  return "Codex default";
-}
-
-function updateAliasNotice() {
-  const data = activeFormData();
-  const reservedOverride = isReservedProviderOverride(data);
-  const unsupportedAnthropic = isDirectAnthropic(data);
-  const unsupportedChat = isUnsupportedChatWire(data);
-  if (!reservedOverride && !unsupportedAnthropic && !unsupportedChat) {
-    el.aliasNotice.hidden = true;
-    el.aliasNotice.textContent = "";
-    el.applyBtn.disabled = false;
-    el.saveProfileBtn.disabled = false;
+function renderRecent(items) {
+  const body = $("recent-body");
+  body.replaceChildren();
+  if (!items.length) {
+    const row = document.createElement("tr");
+    const cell = document.createElement("td");
+    cell.colSpan = 5;
+    cell.className = "empty";
+    cell.textContent = "No requests yet.";
+    row.append(cell);
+    body.append(row);
     return;
   }
-  el.aliasNotice.hidden = false;
-  el.applyBtn.disabled = true;
-  el.saveProfileBtn.disabled = true;
-  if (reservedOverride) {
-    el.aliasNotice.textContent = [
-    `Provider ID "${data.providerId.trim()}" is reserved by Codex and cannot be overridden.`,
-    `Use a custom Provider ID such as "deepseek" or "${data.providerId.trim()}-custom" for this endpoint.`
-    ].join(" ");
-    return;
-  }
-  el.aliasNotice.textContent = [
-    "Direct Anthropic uses /v1/messages, which is not supported by this Codex wire API setting yet.",
-    "Use Anthropic through OpenRouter or another OpenAI-compatible gateway for now."
-  ].join(" ");
-  if (unsupportedChat) {
-    el.aliasNotice.textContent = [
-      "This provider expects /chat/completions, but the current Codex CLI no longer supports wire_api = chat.",
-      "Fetch Models is still available; Apply/Profile requires a /responses-compatible gateway or proxy."
-    ].join(" ");
-  }
-}
 
-function updateWireApiHint() {
-  el.wireApi.disabled = true;
-  const data = activeFormData();
-  if (isDirectAnthropic(data)) {
-    el.wireApiHint.textContent = "Direct Anthropic uses /v1/messages; Apply is blocked until Codex supports that wire API.";
-    return;
-  }
-  if (isUnsupportedChatWire(data)) {
-    el.wireApiHint.textContent = "Provider expects /chat/completions, but current Codex cannot apply chat wire configs.";
-    return;
-  }
-  el.wireApiHint.textContent = `Locked for this provider. Codex will call ${wireEndpoint(el.wireApi.value)}.`;
-}
-
-function updateEnvKeyState() {
-  const data = {
-    providerId: el.providerId.value,
-    baseUrl: el.baseUrl.value
-  };
-  if (isModelDockProxy(data)) {
-    el.envKey.value = "";
-    el.envKey.disabled = true;
-    el.envKey.placeholder = "Handled by ModelDock Runtime";
-    el.envKeyHint.textContent = "Proxy presets read provider keys from the ModelDock Runtime environment, not from Codex config.";
-    return;
-  }
-  el.envKey.disabled = false;
-  el.envKey.placeholder = "OPENROUTER_API_KEY";
-  el.envKeyHint.textContent = "Name of the API key environment variable Codex will use for this provider.";
-}
-
-function setForm(preset) {
-  el.providerId.value = preset.providerId || "";
-  el.providerName.value = preset.providerName || preset.providerId || "";
-  el.model.value = preset.model || "";
-  el.reasoningEffort.value = preset.reasoningEffort || "";
-  el.verbosity.value = preset.verbosity || "";
-  el.wireApi.value = preset.wireApi || "";
-  el.baseUrl.value = preset.baseUrl || "";
-  el.envKey.value = preset.envKey || "";
-  el.profileName.value = preset.id || preset.providerId || "";
-  clearProviderModels();
-  updateEnvKeyState();
-  updateWireApiHint();
-  updateAliasNotice();
-}
-
-function formFromCurrentConfig(data) {
-  const current = data.current || {};
-  const providerId = current.modelProvider || "openai";
-  const provider = (current.providers || []).find((item) => item.id === providerId) || {};
-  const preset =
-    (data.presets || []).find((item) => item.providerId === providerId && (!current.model || item.model === current.model)) ||
-    (data.presets || []).find((item) => item.providerId === providerId);
-  if (preset) {
-    return {
-      ...preset,
-      model: current.model || preset.model,
-      reasoningEffort: current.reasoningEffort || preset.reasoningEffort,
-      verbosity: current.verbosity || preset.verbosity
-    };
-  }
-  return {
-    id: "custom",
-    providerId,
-    providerName: provider.name || providerId,
-    model: current.model || "",
-    reasoningEffort: current.reasoningEffort || "",
-    verbosity: current.verbosity || "",
-    wireApi: provider.wireApi || "",
-    baseUrl: provider.baseUrl || "",
-    envKey: provider.envKey || ""
-  };
-}
-
-function syncFormWithCurrentConfig(data) {
-  const currentForm = formFromCurrentConfig(data);
-  if ([...el.presetSelect.options].some((option) => option.value === currentForm.id)) {
-    el.presetSelect.value = currentForm.id;
-  }
-  setForm(currentForm);
-}
-
-function clearProviderModels() {
-  providerModels = [];
-  el.providerModelSelect.innerHTML = "";
-  el.providerModelOutput.textContent = "No provider models fetched yet.";
-  el.providerModelStatus.textContent = "Fetch models from this preset's Base URL.";
-}
-
-function formatModelMeta(model) {
-  const bits = [];
-  if (model.contextLength) bits.push(`${Number(model.contextLength).toLocaleString()} ctx`);
-  if (model.promptPrice) bits.push(`in ${model.promptPrice}`);
-  if (model.completionPrice) bits.push(`out ${model.completionPrice}`);
-  return bits.join(" | ");
-}
-
-function renderProviderModels() {
-  const needle = el.providerModelFilter.value.trim().toLowerCase();
-  const selected = el.providerModelSelect.value;
-  el.providerModelSelect.innerHTML = "";
-  for (const model of providerModels) {
-    if (needle && !model.id.toLowerCase().includes(needle) && !model.name.toLowerCase().includes(needle)) continue;
-    const option = document.createElement("option");
-    option.value = model.id;
-    const meta = formatModelMeta(model);
-    option.textContent = meta ? `${model.id} (${meta})` : model.id;
-    el.providerModelSelect.append(option);
-  }
-  if (selected) el.providerModelSelect.value = selected;
-}
-
-async function fetchProviderModels() {
-  el.providerModelStatus.textContent = "Fetching provider models...";
-  el.providerModelOutput.textContent = "Fetching...";
-  const result = await api("/api/provider-models", {
-    method: "POST",
-    body: JSON.stringify(activeFormData())
-  });
-  providerModels = result.models || [];
-  renderProviderModels();
-  el.providerModelStatus.textContent = `${result.count} models from ${result.providerId}`;
-  el.providerModelOutput.textContent = JSON.stringify({
-    ok: result.ok,
-    providerId: result.providerId,
-    baseUrl: result.baseUrl,
-    count: result.count,
-    sample: providerModels.slice(0, 12).map((model) => ({
-      id: model.id,
-      contextLength: model.contextLength,
-      promptPrice: model.promptPrice,
-      completionPrice: model.completionPrice
-    }))
-  }, null, 2);
-}
-
-function renderBackups(backups) {
-  if (!backups.length) {
-    el.backupList.innerHTML = "<p>No backups yet.</p>";
-    return;
-  }
-  el.backupList.innerHTML = "";
-  for (const backup of backups) {
-    const item = document.createElement("div");
-    item.className = "backup-item";
-    const info = document.createElement("div");
-    const title = document.createElement("strong");
-    title.textContent = backup.name;
-    const meta = document.createElement("span");
-    meta.textContent = `${new Date(backup.mtimeMs).toLocaleString()} · ${formatBytes(backup.size)}`;
-    info.append(title, meta);
-    const button = document.createElement("button");
-    button.type = "button";
-    button.textContent = "Restore";
-    button.addEventListener("click", async () => {
-      if (!confirm(`Restore ${backup.name}? Current config will be backed up first.`)) return;
-      const result = await api("/api/restore", {
-        method: "POST",
-        body: JSON.stringify({ backupName: backup.name })
-      });
-      showToast(result.message);
-      await loadStatus();
+  for (const item of items.slice(0, 10)) {
+    const row = document.createElement("tr");
+    const target = item.model || item.requestedModel || item.operation || "—";
+    const detail =
+      item.error ||
+      item.query ||
+      (item.harnessToolRounds
+        ? `${item.harnessToolRounds} internal tool round${item.harnessToolRounds === 1 ? "" : "s"}`
+        : item.filteredTools
+          ? `${item.filteredTools} special tools replaced`
+          : item.imageRefs?.length
+            ? `${item.imageRefs.length} image ref`
+            : "—");
+    const values = [item.kind, target, item.status, duration(item.latencyMs), detail];
+    values.forEach((value, index) => {
+      const cell = document.createElement("td");
+      if (index === 2) {
+        const status = document.createElement("span");
+        status.className = `trace-status ${item.status}`;
+        status.append(document.createElement("i"), document.createTextNode(item.status));
+        cell.append(status);
+      } else {
+        cell.textContent = String(value ?? "—");
+        cell.title = cell.textContent;
+      }
+      row.append(cell);
     });
-    item.append(info, button);
-    el.backupList.append(item);
+    body.append(row);
   }
 }
 
-function renderStatus(data) {
-  state = data;
-  el.codexHome.textContent = data.realCodexHome || data.codexHome;
-  el.currentProvider.textContent = data.current.modelProvider || "(default)";
-  el.currentModel.textContent = data.current.model || "(default)";
-  el.currentReasoning.textContent = data.current.reasoningEffort || "(default)";
-  el.restartNote.textContent = data.restartRequiredNote;
-  el.configPreview.textContent = data.configText || "";
-  el.testCwd.value ||= data.realCodexHome || data.codexHome;
-  el.defaultRestoreStatus.textContent = `${data.defaultRestore?.label || "OpenAI Default"} / ${data.defaultRestore?.model || "gpt-5.5"}`;
-  updateEnvKeyState();
-  updateWireApiHint();
-  updateAliasNotice();
+function render(data) {
+  const ready = data.ready;
+  const status = $("live-status");
+  status.className = `status-pill ${ready ? "ready" : "error"}`;
+  status.querySelector("strong").textContent = ready ? "Gate ready" : "Token missing";
+  set("uptime", `Uptime ${uptime(data.uptimeMs)}`);
+  set("main-model", data.config.mainModel);
 
-  el.presetSelect.innerHTML = "";
-  for (const preset of data.presets) {
-    const option = document.createElement("option");
-    option.value = preset.id;
-    option.textContent = preset.label;
-    el.presetSelect.append(option);
+  const responses = data.responses;
+  const success = percent(responses.ok, responses.total);
+  set("active-requests", `${responses.active} active`);
+  set("requests-total", number(responses.total));
+  set("requests-success", `${success}%`);
+  set("requests-latency", duration(responses.averageLatencyMs));
+  $("requests-success-meter").style.width = `${success}%`;
+
+  const inputTokens = responses.inputTokens || 0;
+  const outputTokens = responses.outputTokens || 0;
+  const tokens = inputTokens + outputTokens;
+  set("tokens-total", number(tokens));
+  set("tokens-input", number(inputTokens));
+  set("tokens-output", number(outputTokens));
+  $("token-meter-input").style.width = `${tokens ? Math.round((inputTokens / tokens) * 100) : 0}%`;
+
+  const filtered = responses.filteredToolSearch + responses.filteredWebSearch;
+  set("filtered-total", number(filtered));
+  set("filtered-tool", number(responses.filteredToolSearch));
+  set("filtered-web", number(responses.filteredWebSearch));
+  set("rewritten-choice", number(responses.rewrittenToolChoice));
+  set("bytes-total", bytes(responses.bytesIn + responses.bytesOut));
+  set("bytes-in", bytes(responses.bytesIn));
+  set("bytes-out", bytes(responses.bytesOut));
+  set("stream-count", number(responses.streaming));
+
+  health("web-health", data.web);
+  health("vision-health", data.vision);
+  set("web-total", number(data.web.total));
+  set("web-errors", number(data.web.errors));
+  set("web-latency", duration(data.web.averageLatencyMs));
+  set("vision-model", data.config.visionModel);
+  set("vision-total", number(data.vision.total));
+  set("vision-fallback", number(data.vision.fallback));
+  set("vision-latency", duration(data.vision.averageLatencyMs));
+  set("media-entries", number(data.media.entries));
+  set("media-bytes", bytes(data.media.bytes));
+  set("media-attached", number(responses.imageAttachments));
+
+  set("cfg-bind", data.config.bind);
+  set("cfg-go", data.config.goBaseUrl);
+  set("cfg-main", data.config.mainModel);
+  set("cfg-vision", data.config.visionModel);
+  set("cfg-fallback", data.config.visionFallbackModel);
+  set("cfg-exa", data.config.exaMcpUrl);
+  renderRecent(data.recent || []);
+}
+
+let switchBusy = false;
+let switchState = null;
+
+function renderConfigSwitch(data) {
+  switchState = data;
+  const toggle = $("proxy-toggle");
+  toggle.checked = Boolean(data.enabled);
+  toggle.disabled = switchBusy;
+  set("switch-label", data.enabled ? "On" : "Off");
+  set(
+    "switch-description",
+    data.enabled
+      ? "Codex is configured to use OpenCode Go through the local ModelDock service."
+      : "Codex is using its own configuration. Enabling backs it up and selects the local ModelDock provider.",
+  );
+  set("switch-config-path", data.configPath || "—");
+  $("switch-config-path").title = data.configPath || "";
+  set("switch-backup-path", data.backupPath || "created when enabled");
+  $("switch-backup-path").title = data.backupPath || "";
+  const message = $("switch-message");
+  message.className = "";
+  if (data.stateError) {
+    message.textContent = `State error: ${data.stateError}`;
+    message.className = "error";
+  } else if (data.drifted) {
+    message.textContent = "Config changed outside ModelDock; automatic restore is locked.";
+    message.className = "error";
+  } else {
+    message.textContent = data.enabled ? "Backup ready · provider active" : "Default remains off";
   }
-  syncFormWithCurrentConfig(data);
+  $("restart-banner").hidden = !data.restartRequired;
 }
 
-async function loadStatus() {
-  renderStatus(await api("/api/status"));
+async function pollConfig() {
+  const response = await fetch("/api/config", { cache: "no-store" });
+  if (!response.ok) throw new Error(`Config status ${response.status}`);
+  renderConfigSwitch(await response.json());
 }
 
-async function applyConfig() {
-  const result = await api("/api/apply", {
-    method: "POST",
-    body: JSON.stringify(activeFormData())
-  });
-  showToast(result.message);
-  await loadStatus();
+async function configAction(action) {
+  switchBusy = true;
+  $("proxy-toggle").disabled = true;
+  set("switch-message", "Updating Codex config…");
+  try {
+    const response = await fetch(`/api/config/${action}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.error?.message || `Config update ${response.status}`);
+    renderConfigSwitch(body);
+  } catch (error) {
+    const message = $("switch-message");
+    message.textContent = error.message;
+    message.className = "error";
+    if (switchState) $("proxy-toggle").checked = Boolean(switchState.enabled);
+  } finally {
+    switchBusy = false;
+    $("proxy-toggle").disabled = false;
+  }
 }
 
-async function saveProfile() {
-  const result = await api("/api/profile", {
-    method: "POST",
-    body: JSON.stringify(activeFormData())
-  });
-  showToast(`${result.message} ${result.command}`);
-  await loadStatus();
+async function poll() {
+  const response = await fetch("/api/status", { cache: "no-store" });
+  if (!response.ok) throw new Error(`Status ${response.status}`);
+  render(await response.json());
 }
 
-async function restoreDefault() {
-  if (!confirm("Restore OpenAI default baseline? Current config will be backed up first.")) return;
-  const result = await api("/api/restore-default", {
-    method: "POST",
-    body: "{}"
-  });
-  showToast(result.message);
-  await loadStatus();
-}
+const events = new EventSource("/api/events");
+events.onopen = () => set("event-connection", "SSE connected");
+events.onmessage = (event) => render(JSON.parse(event.data));
+events.onerror = () => {
+  set("event-connection", "SSE reconnecting");
+  poll().catch(() => {});
+};
 
-async function runTest(kind) {
-  el.testOutput.textContent = `Running ${kind}...`;
-  const result = await api("/api/test", {
-    method: "POST",
-    body: JSON.stringify({
-      kind,
-      cwd: el.testCwd.value,
-      prompt: el.testPrompt.value
-    })
-  });
-  el.testOutput.textContent = JSON.stringify(result, null, 2);
-}
-
-document.getElementById("refreshBtn").addEventListener("click", () => loadStatus().catch((error) => showToast(error.message, true)));
-el.applyBtn.addEventListener("click", () => applyConfig().catch((error) => showToast(error.message, true)));
-el.saveProfileBtn.addEventListener("click", () => saveProfile().catch((error) => showToast(error.message, true)));
-el.restoreDefaultBtn.addEventListener("click", () => restoreDefault().catch((error) => showToast(error.message, true)));
-document.getElementById("fetchProviderModelsBtn").addEventListener("click", () => fetchProviderModels().catch((error) => {
-  el.providerModelStatus.textContent = "Provider model fetch failed.";
-  el.providerModelOutput.textContent = String(error.stack || error.message || error);
-  showToast(error.message, true);
-}));
-el.providerModelFilter.addEventListener("input", renderProviderModels);
-el.providerModelSelect.addEventListener("change", () => {
-  if (el.providerModelSelect.value) el.model.value = el.providerModelSelect.value;
+poll().catch(() => set("event-connection", "Status unavailable"));
+pollConfig().catch((error) => {
+  const message = $("switch-message");
+  message.textContent = error.message;
+  message.className = "error";
 });
-["providerId", "providerName", "baseUrl", "envKey"].forEach((id) => {
-  el[id].addEventListener("input", () => {
-    updateEnvKeyState();
-    updateWireApiHint();
-    updateAliasNotice();
-  });
-});
-el.presetSelect.addEventListener("change", () => {
-  const preset = state?.presets.find((item) => item.id === el.presetSelect.value);
-  if (preset) setForm(preset);
-});
-document.querySelectorAll("[data-test]").forEach((button) => {
-  button.addEventListener("click", () => runTest(button.dataset.test).catch((error) => {
-    el.testOutput.textContent = String(error.stack || error.message || error);
-    showToast(error.message, true);
-  }));
+setInterval(() => poll().catch(() => {}), 15_000);
+setInterval(() => pollConfig().catch(() => {}), 15_000);
+
+$("proxy-toggle").addEventListener("change", async (event) => {
+  const enabling = event.target.checked;
+  const prompt = enabling
+    ? "Enable OpenCode Go for Codex? ModelDock will back up the current user config, replace the active model/provider settings, and require a full Codex restart."
+    : "Disable OpenCode Go and restore the backed-up Codex config? A full Codex restart will be required.";
+  if (!window.confirm(prompt)) {
+    event.target.checked = !enabling;
+    return;
+  }
+  await configAction(enabling ? "enable" : "disable");
 });
 
-loadStatus().catch((error) => showToast(error.message, true));
+$("restart-ack").addEventListener("click", () => configAction("restart-ack"));

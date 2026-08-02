@@ -1,18 +1,29 @@
 {
-  "name": "modeldock",
+  "name": "modeldock-opencode-go-gate",
   "version": "0.1.0",
   "private": true,
-  "description": "Local Codex provider and model configuration workbench.",
   "type": "module",
-  "scripts": {
-    "start": "node server.mjs",
-    "check": "node --check server.mjs",
-    "runtime:status": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/runtime.ps1 status",
-    "runtime:start": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/runtime.ps1 start",
-    "runtime:install": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/runtime.ps1 install",
-    "runtime:stop": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/runtime.ps1 stop"
-  },
+  "description": "A narrow Codex Responses gate for OpenCode Go with monitored local web and vision tool loops.",
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/server.mjs",
+    "dev": "node --watch src/server.mjs",
+    "test": "node --test test/*.test.mjs src/config-switcher.test.mjs src/media-store.test.mjs src/metrics.test.mjs src/transform.test.mjs src/upstreams.test.mjs src/server.test.mjs",
+    "probe:live": "node scripts/live-probe.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/express": "2.0.0",
+    "@modelcontextprotocol/node": "2.0.0",
+    "@modelcontextprotocol/server": "2.0.0",
+    "express": "5.2.1",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "2.0.0"
+  },
+  "overrides": {
+    "@hono/node-server": "2.0.12"
   }
 }

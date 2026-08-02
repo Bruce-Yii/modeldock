@@ -1,146 +1,125 @@
-# ModelDock
+# ModelDock OpenCode Go Gate
 
-ModelDock is a local provider and model workbench for Codex. The first version is intentionally small: it edits Codex configuration files, creates backups, restores backups, and runs a few local Codex smoke tests.
+A deliberately narrow local bridge that lets the Codex harness use OpenCode Go without sending the two hosted-tool schemas that the Go Responses façade rejects.
 
-## Run
+It provides three surfaces from one loopback-only Node process:
 
-Recommended on Windows: install the runtime as an independent user startup process. This keeps the local proxy alive across Codex Desktop restarts.
+- `POST /v1/responses` — filters incompatible hosted tools, rewrites image attachments to opaque references, forwards requests to OpenCode Go, and meters usage.
+- `POST /mcp` — optional diagnostic/reuse surface exposing `web_search_exa` and `vision_inspect` over Streamable HTTP MCP.
+- `GET /` — a small operational dashboard for request, token, byte, schema-filter, search, vision, and fallback metrics.
 
-```powershell
-cd D:\projects\modeldock
-powershell -NoProfile -ExecutionPolicy Bypass -File tools\runtime.ps1 install
-```
-
-Check it:
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File tools\runtime.ps1 status
-```
-
-Start or stop it manually:
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File tools\runtime.ps1 start
-powershell -NoProfile -ExecutionPolicy Bypass -File tools\runtime.ps1 stop
-```
-
-The installer writes a startup launcher to `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\ModelDockRuntime.cmd`.
-The runtime logs to `%LOCALAPPDATA%\ModelDock\runtime.log`.
-
-Development-only foreground run:
-
-```powershell
-cd D:\projects\modeldock
-node server.mjs
-```
-
-Open:
+## Runtime flow
 
 ```text
-http://127.0.0.1:8765
+Codex ──Responses──> local gate ──Responses──> OpenCode Go / deepseek-v4-flash
+                          │  internal standard-function loop
+                          ├──> Exa hosted MCP
+                          └──> OpenCode Go / gpt-5.6-luna
+                                                └─ fallback: kimi-k2.5
 ```
 
-If another app uses the port:
+The service does not implement a search engine, a Chat Completions converter, provider management, or a general replacement for Codex `tool_search`.
+
+## Requirements
+
+- Node.js 22 or newer.
+- An OpenCode Go bearer token.
+- Codex configured to use the custom local Responses provider.
+
+## Start
 
 ```powershell
-$env:MODELDOCK_PORT = "8766"
-node server.mjs
+npm install
+Copy-Item .env.example .env
 ```
 
-## What It Edits
-
-ModelDock reads the Codex home from `CODEX_HOME`, or falls back to `%USERPROFILE%\.codex`.
-For testing, `MODELDOCK_CODEX_HOME` overrides both without changing your real Codex environment.
-
-It can:
-
-- Save a named profile file such as `$CODEX_HOME\openrouter.config.toml`.
-- Apply the selected preset into `$CODEX_HOME\config.toml`.
-- Back up `config.toml` before each apply or restore.
-- Restore a previous backup.
-- Fetch provider model ids from an OpenAI-compatible `/models` endpoint.
-
-Codex Desktop should be restarted after provider/model changes.
-
-## OpenRouter Flow
-
-Set the API key in the same environment that starts ModelDock:
+Set `OPENCODE_GO_TOKEN` in `.env`, then:
 
 ```powershell
-$env:OPENROUTER_API_KEY = "..."
-node server.mjs
+npm start
 ```
 
-Then choose the OpenRouter preset, click `Fetch Provider Models`, select a model, and then use `Apply to Codex` or `Save Profile`.
+Open [http://127.0.0.1:4097](http://127.0.0.1:4097). The server intentionally refuses non-loopback bind addresses.
 
-`Fetch Provider Models` only calls `/models`. It is a model-name picker, not a compatibility guarantee.
+The **Use OpenCode Go in Codex** switch is off by default. When enabled from the dashboard, ModelDock:
 
-## Provider Presets
+1. makes a timestamped, byte-for-byte backup beside the user-level `~/.codex/config.toml`;
+2. changes only the top-level model/provider/web defaults and adds `[model_providers.modeldock_go]`;
+3. preserves other Codex settings such as plugins, MCP servers, projects, sandbox settings, and features;
+4. displays a persistent **Restart required** notice.
 
-The preset list includes OpenRouter, DeepSeek, Kimi, Anthropic, Ollama, LM Studio, and Custom.
-For hosted providers, set the API key in the environment that starts ModelDock:
+Disable the switch to restore the exact backup, then restart Codex again. If the managed config was edited outside ModelDock, automatic restore is locked rather than overwriting those edits. Switch state is stored under `~/.codex/modeldock/`; neither config contents nor tokens are returned to the browser.
+
+[`config/codex.example.toml`](config/codex.example.toml) remains available as a manual fallback. Its token is a harmless local placeholder; the service uses only `OPENCODE_GO_TOKEN` for upstream Authorization.
+
+## What the gate changes
+
+For each Responses request, the gate:
+
+1. normalizes string `input` to a Responses message array;
+2. replaces rejected `tool_search`/`web_search` capability with standard `harness_web_search`;
+3. changes `tool_choice = "required"` to `"auto"` because Go thinking mode rejects `required`;
+4. sets `parallel_tool_calls = false` so Go thinking-mode tool state can be continued reliably;
+5. folds completed tool call/output pairs into clearly marked untrusted-data messages, avoiding hidden thinking state that Go's Responses façade does not return;
+6. drops assistant messages that carry neither text content nor tool calls — the empty placeholder shells Codex emits during tool loops, which Go's façade rejects;
+7. adds a neutral, non-empty `reasoning_content = "tool call"` compatibility marker when Go's façade omitted its hidden thinking field;
+8. converts `input_image` data into an opaque, content-addressed `img_…` reference for DeepSeek;
+9. injects `harness_vision_inspect` when an image was attached and preserves other ordinary `function`, `custom`, and `namespace` tools;
+10. executes harness functions locally and feeds their untrusted results back to DeepSeek for up to four internal rounds;
+11. forwards non-streaming JSON directly; for `stream: true`, requests buffered JSON from Go and emits the complete Responses SSE lifecycle Codex expects.
+
+The buffered stream adapter is intentional. Go's current stream can omit item lifecycle events that Codex requires before text deltas. The response remains Responses-native—there is no Chat Completions translation—but the first token arrives only after Go has completed the response. The dashboard marks these requests as `buffered`.
+
+The image reference is stable for identical content and remains only in an in-memory, TTL-bound cache. DeepSeek calls `harness_vision_inspect`; the gate sends the original image to Luna and returns the textual result through its internal tool loop.
+
+The local Codex catalog advertises `text + image` because the gate itself accepts images. The gate always removes image content before the DeepSeek request and exposes only the opaque reference plus `harness_vision_inspect`.
+
+## Harness tools
+
+DeepSeek sees `harness_web_search` and, when an image exists, `harness_vision_inspect` as ordinary Responses functions. The gate executes them; Codex does not need an MCP server entry.
+
+The same backends are also exposed at `/mcp` as `web_search_exa` and `vision_inspect` for direct testing or other local clients.
+
+### `harness_web_search` / `web_search_exa`
+
+Calls the same unauthenticated Exa hosted MCP route used by OpenCode. `EXA_API_KEY` is optional. Search output remains untrusted external content and should be treated as evidence, never as developer instructions.
+
+### `harness_vision_inspect` / `vision_inspect`
+
+Inputs:
+
+- `image_ref` — reference inserted by the Responses gate;
+- `compare_image_ref` — optional second reference;
+- `question`;
+- `mode` — `general`, `ocr`, `ui`, `chart`, or `compare`.
+
+The default model is `gpt-5.6-luna`. HTTP errors, timeouts, invalid JSON, and empty output trigger the `kimi-k2.5` fallback.
+
+## Verification
+
+Local deterministic tests:
 
 ```powershell
-$env:OPENROUTER_API_KEY = "..."
-$env:DEEPSEEK_API_KEY = "..."
-$env:MOONSHOT_API_KEY = "..."
-$env:ANTHROPIC_API_KEY = "..."
-node server.mjs
+npm test
 ```
 
-Default base URLs:
+Real Go, Exa, SSE, MCP, and vision calls:
 
-- OpenRouter: `https://openrouter.ai/api/v1`
-- DeepSeek: `http://127.0.0.1:8765/proxy/deepseek/v1`
-- Kimi: `http://127.0.0.1:8765/proxy/kimi/v1`
-- Anthropic: `https://api.anthropic.com`
+```powershell
+npm run probe:live
+```
 
-Default Codex wire APIs:
+The live probe prints only short outputs and counters. It never prints the bearer token.
 
-- OpenAI: `responses` (`/responses`)
-- OpenRouter: `responses` (`/responses`, OpenRouter beta Responses API)
-- DeepSeek: `responses` through ModelDock Runtime
-- Kimi: `responses` through ModelDock Runtime
-- Ollama and LM Studio: `chat` (`/chat/completions`)
+## Security boundaries
 
-The Wire API field is locked in the UI because it determines the HTTP path Codex calls. A wrong value can make Codex call an endpoint that the provider does not implement, such as DeepSeek `/responses`.
+- Binds only to `127.0.0.1`, `localhost`, or `::1`.
+- Uses MCP SDK Host and Origin validation against DNS rebinding.
+- Never forwards the incoming local Authorization header upstream.
+- Never renders prompts, image data, or secrets on the dashboard.
+- Config mutation endpoints require JSON and reject browser requests from other origins; the service remains loopback-only.
+- Every enable operation creates a new backup, and restore refuses to overwrite a config that changed after activation.
+- Accepts image data URLs and non-loopback HTTPS image URLs; rejects loopback and plain HTTP image URLs.
+- Limits image size, cache entries, cache lifetime, and upstream timeouts.
 
-Current Codex CLI builds reject `wire_api = "chat"`, so chat-only providers such as Ollama and LM Studio are blocked from Apply/Profile for now. DeepSeek and Kimi use the ModelDock Runtime automatically.
-
-## ModelDock Chat Proxy
-
-ModelDock routes DeepSeek and Kimi through local compatibility endpoints:
-
-- DeepSeek: `http://127.0.0.1:8765/proxy/deepseek/v1`
-- Kimi: `http://127.0.0.1:8765/proxy/kimi/v1`
-
-These presets expose `wire_api = "responses"` to Codex, then ModelDock translates `POST /responses` into the provider's `POST /chat/completions` upstream call and wraps the result as Responses SSE events when Codex asks for streaming. The remote API key stays in the ModelDock process environment, so the generated Codex provider block does not need an `env_key`.
-
-The proxy requires ModelDock to keep running while Codex uses that provider. Direct chat providers still cannot be applied unless they go through this `/responses` adapter.
-
-### Model Adapters
-
-Provider/model-specific behavior lives in adapter profiles under `adapters/`.
-
-- `adapters/deepseek-v4.json`: disables DeepSeek thinking for tool loops, uses the compact coding tool policy, and keeps DeepSeek-specific fallback parsers for XML/DSML/markdown pseudo tool calls.
-- `adapters/kimi-k3.json`: uses standard OpenAI-style `tools`/`tool_calls`, sets `reasoning_effort = "max"`, and preserves Kimi K3 `reasoning_content` across tool-call loops.
-
-Adapters describe model behavior; the shared proxy code handles the common Responses-to-Chat translation. This keeps model-specific tool semantics out of the generic compatibility layer.
-
-Anthropic uses `x-api-key` and `/v1/models` for model discovery. Direct Anthropic generation uses `/v1/messages`, which is not supported by ModelDock's Codex `responses`/`chat` wire setting yet, so direct Anthropic Apply/Profile actions are blocked for now. Use Anthropic through OpenRouter or another OpenAI-compatible gateway.
-
-Codex reserves built-in provider IDs such as `openai`, `ollama`, `lmstudio`, and `amazon-bedrock`. Do not reuse those IDs for a custom endpoint. For example, use `deepseek` or `openai-custom`, not `openai`, when pointing at DeepSeek.
-
-## Smoke Tests
-
-The test panel runs:
-
-- `codex doctor --summary --ascii --no-color`
-- `codex debug models`
-- `codex exec --ask-for-approval never --sandbox read-only`
-
-The small exec test may call the selected model provider and can incur provider-side cost.
-
-## Current Scope
-
-This is not a full TOML IDE yet. It safely changes the key Codex model/provider fields and rewrites the selected custom provider block. It preserves unrelated config sections.
+The dashboard is operational telemetry, not an authentication boundary. Do not expose it through a public reverse proxy.

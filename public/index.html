@@ -1,176 +1,158 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>ModelDock</title>
+    <title>ModelDock · OpenCode Go Gate</title>
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
     <main class="shell">
       <header class="topbar">
         <div>
-          <h1>ModelDock</h1>
-          <p>Local provider and model workbench for Codex config.</p>
+          <p class="eyebrow">CODEX HARNESS BRIDGE</p>
+          <h1>OpenCode Go Gate</h1>
+          <p class="subtitle">Responses forwarding, Exa search and Luna vision in one local process.</p>
         </div>
-        <button id="refreshBtn" type="button">Refresh</button>
+        <div class="status-stack">
+          <div id="live-status" class="status-pill waiting"><span></span><strong>Connecting</strong></div>
+          <p id="uptime">Uptime —</p>
+        </div>
       </header>
 
-      <section class="status-grid">
-        <div>
-          <span>Codex Home</span>
-          <strong id="codexHome">...</strong>
+      <section class="route-card">
+        <div class="route-node codex"><span>01</span><strong>Codex</strong><small>Responses client</small></div>
+        <div class="route-line"><i></i><em>/v1/responses</em></div>
+        <div class="route-node gate"><span>02</span><strong>Gate</strong><small>filter · meter · stream</small></div>
+        <div class="route-line"><i></i><em>Responses façade</em></div>
+        <div class="route-node go"><span>03</span><strong>OpenCode Go</strong><small id="main-model">deepseek-v4-flash</small></div>
+      </section>
+
+      <section class="service-control">
+        <div class="control-main">
+          <div class="control-copy">
+            <p class="eyebrow">CODEX CONFIG SWITCH</p>
+            <div class="control-title"><h2>Use OpenCode Go in Codex</h2><span id="switch-default" class="default-pill">DEFAULT · OFF</span></div>
+            <p id="switch-description">Codex is using its own configuration. Enabling backs it up and selects the local ModelDock provider.</p>
+          </div>
+          <label class="toggle" for="proxy-toggle">
+            <input id="proxy-toggle" type="checkbox" role="switch" aria-label="Use OpenCode Go in Codex" />
+            <span class="toggle-track"><i></i></span>
+            <b id="switch-label">Off</b>
+          </label>
         </div>
-        <div>
-          <span>Current Provider</span>
-          <strong id="currentProvider">...</strong>
+        <div class="control-defaults" aria-label="OpenCode Go defaults">
+          <div><span>Main model</span><strong>DeepSeek V4 Flash</strong></div>
+          <div><span>Vision</span><strong>Luna · Kimi fallback</strong></div>
+          <div><span>Web</span><strong>Exa hosted MCP</strong></div>
+          <div><span>Streaming</span><strong>Buffered Responses SSE</strong></div>
         </div>
-        <div>
-          <span>Current Model</span>
-          <strong id="currentModel">...</strong>
-        </div>
-        <div>
-          <span>Reasoning</span>
-          <strong id="currentReasoning">...</strong>
+        <div class="control-meta">
+          <span>Config <code id="switch-config-path">—</code></span>
+          <span>Backup <code id="switch-backup-path">created when enabled</code></span>
+          <strong id="switch-message" aria-live="polite"></strong>
         </div>
       </section>
 
-      <section class="layout">
-        <form id="configForm" class="panel">
-          <div class="panel-title">
-            <h2>Preset Editor</h2>
-            <span id="restartNote">Restart Codex after applying changes.</span>
-          </div>
-
-          <label>
-            Preset
-            <select id="presetSelect"></select>
-          </label>
-
-          <div class="form-grid">
-            <label>
-              Provider ID
-              <input id="providerId" required placeholder="openrouter" />
-            </label>
-            <label>
-              Provider Name
-              <input id="providerName" placeholder="OpenRouter" />
-            </label>
-            <label>
-              Model
-              <input id="model" placeholder="openai/gpt-5.5" />
-            </label>
-            <label>
-              Reasoning Effort
-              <select id="reasoningEffort">
-                <option value="">default</option>
-                <option value="low">low</option>
-                <option value="medium">medium</option>
-                <option value="high">high</option>
-                <option value="xhigh">xhigh</option>
-              </select>
-            </label>
-            <label>
-              Verbosity
-              <select id="verbosity">
-                <option value="">default</option>
-                <option value="low">low</option>
-                <option value="medium">medium</option>
-                <option value="high">high</option>
-              </select>
-            </label>
-            <label>
-              Wire API
-              <select id="wireApi" disabled>
-                <option value="">default</option>
-                <option value="responses">responses</option>
-                <option value="chat">chat</option>
-              </select>
-              <span id="wireApiHint" class="field-note">Selected automatically by provider.</span>
-            </label>
-            <label class="wide">
-              Base URL
-              <input id="baseUrl" placeholder="https://openrouter.ai/api/v1" />
-            </label>
-            <label>
-              API Key Env
-              <input id="envKey" placeholder="OPENROUTER_API_KEY" />
-              <span id="envKeyHint" class="field-note">Name of the API key environment variable.</span>
-            </label>
-            <label>
-              Profile Name
-              <input id="profileName" placeholder="openrouter-fast" />
-            </label>
-          </div>
-
-          <div id="aliasNotice" class="alias-notice" hidden></div>
-
-          <div class="model-picker">
-            <div class="panel-title compact">
-              <h2>Provider Models</h2>
-              <span id="providerModelStatus">Fetch models from this preset's Base URL.</span>
-            </div>
-            <div class="actions model-actions">
-              <button type="button" id="fetchProviderModelsBtn">Fetch Provider Models</button>
-            </div>
-            <div class="model-browser">
-              <input id="providerModelFilter" placeholder="Filter model ids..." />
-              <select id="providerModelSelect" size="8"></select>
-            </div>
-            <pre id="providerModelOutput" class="mini-output">No provider models fetched yet.</pre>
-          </div>
-
-          <div class="actions">
-            <button type="button" id="saveProfileBtn">Save Profile</button>
-            <button type="button" id="applyBtn" class="primary">Apply to Codex</button>
-          </div>
-        </form>
-
-        <section class="panel">
-          <div class="panel-title">
-            <h2>Smoke Tests</h2>
-            <span>Runs local Codex commands.</span>
-          </div>
-          <label>
-            Test CWD
-            <input id="testCwd" />
-          </label>
-          <label>
-            Exec Prompt
-            <input id="testPrompt" value="Reply exactly: MODELDOCK_OK" />
-          </label>
-          <div class="actions">
-            <button type="button" data-test="doctor">codex doctor</button>
-            <button type="button" data-test="models">debug models</button>
-            <button type="button" data-test="exec">small exec</button>
-          </div>
-          <pre id="testOutput" class="output">No tests run yet.</pre>
-        </section>
+      <section id="restart-banner" class="restart-banner" hidden>
+        <div><span>RESTART REQUIRED</span><strong>Codex configuration changed. Fully restart Codex before starting another task.</strong></div>
+        <button id="restart-ack" type="button">I restarted Codex</button>
       </section>
 
-      <section class="layout bottom">
-        <section class="panel">
-          <div class="panel-title">
-            <h2>Default</h2>
-            <span>Restore the 5:09 PM OpenAI baseline.</span>
-          </div>
-          <p id="defaultRestoreStatus" class="restore-copy">OpenAI / gpt-5.5</p>
-          <div class="actions">
-            <button type="button" id="restoreDefaultBtn">Restore Default</button>
-          </div>
-        </section>
-
-        <section class="panel">
-          <div class="panel-title">
-            <h2>config.toml Preview</h2>
-            <span>Read-only preview.</span>
-          </div>
-          <pre id="configPreview" class="config-preview"></pre>
-        </section>
+      <section class="metric-grid">
+        <article class="metric-card accent-blue">
+          <div class="metric-head"><span>Requests</span><b id="active-requests">0 active</b></div>
+          <strong class="metric-value" id="requests-total">0</strong>
+          <div class="meter"><i id="requests-success-meter"></i></div>
+          <p><span id="requests-success">0%</span> successful · <span id="requests-latency">0 ms</span> avg</p>
+        </article>
+        <article class="metric-card accent-violet">
+          <div class="metric-head"><span>Tokens</span><b>forwarded</b></div>
+          <strong class="metric-value" id="tokens-total">0</strong>
+          <div class="split-stats"><span><i class="dot input"></i><b id="tokens-input">0</b> input</span><span><i class="dot output"></i><b id="tokens-output">0</b> output</span></div>
+          <div class="meter token"><i id="token-meter-input"></i></div>
+        </article>
+        <article class="metric-card accent-amber">
+          <div class="metric-head"><span>Schema shield</span><b>Go 400 prevention</b></div>
+          <strong class="metric-value" id="filtered-total">0</strong>
+          <div class="split-stats"><span><b id="filtered-tool">0</b> tool_search</span><span><b id="filtered-web">0</b> web_search</span></div>
+          <p><span id="rewritten-choice">0</span> required → auto rewrites</p>
+        </article>
+        <article class="metric-card accent-green">
+          <div class="metric-head"><span>Transfer</span><b>SSE + JSON</b></div>
+          <strong class="metric-value" id="bytes-total">0 B</strong>
+          <div class="split-stats"><span><b id="bytes-in">0 B</b> in</span><span><b id="bytes-out">0 B</b> out</span></div>
+          <p><span id="stream-count">0</span> streamed responses</p>
+        </article>
       </section>
 
-      <div id="toast" class="toast" hidden></div>
+      <section class="tool-grid">
+        <article class="tool-card">
+          <div class="tool-icon search">⌕</div>
+          <div class="tool-copy">
+            <div><h2>Exa Web Search</h2><span id="web-health" class="mini-pill">idle</span></div>
+            <p>Hosted MCP routed through the local meter.</p>
+          </div>
+          <dl>
+            <div><dt>Calls</dt><dd id="web-total">0</dd></div>
+            <div><dt>Errors</dt><dd id="web-errors">0</dd></div>
+            <div><dt>Average</dt><dd id="web-latency">0 ms</dd></div>
+          </dl>
+        </article>
+        <article class="tool-card">
+          <div class="tool-icon vision">◉</div>
+          <div class="tool-copy">
+            <div><h2>Vision Inspect</h2><span id="vision-health" class="mini-pill">idle</span></div>
+            <p><span id="vision-model">gpt-5.6-luna</span> with Kimi fallback.</p>
+          </div>
+          <dl>
+            <div><dt>Calls</dt><dd id="vision-total">0</dd></div>
+            <div><dt>Fallbacks</dt><dd id="vision-fallback">0</dd></div>
+            <div><dt>Average</dt><dd id="vision-latency">0 ms</dd></div>
+          </dl>
+        </article>
+        <article class="tool-card compact">
+          <div class="tool-icon media">▧</div>
+          <div class="tool-copy">
+            <div><h2>Media cache</h2><span class="mini-pill">memory</span></div>
+            <p>Opaque, TTL-bound image references.</p>
+          </div>
+          <dl>
+            <div><dt>Images</dt><dd id="media-entries">0</dd></div>
+            <div><dt>Bytes</dt><dd id="media-bytes">0 B</dd></div>
+            <div><dt>Attached</dt><dd id="media-attached">0</dd></div>
+          </dl>
+        </article>
+      </section>
+
+      <section class="lower-grid">
+        <article class="panel recent-panel">
+          <div class="panel-head">
+            <div><p class="eyebrow">LIVE TRACE</p><h2>Recent activity</h2></div>
+            <span id="event-connection">SSE connecting</span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Type</th><th>Target</th><th>Status</th><th>Latency</th><th>Detail</th></tr></thead>
+              <tbody id="recent-body"><tr><td colspan="5" class="empty">No requests yet.</td></tr></tbody>
+            </table>
+          </div>
+        </article>
+
+        <aside class="panel config-panel">
+          <div class="panel-head"><div><p class="eyebrow">RUNTIME</p><h2>Forwarding map</h2></div></div>
+          <dl class="config-list">
+            <div><dt>Bind</dt><dd id="cfg-bind">—</dd></div>
+            <div><dt>Go upstream</dt><dd id="cfg-go">—</dd></div>
+            <div><dt>Main model</dt><dd id="cfg-main">—</dd></div>
+            <div><dt>Vision</dt><dd id="cfg-vision">—</dd></div>
+            <div><dt>Fallback</dt><dd id="cfg-fallback">—</dd></div>
+            <div><dt>Exa MCP</dt><dd id="cfg-exa">—</dd></div>
+          </dl>
+          <div class="security-note"><span>LOCAL</span><p>Loopback-only. Prompts, images and bearer tokens are never rendered here.</p></div>
+        </aside>
+      </section>
     </main>
-    <script src="/app.js?v=current-config-sync-2" type="module"></script>
+    <script src="/app.js" type="module"></script>
   </body>
 </html>
