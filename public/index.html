@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>ModelDock · OpenCode Go Gate</title>
+    <title>ModelDock · API Bridge</title>
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
@@ -11,8 +11,8 @@
       <header class="topbar">
         <div>
           <p class="eyebrow">CODEX HARNESS BRIDGE</p>
-          <h1>OpenCode Go Gate</h1>
-          <p class="subtitle">Responses forwarding, Exa search and Luna vision in one local process.</p>
+          <h1>API Bridge</h1>
+          <p class="subtitle">Responses forwarding, Exa search and vision sharing in one local process.</p>
         </div>
         <div class="status-stack">
           <div id="live-status" class="status-pill waiting"><span></span><strong>Connecting</strong></div>
@@ -32,16 +32,16 @@
         <div class="control-main">
           <div class="control-copy">
             <p class="eyebrow">CODEX CONFIG SWITCH</p>
-            <div class="control-title"><h2>Use OpenCode Go in Codex</h2><span id="switch-default" class="default-pill">DEFAULT · OFF</span></div>
+            <div class="control-title"><h2>Use other API in Codex</h2><span id="switch-default" class="default-pill">DEFAULT · OFF</span></div>
             <p id="switch-description">Codex is using its own configuration. Enabling backs it up and selects the local ModelDock provider.</p>
           </div>
           <label class="toggle" for="proxy-toggle">
-            <input id="proxy-toggle" type="checkbox" role="switch" aria-label="Use OpenCode Go in Codex" />
+            <input id="proxy-toggle" type="checkbox" role="switch" aria-label="Use other API in Codex" />
             <span class="toggle-track"><i></i></span>
             <b id="switch-label">Off</b>
           </label>
         </div>
-        <div class="control-defaults" aria-label="OpenCode Go defaults">
+        <div class="control-defaults" aria-label="API Bridge defaults">
           <div><span>Main model</span><strong>DeepSeek V4 Flash</strong></div>
           <div><span>Vision</span><strong>Luna · Kimi fallback</strong></div>
           <div><span>Web</span><strong>Exa hosted MCP</strong></div>
@@ -148,7 +148,7 @@
           <div class="panel-head"><div><p class="eyebrow">RUNTIME</p><h2>Forwarding map</h2></div></div>
           <dl class="config-list">
             <div><dt>Bind</dt><dd id="cfg-bind">—</dd></div>
-            <div><dt>Go upstream</dt><dd id="cfg-go">—</dd></div>
+            <div><dt>Upstream</dt><dd id="cfg-go">—</dd></div>
             <div><dt>Main model</dt><dd id="cfg-main">—</dd></div>
             <div><dt>Vision</dt><dd id="cfg-vision">—</dd></div>
             <div><dt>Fallback</dt><dd id="cfg-fallback">—</dd></div>

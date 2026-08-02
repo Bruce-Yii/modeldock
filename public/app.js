@@ -168,7 +168,7 @@ function renderConfigSwitch(data) {
   set(
     "switch-description",
     data.enabled
-      ? "Codex is configured to use OpenCode Go through the local ModelDock service."
+      ? "Codex is configured to use other APIs through the local ModelDock bridge."
       : "Codex is using its own configuration. Enabling backs it up and selects the local ModelDock provider.",
   );
   set("switch-config-path", data.configPath || "—");
@@ -247,8 +247,8 @@ setInterval(() => pollConfig().catch(() => {}), 15_000);
 $("proxy-toggle").addEventListener("change", async (event) => {
   const enabling = event.target.checked;
   const prompt = enabling
-    ? "Enable OpenCode Go for Codex? ModelDock will back up the current user config, replace the active model/provider settings, and require a full Codex restart."
-    : "Disable OpenCode Go and restore the backed-up Codex config? A full Codex restart will be required.";
+    ? "Enable other APIs for Codex? ModelDock will back up the current user config, replace the active model/provider settings, and require a full Codex restart."
+    : "Disable other APIs and restore the backed-up Codex config? A full Codex restart will be required.";
   if (!window.confirm(prompt)) {
     event.target.checked = !enabling;
     return;
