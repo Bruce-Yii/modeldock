@@ -27,6 +27,13 @@ test("proxies Responses while filtering unsupported hosted tool schemas", async 
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
     received = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    if (received.stream) {
+      res.setHeader("content-type", "text/event-stream");
+      res.write(`event: response.output_text.delta\ndata: ${JSON.stringify({ type: "response.output_text.delta", id: "resp_stream", delta: "stream", response: { id: "resp_stream", model: received.model } })}\n\n`);
+      res.write(`event: response.completed\ndata: ${JSON.stringify({ type: "response.completed", id: "resp_stream", response: { id: "resp_stream", model: received.model, usage: { input_tokens: 1, output_tokens: 1 } } })}\n\n`);
+      res.end("data: [DONE]\n\n");
+      return;
+    }
     res.setHeader("content-type", "application/json");
     res.end(JSON.stringify({ id: "resp_test", status: "completed", output: [], usage: { input_tokens: 5, output_tokens: 2 } }));
   });
@@ -71,7 +78,7 @@ test("proxies Responses while filtering unsupported hosted tool schemas", async 
   });
   const sse = await streamed.text();
   assert.match(streamed.headers.get("content-type"), /text\/event-stream/);
-  assert.equal(streamed.headers.get("x-modeldock-stream-mode"), "buffered");
+  assert.equal(streamed.headers.get("x-modeldock-stream-mode"), "live-normalized");
   assert.match(sse, /event: response\.created/);
   assert.match(sse, /event: response\.completed/);
 });

@@ -58,13 +58,37 @@ test("defaults off, backs up on enable, and restores exact config on disable", a
   assert.equal(await readFile(configPath, "utf8"), originalConfig);
 });
 
-test("refuses to restore over edits made after enable", async (t) => {
+test("preserves unrelated edits made after enable while restoring managed fields", async (t) => {
   const { configPath, switcher } = await fixture(t);
   await switcher.enable();
-  await appendFile(configPath, "# user edit\n", "utf8");
+  await appendFile(configPath, "\n[plugins.user_added]\nenabled = true\n", "utf8");
+  const status = await switcher.status();
+  assert.equal(status.drifted, true);
+  await switcher.disable();
+  const restored = await readFile(configPath, "utf8");
+  assert.match(restored, /model = "gpt-5.6-sol"/);
+  assert.doesNotMatch(restored, /modeldock_go/);
+  assert.match(restored, /\[plugins\.user_added\]\nenabled = true/);
+});
+
+test("refuses restore only when ModelDock-managed fields conflict", async (t) => {
+  const { configPath, switcher } = await fixture(t);
+  await switcher.enable();
+  const current = await readFile(configPath, "utf8");
+  await writeFile(configPath, current.replace('model_provider = "modeldock_go"', 'model_provider = "somewhere_else"'), "utf8");
   await assert.rejects(() => switcher.disable(), (error) => error.code === "CONFIG_DRIFTED");
-  assert.match(await readFile(configPath, "utf8"), /# user edit/);
-  assert.equal((await switcher.status()).drifted, true);
+});
+
+test("recognizes a config already restored outside ModelDock and clears stale state", async (t) => {
+  const { configPath, switcher } = await fixture(t);
+  await switcher.enable();
+  await writeFile(configPath, originalConfig, "utf8");
+  const status = await switcher.status();
+  assert.equal(status.enabled, false);
+  assert.equal(status.externallyRestored, true);
+  await switcher.disable();
+  assert.equal((await switcher.status()).externallyRestored, false);
+  assert.equal(await readFile(configPath, "utf8"), originalConfig);
 });
 
 test("restores the absence of config when none existed before enable", async (t) => {

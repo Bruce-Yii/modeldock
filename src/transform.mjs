@@ -138,6 +138,13 @@ function describeInput(input) {
     hasId: Boolean(item?.id),
     keys: item && typeof item === "object" ? Object.keys(item).sort() : [],
     contentTypes: Array.isArray(item?.content) ? item.content.map((part) => part?.type || null) : [],
+    contentCount: Array.isArray(item?.content) ? item.content.length : typeof item?.content === "string" ? 1 : 0,
+    nonEmptyTextParts: Array.isArray(item?.content)
+      ? item.content.filter((part) => part && typeof part.text === "string" && part.text.length > 0).length
+      : typeof item?.content === "string" && item.content.length > 0
+        ? 1
+        : 0,
+    toolCallCount: Array.isArray(item?.tool_calls) ? item.tool_calls.length : 0,
   }));
 }
 
@@ -187,7 +194,9 @@ export function transformResponsesRequest(source, { mediaStore, defaultModel }) 
   const imageRefs = [];
   const rewrittenInput = rewriteImages(normalizeInput(payload.input), mediaStore, imageRefs);
   const compacted = compactCompletedToolHistory(rewrittenInput);
-  payload.input = ensureItemIds(normalizeAssistantMessages(compacted.input));
+  const normalizedInput = normalizeAssistantMessages(compacted.input);
+  const droppedAssistantMessages = Array.isArray(compacted.input) ? compacted.input.length - normalizedInput.length : 0;
+  payload.input = ensureItemIds(normalizedInput);
   const injectedHarnessTools = [];
   if (blocked.tool_search > 0 || blocked.web_search > 0) {
     if (!Array.isArray(payload.tools)) payload.tools = [];
@@ -213,6 +222,7 @@ export function transformResponsesRequest(source, { mediaStore, defaultModel }) 
       imageRefs: [...new Set(imageRefs)],
       inputShape: describeInput(payload.input),
       compactedToolResults: compacted.compacted,
+      droppedAssistantMessages,
     },
   };
 }

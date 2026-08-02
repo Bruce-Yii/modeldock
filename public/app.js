@@ -40,6 +40,14 @@ function health(id, bucket) {
   node.style.color = bucket.active ? "var(--amber)" : bucket.errors ? "#ff7b7b" : bucket.total ? "var(--green)" : "var(--muted)";
 }
 
+function showTrace(item) {
+  const detail = $("trace-detail");
+  detail.hidden = false;
+  set("trace-detail-title", `${item.kind || "request"} · ${item.id || "unknown"}`);
+  $("trace-detail-json").textContent = JSON.stringify(item, null, 2);
+  detail.scrollIntoView({ block: "nearest", behavior: "smooth" });
+}
+
 function renderRecent(items) {
   const body = $("recent-body");
   body.replaceChildren();
@@ -56,6 +64,13 @@ function renderRecent(items) {
 
   for (const item of items.slice(0, 10)) {
     const row = document.createElement("tr");
+    row.className = "trace-row";
+    row.tabIndex = 0;
+    row.title = "Open sanitized request evidence";
+    row.addEventListener("click", () => showTrace(item));
+    row.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") showTrace(item);
+    });
     const target = item.model || item.requestedModel || item.operation || "—";
     const detail =
       item.error ||
@@ -166,8 +181,10 @@ function renderConfigSwitch(data) {
     message.textContent = `State error: ${data.stateError}`;
     message.className = "error";
   } else if (data.drifted) {
-    message.textContent = "Config changed outside ModelDock; automatic restore is locked.";
+    message.textContent = "Managed provider fields changed outside ModelDock; restore needs review.";
     message.className = "error";
+  } else if (data.externallyRestored) {
+    message.textContent = "Codex config is already restored; ModelDock state will reconcile on the next action.";
   } else {
     message.textContent = data.enabled ? "Backup ready · provider active" : "Default remains off";
   }
@@ -240,3 +257,4 @@ $("proxy-toggle").addEventListener("change", async (event) => {
 });
 
 $("restart-ack").addEventListener("click", () => configAction("restart-ack"));
+$("trace-detail-close").addEventListener("click", () => { $("trace-detail").hidden = true; });

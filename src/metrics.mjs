@@ -20,6 +20,7 @@ export class Metrics extends EventEmitter {
       filteredToolSearch: 0,
       filteredWebSearch: 0,
       rewrittenToolChoice: 0,
+      droppedAssistantMessages: 0,
       imageAttachments: 0,
     };
     this.web = emptyBucket();
@@ -63,6 +64,7 @@ export class Metrics extends EventEmitter {
     this.responses.filteredToolSearch += report.blocked.tool_search;
     this.responses.filteredWebSearch += report.blocked.web_search;
     this.responses.rewrittenToolChoice += report.toolChoiceRewritten ? 1 : 0;
+    this.responses.droppedAssistantMessages += Number(report.droppedAssistantMessages || 0);
     this.responses.imageAttachments += report.imageRefs.length;
     this.responses.streaming += streaming ? 1 : 0;
   }

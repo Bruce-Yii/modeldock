@@ -1,125 +1,97 @@
 # ModelDock OpenCode Go Gate
 
-A deliberately narrow local bridge that lets the Codex harness use OpenCode Go without sending the two hosted-tool schemas that the Go Responses façade rejects.
-
-It provides three surfaces from one loopback-only Node process:
-
-- `POST /v1/responses` — filters incompatible hosted tools, rewrites image attachments to opaque references, forwards requests to OpenCode Go, and meters usage.
-- `POST /mcp` — optional diagnostic/reuse surface exposing `web_search_exa` and `vision_inspect` over Streamable HTTP MCP.
-- `GET /` — a small operational dashboard for request, token, byte, schema-filter, search, vision, and fallback metrics.
-
-## Runtime flow
+A narrow, loopback-only bridge for running the Codex harness against OpenCode Go's Responses facade.
 
 ```text
-Codex ──Responses──> local gate ──Responses──> OpenCode Go / deepseek-v4-flash
-                          │  internal standard-function loop
-                          ├──> Exa hosted MCP
-                          └──> OpenCode Go / gpt-5.6-luna
-                                                └─ fallback: kimi-k2.5
+Codex --Responses--> 127.0.0.1:4097 --Responses--> OpenCode Go / deepseek-v4-flash
+                               |--local function loop--> Exa hosted MCP
+                               `--local function loop--> Go / gpt-5.6-luna (Kimi fallback)
 ```
 
-The service does not implement a search engine, a Chat Completions converter, provider management, or a general replacement for Codex `tool_search`.
+The gate does four jobs:
 
-## Requirements
+- removes hosted `tool_search` and `web_search` schemas that OpenCode Go rejects;
+- exposes web search and image inspection to DeepSeek as ordinary functions executed by the local harness;
+- normalizes Codex Responses history for Go, including removing empty assistant placeholder messages;
+- turns Go's partial SSE into a live, complete Responses lifecycle for Codex.
 
-- Node.js 22 or newer.
-- An OpenCode Go bearer token.
-- Codex configured to use the custom local Responses provider.
+It is not a model router, a Chat Completions converter, or a local search engine. Exa and all Go models are cloud services; only the orchestration and metering run locally.
 
 ## Start
 
+Requirements: Node.js 22+ and an OpenCode Go bearer token.
+
 ```powershell
 npm install
-Copy-Item .env.example .env
-```
-
-Set `OPENCODE_GO_TOKEN` in `.env`, then:
-
-```powershell
 npm start
 ```
 
-Open [http://127.0.0.1:4097](http://127.0.0.1:4097). The server intentionally refuses non-loopback bind addresses.
+Credential resolution order:
 
-The **Use OpenCode Go in Codex** switch is off by default. When enabled from the dashboard, ModelDock:
+1. `OPENCODE_GO_TOKEN` from the environment or `.env`;
+2. the newest `~/.codex/config.toml` or `config.toml.bak*` containing an `opencode`, `opencode_go`, or `console_go` provider token.
 
-1. makes a timestamped, byte-for-byte backup beside the user-level `~/.codex/config.toml`;
-2. changes only the top-level model/provider/web defaults and adds `[model_providers.modeldock_go]`;
-3. preserves other Codex settings such as plugins, MCP servers, projects, sandbox settings, and features;
-4. displays a persistent **Restart required** notice.
+Only the credential source label is exposed in `/api/status`; the path and token are never returned to the browser or logs.
 
-Disable the switch to restore the exact backup, then restart Codex again. If the managed config was edited outside ModelDock, automatic restore is locked rather than overwriting those edits. Switch state is stored under `~/.codex/modeldock/`; neither config contents nor tokens are returned to the browser.
+Open [http://127.0.0.1:4097](http://127.0.0.1:4097). The service refuses non-loopback bind addresses.
 
-[`config/codex.example.toml`](config/codex.example.toml) remains available as a manual fallback. Its token is a harmless local placeholder; the service uses only `OPENCODE_GO_TOKEN` for upstream Authorization.
+## Codex config switch
 
-## What the gate changes
+The dashboard switch defaults to Off. Turning it On:
 
-For each Responses request, the gate:
+1. backs up the current user-level `~/.codex/config.toml`;
+2. changes the top-level `model`, `model_provider`, and `web_search` values;
+3. adds `[model_providers.modeldock_go]` pointing at `http://127.0.0.1:4097/v1`;
+4. preserves all other Codex settings and asks for a full Codex restart.
 
-1. normalizes string `input` to a Responses message array;
-2. replaces rejected `tool_search`/`web_search` capability with standard `harness_web_search`;
-3. changes `tool_choice = "required"` to `"auto"` because Go thinking mode rejects `required`;
-4. sets `parallel_tool_calls = false` so Go thinking-mode tool state can be continued reliably;
-5. folds completed tool call/output pairs into clearly marked untrusted-data messages, avoiding hidden thinking state that Go's Responses façade does not return;
-6. drops assistant messages that carry neither text content nor tool calls — the empty placeholder shells Codex emits during tool loops, which Go's façade rejects;
-7. adds a neutral, non-empty `reasoning_content = "tool call"` compatibility marker when Go's façade omitted its hidden thinking field;
-8. converts `input_image` data into an opaque, content-addressed `img_…` reference for DeepSeek;
-9. injects `harness_vision_inspect` when an image was attached and preserves other ordinary `function`, `custom`, and `namespace` tools;
-10. executes harness functions locally and feeds their untrusted results back to DeepSeek for up to four internal rounds;
-11. forwards non-streaming JSON directly; for `stream: true`, requests buffered JSON from Go and emits the complete Responses SSE lifecycle Codex expects.
+Turning it Off restores only ModelDock-managed fields. Unrelated changes made while the gate was active, such as plugin or desktop settings, are preserved. Restore is blocked only if the managed provider fields themselves conflict. If Codex or the user already restored the file externally, ModelDock recognizes that state and safely reconciles to Off.
 
-The buffered stream adapter is intentional. Go's current stream can omit item lifecycle events that Codex requires before text deltas. The response remains Responses-native—there is no Chat Completions translation—but the first token arrives only after Go has completed the response. The dashboard marks these requests as `buffered`.
+Switch state lives under `~/.codex/modeldock/`. Config contents and credentials are never rendered in the dashboard.
 
-The image reference is stable for identical content and remains only in an in-memory, TTL-bound cache. DeepSeek calls `harness_vision_inspect`; the gate sends the original image to Luna and returns the textual result through its internal tool loop.
+## Responses normalization
 
-The local Codex catalog advertises `text + image` because the gate itself accepts images. The gate always removes image content before the DeepSeek request and exposes only the opaque reference plus `harness_vision_inspect`.
+For each request, the gate:
 
-## Harness tools
+1. normalizes string input to Responses message input;
+2. replaces `tool_search`/`web_search` with `harness_web_search`;
+3. rewrites `tool_choice: "required"` to `"auto"` for Go thinking-mode compatibility;
+4. forces `parallel_tool_calls: false`;
+5. compacts completed local tool call/output pairs into marked untrusted-data messages;
+6. drops assistant messages with neither non-empty text nor tool calls;
+7. adds stable IDs and the non-empty reasoning marker required by Go's facade;
+8. replaces images with opaque `img_` references and injects `harness_vision_inspect`;
+9. executes up to four internal web/vision tool rounds;
+10. forwards JSON responses directly or emits live normalized SSE.
 
-DeepSeek sees `harness_web_search` and, when an image exists, `harness_vision_inspect` as ordinary Responses functions. The gate executes them; Codex does not need an MCP server entry.
+Go streams text deltas in real time but omits several lifecycle events expected by Codex. ModelDock forwards each delta as it arrives and supplies `response.created`, item/content start and done events, `response.completed`, and `[DONE]`. Successful streaming traces report `streamMode: "live-normalized"`.
 
-The same backends are also exposed at `/mcp` as `web_search_exa` and `vision_inspect` for direct testing or other local clients.
+## Dashboard and diagnostics
 
-### `harness_web_search` / `web_search_exa`
+`GET /` shows request, token, byte, schema-filter, search, vision, and fallback meters. Click any recent trace row to inspect its sanitized raw evidence, including `inputShape`, `responseShape`, stream mode, filtered tool count, and internal tool rounds. Prompt text, tool output, images, and credentials are excluded.
 
-Calls the same unauthenticated Exa hosted MCP route used by OpenCode. `EXA_API_KEY` is optional. Search output remains untrusted external content and should be treated as evidence, never as developer instructions.
+Other endpoints:
 
-### `harness_vision_inspect` / `vision_inspect`
-
-Inputs:
-
-- `image_ref` — reference inserted by the Responses gate;
-- `compare_image_ref` — optional second reference;
-- `question`;
-- `mode` — `general`, `ocr`, `ui`, `chart`, or `compare`.
-
-The default model is `gpt-5.6-luna`. HTTP errors, timeouts, invalid JSON, and empty output trigger the `kimi-k2.5` fallback.
+- `POST /v1/responses` - Codex Responses gateway;
+- `GET /v1/models` - local Codex model catalog;
+- `POST /mcp` - direct MCP access to `web_search_exa` and `vision_inspect`;
+- `GET /api/status` - sanitized runtime and recent trace JSON;
+- `GET /api/config` - config switch status.
 
 ## Verification
 
-Local deterministic tests:
-
 ```powershell
 npm test
-```
-
-Real Go, Exa, SSE, MCP, and vision calls:
-
-```powershell
 npm run probe:live
 ```
 
-The live probe prints only short outputs and counters. It never prints the bearer token.
+The deterministic suite includes a timing-controlled assertion that the downstream client receives a text delta before the mock upstream completes. The live probe exercises OpenCode Go, Exa, MCP, streaming, and vision without printing the bearer token.
 
-## Security boundaries
+## Security boundary
 
-- Binds only to `127.0.0.1`, `localhost`, or `::1`.
-- Uses MCP SDK Host and Origin validation against DNS rebinding.
-- Never forwards the incoming local Authorization header upstream.
-- Never renders prompts, image data, or secrets on the dashboard.
-- Config mutation endpoints require JSON and reject browser requests from other origins; the service remains loopback-only.
-- Every enable operation creates a new backup, and restore refuses to overwrite a config that changed after activation.
-- Accepts image data URLs and non-loopback HTTPS image URLs; rejects loopback and plain HTTP image URLs.
-- Limits image size, cache entries, cache lifetime, and upstream timeouts.
+- The service binds only to `127.0.0.1`, `localhost`, or `::1`.
+- Config mutation endpoints require JSON and reject other browser origins.
+- Incoming local Authorization headers are never forwarded upstream.
+- Prompt and media contents are not included in telemetry.
+- Image data, entry count, TTL, and upstream timeouts are bounded.
 
-The dashboard is operational telemetry, not an authentication boundary. Do not expose it through a public reverse proxy.
+The dashboard is local operational telemetry, not an authentication boundary. Do not publish it through a reverse proxy. Remote HTTPS image fetching still needs private-network blocking and a streamed response byte cap before this should be treated as hardened against hostile local callers.

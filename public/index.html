@@ -45,7 +45,7 @@
           <div><span>Main model</span><strong>DeepSeek V4 Flash</strong></div>
           <div><span>Vision</span><strong>Luna · Kimi fallback</strong></div>
           <div><span>Web</span><strong>Exa hosted MCP</strong></div>
-          <div><span>Streaming</span><strong>Buffered Responses SSE</strong></div>
+          <div><span>Streaming</span><strong>Live normalized SSE</strong></div>
         </div>
         <div class="control-meta">
           <span>Config <code id="switch-config-path">—</code></span>
@@ -137,6 +137,11 @@
               <tbody id="recent-body"><tr><td colspan="5" class="empty">No requests yet.</td></tr></tbody>
             </table>
           </div>
+          <section id="trace-detail" class="trace-detail" hidden>
+            <div><strong id="trace-detail-title">Request evidence</strong><button id="trace-detail-close" type="button" aria-label="Close trace detail">Close</button></div>
+            <p>Sanitized transport evidence only. Prompt text, tool output, image data, and credentials are excluded.</p>
+            <pre id="trace-detail-json"></pre>
+          </section>
         </article>
 
         <aside class="panel config-panel">

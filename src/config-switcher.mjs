@@ -28,6 +28,69 @@ function removeManagedProvider(lines) {
   return output;
 }
 
+function topLevelLine(source, key) {
+  const lines = source.replace(/\r\n/g, "\n").split("\n");
+  const firstTable = lines.findIndex((line) => /^\s*\[/.test(line));
+  const limit = firstTable < 0 ? lines.length : firstTable;
+  const matcher = new RegExp(`^\\s*${key}\\s*=`);
+  return lines.slice(0, limit).find((line) => matcher.test(line)) || null;
+}
+
+function topLevelString(source, key) {
+  const line = topLevelLine(source, key);
+  if (!line) return null;
+  const match = line.match(/=\s*(["'])(.*?)\1/);
+  return match ? match[2] : null;
+}
+
+function providerSection(source) {
+  const lines = source.replace(/\r\n/g, "\n").split("\n");
+  const start = lines.findIndex((line) => /^\s*\[model_providers\.modeldock_go\]\s*(?:#.*)?$/i.test(line));
+  if (start < 0) return [];
+  let end = start + 1;
+  while (end < lines.length && !/^\s*\[/.test(lines[end])) end += 1;
+  return lines.slice(start, end);
+}
+
+function managedSignature(source) {
+  const entries = providerSection(source)
+    .slice(1)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("#"))
+    .sort();
+  return JSON.stringify({
+    model: topLevelString(source, "model"),
+    modelProvider: topLevelString(source, "model_provider"),
+    webSearch: topLevelString(source, "web_search"),
+    provider: entries,
+  });
+}
+
+function hasManagedRoute(source) {
+  return topLevelString(source, "model_provider") === "modeldock_go" || providerSection(source).length > 0;
+}
+
+function restoreTopLevel(lines, key, originalLine) {
+  const firstTable = lines.findIndex((line) => /^\s*\[/.test(line));
+  const limit = firstTable < 0 ? lines.length : firstTable;
+  const matcher = new RegExp(`^\\s*${key}\\s*=`);
+  for (let index = limit - 1; index >= 0; index -= 1) if (matcher.test(lines[index])) lines.splice(index, 1);
+  if (originalLine) {
+    const insertAt = lines.findIndex((line) => /^\s*\[/.test(line));
+    lines.splice(insertAt < 0 ? lines.length : insertAt, 0, originalLine);
+  }
+}
+
+export function mergeRestoredCodexConfig(current, original) {
+  const newline = current.includes("\r\n") ? "\r\n" : "\n";
+  const originalSection = providerSection(original);
+  const lines = removeManagedProvider(current.replace(/\r\n/g, "\n").split("\n"));
+  for (const key of ["model", "model_provider", "web_search"]) restoreTopLevel(lines, key, topLevelLine(original, key));
+  while (lines.length && !lines.at(-1).trim()) lines.pop();
+  if (originalSection.length) lines.push("", ...originalSection);
+  return `${lines.join("\n").replace(/\n/g, newline)}${newline}`;
+}
+
 function setTopLevel(lines, key, value) {
   const firstTable = lines.findIndex((line) => /^\s*\[/.test(line));
   const limit = firstTable < 0 ? lines.length : firstTable;
@@ -100,11 +163,15 @@ export class CodexConfigSwitcher {
       if (error.code === "ENOENT") configExists = false;
       else throw error;
     }
-    const drifted = Boolean(state.enabled && state.managedHash && currentHash !== state.managedHash);
+    let current = "";
+    if (configExists) current = await readFile(this.configPath, "utf8");
+    const routeActive = hasManagedRoute(current);
+    const drifted = Boolean(state.enabled && routeActive && state.managedHash && currentHash !== state.managedHash);
     return {
-      enabled: Boolean(state.enabled),
-      managed: Boolean(state.enabled && !drifted),
+      enabled: Boolean(state.enabled && routeActive),
+      managed: Boolean(state.enabled && routeActive && !drifted),
       drifted,
+      externallyRestored: Boolean(state.enabled && !routeActive),
       restartRequired: Boolean(state.restartRequired),
       configExists,
       configPath: this.configPath,
@@ -119,7 +186,12 @@ export class CodexConfigSwitcher {
   async enable() {
     const state = await this.#readState();
     if (state.stateError) throw Object.assign(new Error(`Cannot read switch state: ${state.stateError}`), { code: "STATE_INVALID" });
-    if (state.enabled) return this.status();
+    if (state.enabled) {
+      const status = await this.status();
+      if (status.enabled) return status;
+      await this.disable();
+      return this.enable();
+    }
 
     let original = "";
     let originalExisted = true;
@@ -157,20 +229,39 @@ export class CodexConfigSwitcher {
   async disable() {
     const state = await this.#readState();
     if (!state.enabled) return this.status();
-    const current = await readFile(this.configPath, "utf8");
-    if (sha256(current) !== state.managedHash) {
-      throw Object.assign(new Error("Codex config changed after ModelDock enabled it; refusing to overwrite those edits."), {
-        code: "CONFIG_DRIFTED",
-      });
-    }
-    const backup = await readFile(state.backupPath, "utf8");
+    let current = "";
     try {
-      if (state.originalExisted) await writeFile(this.configPath, backup, { encoding: "utf8", mode: 0o600 });
-      else await unlink(this.configPath);
+      current = await readFile(this.configPath, "utf8");
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+    const routeActive = hasManagedRoute(current);
+    let backup = "";
+    if (routeActive) {
+      try {
+        backup = await readFile(state.backupPath, "utf8");
+      } catch (error) {
+        throw Object.assign(new Error("ModelDock backup is missing while its provider is still active; restore requires manual review."), {
+          code: "STATE_INVALID",
+          cause: error,
+        });
+      }
+      const expected = buildManagedCodexConfig(backup, { baseUrl: this.baseUrl, model: this.model });
+      if (sha256(current) !== state.managedHash && managedSignature(current) !== managedSignature(expected)) {
+        throw Object.assign(new Error("ModelDock-managed provider fields changed outside ModelDock; refusing an ambiguous restore."), {
+          code: "CONFIG_DRIFTED",
+        });
+      }
+    }
+    try {
+      if (routeActive && state.originalExisted) {
+        const restored = sha256(current) === state.managedHash ? backup : mergeRestoredCodexConfig(current, backup);
+        await writeFile(this.configPath, restored, { encoding: "utf8", mode: 0o600 });
+      } else if (routeActive) await unlink(this.configPath);
       await this.#writeState({
         version: 1,
         enabled: false,
-        restartRequired: true,
+        restartRequired: routeActive ? true : Boolean(state.restartRequired),
         lastBackupPath: state.backupPath,
         changedAt: new Date().toISOString(),
       });

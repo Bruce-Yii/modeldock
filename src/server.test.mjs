@@ -54,6 +54,10 @@ function jsonBody(req) {
   });
 }
 
+function sendSse(res, type, data) {
+  res.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`);
+}
+
 const okResponse = { id: "resp_1", object: "response", status: "completed", output: [], usage: { input_tokens: 111, output_tokens: 22 } };
 
 test("without token: healthz and responses return 503, local models catalog still works", async (t) => {
@@ -240,27 +244,21 @@ test("invalid request body returns 400 before calling upstream", async (t) => {
   assert.equal(upstreamCalled, false);
 });
 
-test("streaming relay is buffered: upstream called with stream:false, SSE synthesized locally", async (t) => {
+test("streaming relay emits the first delta before upstream completion", async (t) => {
   let received;
+  let releaseCompletion;
+  const completionGate = new Promise((resolve) => { releaseCompletion = resolve; });
+  let upstreamCompleted = false;
   const upstream = createServer(async (req, res) => {
     received = await jsonBody(req);
-    res.setHeader("content-type", "application/json");
-    res.end(
-      JSON.stringify({
-        id: "resp_s",
-        object: "response",
-        status: "completed",
-        output: [
-          {
-            id: "msg_1",
-            type: "message",
-            role: "assistant",
-            content: [{ type: "output_text", text: "buffered hello", annotations: [] }],
-          },
-        ],
-        usage: { input_tokens: 333, output_tokens: 44 },
-      }),
-    );
+    res.setHeader("content-type", "text/event-stream");
+    res.flushHeaders();
+    sendSse(res, "response.output_text.delta", { id: "resp_s", delta: "live ", response: { id: "resp_s", model: "deepseek-v4-flash" } });
+    await completionGate;
+    upstreamCompleted = true;
+    sendSse(res, "response.output_text.delta", { id: "resp_s", delta: "hello", response: { id: "resp_s", model: "deepseek-v4-flash" } });
+    sendSse(res, "response.completed", { id: "resp_s", response: { id: "resp_s", model: "deepseek-v4-flash", usage: { input_tokens: 333, output_tokens: 44, total_tokens: 377 } } });
+    res.end("data: [DONE]\n\n");
   });
   const upstreamPort = await listen(upstream);
   t.after(() => upstream.close());
@@ -274,11 +272,23 @@ test("streaming relay is buffered: upstream called with stream:false, SSE synthe
     body: JSON.stringify({ input: "hi", stream: true }),
   });
   assert.equal(response.status, 200);
-  assert.equal(response.headers.get("x-modeldock-stream-mode"), "buffered");
+  assert.equal(response.headers.get("x-modeldock-stream-mode"), "live-normalized");
   assert.match(response.headers.get("content-type"), /text\/event-stream/);
-  assert.equal(received.stream, false, "upstream must be called non-streaming");
+  assert.equal(received.stream, true, "upstream must stay streaming");
 
-  const sse = await response.text();
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  const first = decoder.decode((await reader.read()).value);
+  assert.equal(upstreamCompleted, false, "the client received bytes before the provider completed");
+  assert.match(first, /response\.(created|in_progress|output_item\.added|content_part\.added|output_text\.delta)/);
+  releaseCompletion();
+  let sse = first;
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    sse += decoder.decode(value, { stream: true });
+  }
+
   const types = [...sse.matchAll(/^event: (.+)$/gm)].map((match) => match[1]);
   assert.deepEqual(types, [
     "response.created",
@@ -286,12 +296,14 @@ test("streaming relay is buffered: upstream called with stream:false, SSE synthe
     "response.output_item.added",
     "response.content_part.added",
     "response.output_text.delta",
+    "response.output_text.delta",
     "response.output_text.done",
     "response.content_part.done",
     "response.output_item.done",
     "response.completed",
   ]);
-  assert.match(sse, /buffered hello/);
+  assert.match(sse, /live /);
+  assert.match(sse, /hello/);
   assert.match(sse, /data: \[DONE\]/);
 
   const snap = instance.services.metrics.snapshot();
@@ -300,20 +312,63 @@ test("streaming relay is buffered: upstream called with stream:false, SSE synthe
   assert.equal(snap.responses.outputTokens, 44);
 });
 
+test("streaming relay hides a harness web round and streams only the final answer", async (t) => {
+  let goCalls = 0;
+  const upstream = createServer(async (req, res) => {
+    const body = await jsonBody(req);
+    if (req.url === "/mcp") {
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { content: [{ type: "text", text: "Evidence https://example.test/source" }] } }));
+      return;
+    }
+    goCalls += 1;
+    res.setHeader("content-type", "text/event-stream");
+    if (goCalls === 1) {
+      sendSse(res, "response.output_item.added", {
+        output_index: 0,
+        item: { id: "fc_web", type: "function_call", name: "harness_web_search", call_id: "call_web", arguments: "" },
+      });
+      sendSse(res, "response.function_call_arguments.delta", { output_index: 0, delta: '{"queries":["example"]}' });
+      sendSse(res, "response.completed", { id: "resp_web", response: { id: "resp_web", usage: { input_tokens: 10, output_tokens: 2 } } });
+      res.end("data: [DONE]\n\n");
+      return;
+    }
+    assert.match(body.input.at(-1).content[0].text, /example\.test\/source/);
+    sendSse(res, "response.output_text.delta", { id: "resp_final", delta: "FINAL", response: { id: "resp_final", model: body.model } });
+    sendSse(res, "response.completed", { id: "resp_final", response: { id: "resp_final", usage: { input_tokens: 20, output_tokens: 3 } } });
+    res.end("data: [DONE]\n\n");
+  });
+  const port = await listen(upstream);
+  t.after(() => upstream.close());
+  const instance = await startApp({ goBaseUrl: `http://127.0.0.1:${port}`, exaMcpUrl: `http://127.0.0.1:${port}/mcp` });
+  t.after(instance.stop);
+
+  const response = await fetch(`${instance.base}/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ input: "search", stream: true, tools: [{ type: "tool_search" }] }),
+  });
+  const sse = await response.text();
+  assert.equal(response.status, 200);
+  assert.equal(goCalls, 2);
+  assert.match(sse, /FINAL/);
+  assert.doesNotMatch(sse, /harness_web_search/);
+  const trace = instance.services.metrics.recent.find((item) => item.kind === "responses");
+  assert.equal(trace.harnessToolRounds, 1);
+  assert.equal(instance.services.metrics.responses.inputTokens, 30);
+  assert.equal(instance.services.metrics.responses.outputTokens, 5);
+});
+
 test("function calls from Go map to custom tool calls for Codex", async (t) => {
   const upstream = createServer((req, res) => {
-    res.setHeader("content-type", "application/json");
-    res.end(
-      JSON.stringify({
-        id: "resp_custom",
-        object: "response",
-        status: "completed",
-        output: [
-          { id: "call_1", type: "function_call", name: "apply_patch", call_id: "call_1", arguments: '{"patch":"PATCH_OK"}' },
-        ],
-        usage: {},
-      }),
-    );
+    res.setHeader("content-type", "text/event-stream");
+    sendSse(res, "response.output_item.added", {
+      output_index: 0,
+      item: { id: "call_1", type: "function_call", name: "apply_patch", call_id: "call_1", arguments: "" },
+    });
+    sendSse(res, "response.function_call_arguments.delta", { output_index: 0, delta: '{"patch":"PATCH_OK"}' });
+    sendSse(res, "response.completed", { id: "resp_custom", response: { id: "resp_custom", model: "deepseek-v4-flash", usage: {} } });
+    res.end("data: [DONE]\n\n");
   });
   const upstreamPort = await listen(upstream);
   t.after(() => upstream.close());
