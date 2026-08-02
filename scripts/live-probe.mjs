@@ -94,6 +94,30 @@ try {
     bytes: Buffer.byteLength(streamBody),
   };
 
+  const secondTurn = await fetch(`${baseUrl}/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: config.mainModel,
+      input: [
+        { type: "message", id: "msg_probe_previous", role: "assistant", content: [{ type: "output_text", text: "Previous answer." }] },
+        { type: "message", id: "msg_probe_current", role: "user", content: [{ type: "input_text", text: "Reply with exactly SECOND_TURN_OK." }] },
+      ],
+      max_output_tokens: 256,
+      stream: false,
+    }),
+  });
+  const secondTurnBody = await secondTurn.json();
+  const secondTurnTrace = instance.services.metrics.recent.find((item) => item.kind === "responses");
+  result.responses.secondTurn = {
+    status: secondTurn.status,
+    output: extractOutputText(secondTurnBody),
+    stringifiedAssistantMessages: secondTurnTrace?.stringifiedAssistantMessages || 0,
+  };
+  if (secondTurn.status !== 200 || !result.responses.secondTurn.output.includes("SECOND_TURN_OK")) {
+    throw new Error(`Second-turn assistant history probe failed with HTTP ${secondTurn.status}`);
+  }
+
   client = new Client({ name: "modeldock-live-probe", version: "0.1.0" });
   await client.connect(new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp`)));
   const tools = await client.listTools();

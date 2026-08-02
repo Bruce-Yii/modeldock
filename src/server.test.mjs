@@ -244,6 +244,47 @@ test("invalid request body returns 400 before calling upstream", async (t) => {
   assert.equal(upstreamCalled, false);
 });
 
+test("second-turn Codex assistant arrays are stringified for strict Console Go", async (t) => {
+  let receivedAssistant;
+  const upstream = createServer(async (req, res) => {
+    const body = await jsonBody(req);
+    receivedAssistant = body.input.find((item) => item?.role === "assistant");
+    if (receivedAssistant && typeof receivedAssistant.content !== "string") {
+      res.statusCode = 400;
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ error: { message: "Invalid assistant message: content or tool_calls must be set" } }));
+      return;
+    }
+    res.setHeader("content-type", "text/event-stream");
+    sendSse(res, "response.output_text.delta", { id: "resp_second", delta: "SECOND_TURN_OK", response: { id: "resp_second", model: body.model } });
+    sendSse(res, "response.completed", { id: "resp_second", response: { id: "resp_second", usage: { input_tokens: 12, output_tokens: 3 } } });
+    res.end("data: [DONE]\n\n");
+  });
+  const port = await listen(upstream);
+  t.after(() => upstream.close());
+  const instance = await startApp({ goBaseUrl: `http://127.0.0.1:${port}` });
+  t.after(instance.stop);
+
+  const response = await fetch(`${instance.base}/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      stream: true,
+      input: [
+        { type: "message", id: "msg_previous", role: "assistant", content: [{ type: "output_text", text: "Previous answer" }] },
+        { type: "message", id: "msg_current", role: "user", content: [{ type: "input_text", text: "Continue" }] },
+      ],
+    }),
+  });
+  const sse = await response.text();
+  assert.equal(response.status, 200);
+  assert.equal(receivedAssistant.content, "Previous answer");
+  assert.match(sse, /SECOND_TURN_OK/);
+  const trace = instance.services.metrics.recent.find((item) => item.kind === "responses");
+  assert.equal(trace.stringifiedAssistantMessages, 1);
+  assert.equal(trace.inputShape.find((item) => item.role === "assistant").contentKind, "string");
+});
+
 test("streaming relay emits the first delta before upstream completion", async (t) => {
   let received;
   let releaseCompletion;
