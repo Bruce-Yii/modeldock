@@ -14,6 +14,7 @@ import { RouteAffinity, routeResponsesRequest } from "./router.mjs";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.resolve(dirname, "../public");
+const assetsDir = path.resolve(dirname, "../assets");
 
 function urlHost(host) {
   return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
@@ -391,13 +392,15 @@ async function relayResponses(req, res, services) {
         inputShape: transformed.report.inputShape,
         droppedAssistantMessages: transformed.report.droppedAssistantMessages,
         stringifiedAssistantMessages: transformed.report.stringifiedAssistantMessages,
+        compactedToolResults: transformed.report.compactedToolResults,
+        compactedToolOutputBytes: transformed.report.compactedToolOutputBytes,
         responseShape: describeResponse(live.response),
         harnessToolRounds: live.rounds,
         error: live.ok ? undefined : live.error,
       });
       return;
     } catch (error) {
-      finish({ ok: false, error: error.message, model: route.model, routeReason: route.reason, directVision: route.directVision, streamMode: "live-normalized", inputShape: transformed.report.inputShape, droppedAssistantMessages: transformed.report.droppedAssistantMessages, stringifiedAssistantMessages: transformed.report.stringifiedAssistantMessages });
+      finish({ ok: false, error: error.message, model: route.model, routeReason: route.reason, directVision: route.directVision, streamMode: "live-normalized", inputShape: transformed.report.inputShape, droppedAssistantMessages: transformed.report.droppedAssistantMessages, stringifiedAssistantMessages: transformed.report.stringifiedAssistantMessages, compactedToolResults: transformed.report.compactedToolResults, compactedToolOutputBytes: transformed.report.compactedToolOutputBytes });
       if (!res.headersSent) return res.status(502).json({ error: { message: `OpenCode Go request failed: ${error.message}`, type: "upstream_error" } });
       return res.end();
     }
@@ -492,6 +495,8 @@ async function relayResponses(req, res, services) {
     inputShape: transformed.report.inputShape,
     droppedAssistantMessages: transformed.report.droppedAssistantMessages,
     stringifiedAssistantMessages: transformed.report.stringifiedAssistantMessages,
+    compactedToolResults: transformed.report.compactedToolResults,
+    compactedToolOutputBytes: transformed.report.compactedToolOutputBytes,
     responseShape: describeResponse(parsed),
     harnessToolRounds: Number(upstream.headers.get("x-modeldock-tool-rounds") || 0),
     error: upstream.ok ? undefined : parsed?.error?.message || `Upstream returned ${upstream.status}`,
@@ -658,6 +663,7 @@ export function createApp(services = createServices()) {
   });
 
   app.use(express.static(publicDir, { extensions: ["html"], maxAge: 0 }));
+  app.use("/assets", express.static(assetsDir, { maxAge: "7d" }));
   app.use((req, res) => res.status(404).json({ error: { message: "Not found" } }));
 
   return { app, close: () => mcpHandler.close?.(), services };

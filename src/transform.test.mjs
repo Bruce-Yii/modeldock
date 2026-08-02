@@ -298,6 +298,28 @@ test("drops assistant messages with empty content (tool-loop placeholder shells)
   assert.equal(report.compactedToolResults, 1);
 });
 
+test("preserves interleaved assistant and tool-result chronology across repeated calls", () => {
+  const source = {
+    input: [
+      { role: "user", content: [{ type: "input_text", text: "check once" }] },
+      { role: "assistant", content: [{ type: "output_text", text: "running first check" }] },
+      { type: "custom_tool_call", call_id: "call_1", name: "shell_command", input: "{}" },
+      { type: "custom_tool_call_output", call_id: "call_1", output: "first result" },
+      { role: "assistant", content: [{ type: "output_text", text: "running second check" }] },
+      { type: "custom_tool_call", call_id: "call_2", name: "shell_command", input: "{}" },
+      { type: "custom_tool_call_output", call_id: "call_2", output: "second result" },
+    ],
+  };
+  const { payload, report } = transformResponsesRequest(source, { mediaStore: fakeStore(), defaultModel: "d" });
+  assert.deepEqual(payload.input.map((item) => item.role), ["user", "assistant", "user", "assistant", "user"]);
+  assert.equal(payload.input[1].content, "running first check");
+  assert.match(payload.input[2].content[0].text, /TOOL_EXECUTION_COMPLETED[\s\S]*first result/);
+  assert.equal(payload.input[3].content, "running second check");
+  assert.match(payload.input[4].content[0].text, /TOOL_EXECUTION_COMPLETED[\s\S]*second result/);
+  assert.equal(report.compactedToolResults, 2);
+  assert.equal(report.compactedToolOutputBytes, Buffer.byteLength("first resultsecond result"));
+});
+
 test("keeps assistant messages with text content", () => {
   const source = {
     input: [{ role: "assistant", content: [{ type: "output_text", text: "I will check" }] }],
