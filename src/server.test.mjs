@@ -5,11 +5,14 @@ import os from "node:os";
 import path from "node:path";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createApp, createServices, codexModelCatalog } from "./server.mjs";
+import { OPENCODE_GO_PROFILE } from "./profiles.mjs";
 
 function baseConfig() {
   return {
     host: "127.0.0.1",
     port: 0,
+    profile: OPENCODE_GO_PROFILE,
+    profileId: OPENCODE_GO_PROFILE.id,
     goBaseUrl: "https://go.example.com/v1",
     goToken: "test-token",
     mainModel: "deepseek-v4-flash",
@@ -962,4 +965,62 @@ test("GET / serves the dashboard", async (t) => {
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type"), /text\/html/);
   assert.match(await response.text(), /ModelDock/);
+});
+
+test("debug mode strips reasoning from the upstream request", async (t) => {
+  let receivedReasoning;
+  const upstream = createServer(async (req, res) => {
+    const body = await jsonBody(req);
+    receivedReasoning = body.reasoning;
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify(okResponse));
+  });
+  const upstreamPort = await listen(upstream);
+  t.after(() => upstream.close());
+  const instance = await startApp({ goBaseUrl: `http://127.0.0.1:${upstreamPort}`, debug: { enabled: true, noReasoning: true, dumpDir: "" } });
+  t.after(instance.stop);
+
+  const response = await fetch(`${instance.base}/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ input: "hello", stream: false, reasoning: { effort: "high" } }),
+  });
+  assert.equal(response.status, 200);
+  assert.equal(receivedReasoning, undefined, "reasoning field must be stripped in debug noReasoning mode");
+});
+
+test("debug dump writes the transformed upstream payload to disk", async (t) => {
+  const dumpDir = await mkdtemp(path.join(os.tmpdir(), "modeldock-dump-"));
+  t.after(() => rm(dumpDir, { recursive: true, force: true }));
+  const upstream = createServer((req, res) => {
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify(okResponse));
+  });
+  const upstreamPort = await listen(upstream);
+  t.after(() => upstream.close());
+  const instance = await startApp({ goBaseUrl: `http://127.0.0.1:${upstreamPort}`, debug: { enabled: true, noReasoning: false, dumpDir } });
+  t.after(instance.stop);
+
+  const response = await fetch(`${instance.base}/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ input: "dump me", stream: false, model: "deepseek-v4-flash" }),
+  });
+  assert.equal(response.status, 200);
+  const { readdir } = await import("node:fs/promises");
+  const files = await readdir(dumpDir);
+  assert.equal(files.length, 1, "one dump file written");
+  const dumped = JSON.parse(await readFile(path.join(dumpDir, files[0]), "utf8"));
+  assert.equal(dumped.model, "deepseek-v4-flash");
+});
+
+test("api/status exposes debug flags without dump path leaks", async (t) => {
+  const instance = await startApp({ debug: { enabled: true, noReasoning: true, dumpDir: "" } });
+  t.after(instance.stop);
+  const response = await fetch(`${instance.base}/api/status`);
+  assert.equal(response.status, 200);
+  const status = await response.json();
+  assert.equal(status.config.debug.enabled, true);
+  assert.equal(status.config.debug.noReasoning, true);
+  assert.equal(status.config.debug.dumpDir, "");
 });

@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { MediaStore } from "../src/media-store.mjs";
 import { transformResponsesRequest } from "../src/transform.mjs";
+import { OPENCODE_GO_PROFILE } from "../src/profiles.mjs";
 
 function store() {
   return new MediaStore({ ttlMs: 60_000, maxBytes: 1024 * 1024, maxEntries: 8 });
@@ -18,7 +19,7 @@ test("filters Codex hosted tools and normalizes required tool choice", () => {
       ],
       tool_choice: "required",
     },
-    { mediaStore: store(), defaultModel: "deepseek-v4-flash" },
+    { mediaStore: store(), defaultModel: "deepseek-v4-flash", profile: OPENCODE_GO_PROFILE },
   );
 
   assert.equal(result.payload.model, "deepseek-v4-flash");
@@ -134,4 +135,28 @@ test("preserves all completed tool turns as native Responses pairs", () => {
   ]);
   assert.equal(result.payload.input[1].output, "old result");
   assert.equal(result.payload.input[3].output, "new result");
+});
+
+test("replaces image tool outputs with a cached reference instead of base64 text", () => {
+  const mediaStore = store();
+  const image = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZQmcAAAAASUVORK5CYII=";
+  const result = transformResponsesRequest(
+    {
+      model: "deepseek-v4-flash",
+      tools: [{ type: "function", name: "view_image", parameters: { type: "object", properties: {} } }],
+      input: [
+        { type: "function_call", id: "call_1", call_id: "call_1", name: "view_image", arguments: "{}" },
+        { type: "function_call_output", call_id: "call_1", output: [{ type: "input_image", image_url: image }] },
+      ],
+    },
+    { mediaStore, defaultModel: "deepseek-v4-flash" },
+  );
+  assert.equal(result.report.imageRefs.length, 1, "image ref should be registered");
+  assert.equal(mediaStore.get(result.report.imageRefs[0]).imageUrl, image);
+  assert.equal(result.report.compactedToolOutputBytes, 0, "base64 must not be embedded in output bytes");
+  const embedded = result.payload.input.some((item) => {
+    const text = typeof item?.content === "string" ? item.content : item?.output;
+    return typeof text === "string" && text.includes("iVBORw0KGgo");
+  });
+  assert.equal(embedded, false, "base64 payload must not appear in the forwarded input");
 });

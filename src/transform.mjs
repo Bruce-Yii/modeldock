@@ -1,4 +1,4 @@
-const BLOCKED_TOOL_TYPES = new Set(["tool_search", "web_search"]);
+const DEFAULT_BLOCKED_TOOL_TYPES = new Set(["tool_search", "web_search"]);
 
 const HARNESS_WEB_SEARCH_TOOL = {
   type: "function",
@@ -30,6 +30,13 @@ const HARNESS_VISION_TOOL = {
     required: ["image_ref", "question"],
   },
 };
+
+function resolveProfileOptions(profile) {
+  const blockedToolTypes = profile?.blockedToolTypes || DEFAULT_BLOCKED_TOOL_TYPES;
+  const webSearchTool = profile?.harnessTools?.webSearch || null;
+  const visionTool = profile?.harnessTools?.vision || null;
+  return { blockedToolTypes, webSearchTool, visionTool };
+}
 
 function normalizeInput(input) {
   if (typeof input !== "string") return input;
@@ -71,8 +78,21 @@ function normalizeAssistantMessages(input) {
   });
 }
 
-function toolOutputText(output) {
+function toolOutputText(output, mediaStore, imageRefs) {
   if (typeof output === "string") return output;
+  if (Array.isArray(output) && mediaStore) {
+    const replaced = output.map((part) => {
+      if (!part || typeof part !== "object" || part.type !== "input_image" || typeof part.image_url !== "string") return part;
+      const ref = mediaStore.put(part.image_url);
+      imageRefs?.push(ref);
+      return `[Image attachment ${ref}. The main model cannot inspect it directly. Use harness_vision_inspect with image_ref "${ref}" before making visual claims.]`;
+    });
+    if (replaced.some((part, index) => part !== output[index])) {
+      return replaced
+        .map((part) => (typeof part === "string" ? part : toolOutputText(part, mediaStore, imageRefs)))
+        .join("\n");
+    }
+  }
   try {
     return JSON.stringify(output);
   } catch {
@@ -154,8 +174,8 @@ function moveInterleavedAssistantBeforeToolCalls(input) {
   return reordered;
 }
 
-function fallbackToolReceipt(call, output) {
-  const text = toolOutputText(output);
+function fallbackToolReceipt(call, output, mediaStore, imageRefs) {
+  const text = toolOutputText(output, mediaStore, imageRefs);
   return {
     item: {
       type: "message",
@@ -180,7 +200,7 @@ function fallbackToolReceipt(call, output) {
   };
 }
 
-function normalizeToolHistory(input, tools) {
+function normalizeToolHistory(input, tools, mediaStore, imageRefs, { canonicalizeCallIds = true } = {}) {
   const expanded = moveInterleavedAssistantBeforeToolCalls(expandChatToolHistory(input));
   if (!Array.isArray(expanded)) {
     return { input: expanded, nativeCalls: 0, nativeOutputs: 0, fallbackResults: 0, fallbackOutputBytes: 0, canonicalizedCallIds: 0 };
@@ -218,10 +238,11 @@ function normalizeToolHistory(input, tools) {
     if (item.type === "function_call" || item.type === "custom_tool_call") {
       if (!item.call_id || !outputCallIds.has(item.call_id) || !replayableCallIds.has(item.call_id)) return [];
       nativeCalls += 1;
-      if (item.id !== item.call_id) canonicalizedCallIds += 1;
+      const callId = canonicalizeCallIds ? item.call_id : item.id || item.call_id;
+      if (canonicalizeCallIds && item.id !== item.call_id) canonicalizedCallIds += 1;
       return [{
         type: "function_call",
-        id: item.call_id,
+        id: callId,
         call_id: item.call_id,
         name: item.name,
         arguments: toolCallArguments(item.type === "custom_tool_call" ? item.input : item.arguments),
@@ -235,10 +256,10 @@ function normalizeToolHistory(input, tools) {
           type: "function_call_output",
           ...(item.id ? { id: item.id } : {}),
           call_id: item.call_id,
-          output: toolOutputText(item.output),
+          output: toolOutputText(item.output, mediaStore, imageRefs),
         }];
       }
-      const receipt = fallbackToolReceipt(calls.get(item.call_id), item.output);
+      const receipt = fallbackToolReceipt(calls.get(item.call_id), item.output, mediaStore, imageRefs);
       fallbackResults += 1;
       fallbackOutputBytes += receipt.bytes;
       return [receipt.item];
@@ -249,7 +270,7 @@ function normalizeToolHistory(input, tools) {
   return { input: normalized, nativeCalls, nativeOutputs, fallbackResults, fallbackOutputBytes, canonicalizedCallIds };
 }
 
-function compactCompletedToolHistory(input) {
+function compactCompletedToolHistory(input, mediaStore, imageRefs) {
   if (!Array.isArray(input)) return { input, compacted: 0, outputBytes: 0 };
   const calls = new Map(input
     .filter((item) => (item?.type === "function_call" || item?.type === "custom_tool_call") && item.call_id)
@@ -261,7 +282,7 @@ function compactCompletedToolHistory(input) {
   const compacted = input.flatMap((item) => {
     if (item?.call_id && completed.has(item.call_id) && (item.type === "function_call" || item.type === "custom_tool_call")) return [];
     if (item?.call_id && completed.has(item.call_id) && (item.type === "function_call_output" || item.type === "custom_tool_call_output")) {
-      const receipt = fallbackToolReceipt(calls.get(item.call_id), item.output);
+      const receipt = fallbackToolReceipt(calls.get(item.call_id), item.output, mediaStore, imageRefs);
       outputBytes += receipt.bytes;
       return [receipt.item];
     }
@@ -322,17 +343,22 @@ function rewriteImages(input, mediaStore, imageRefs, currentImageRefs, { preserv
   });
 }
 
-export function transformResponsesRequest(source, { mediaStore, defaultModel, targetModel, directVision = false, compactCompletedToolHistory: shouldCompactCompletedToolHistory = false }) {
+export function transformResponsesRequest(source, { mediaStore, defaultModel, targetModel, directVision = false, profile = null }) {
   if (!source || typeof source !== "object" || Array.isArray(source)) {
     throw new Error("Responses request body must be a JSON object");
   }
+
+  const { blockedToolTypes, webSearchTool, visionTool } = resolveProfileOptions(profile);
+  const shouldCompactCompletedToolHistory = Boolean(profile?.compactCompletedToolHistory);
+  const shouldCanonicalizeCallIds = profile?.canonicalizeCallIds !== false;
+  const shouldStripReasoningPlaceholder = profile?.stripSyntheticReasoningPlaceholder !== false;
 
   const payload = structuredClone(source);
   const originalTools = Array.isArray(payload.tools) ? payload.tools : [];
   const blocked = { tool_search: 0, web_search: 0 };
   if (Array.isArray(payload.tools)) {
     payload.tools = payload.tools.filter((tool) => {
-      if (!tool || !BLOCKED_TOOL_TYPES.has(tool.type)) return true;
+      if (!tool || !blockedToolTypes.has(tool.type)) return true;
       blocked[tool.type] += 1;
       return false;
     });
@@ -351,18 +377,18 @@ export function transformResponsesRequest(source, { mediaStore, defaultModel, ta
   const currentImageRefs = [];
   const rewrittenInput = rewriteImages(normalizeInput(payload.input), mediaStore, imageRefs, currentImageRefs, { preserveImages: directVision });
   const injectedHarnessTools = [];
-  if (blocked.tool_search > 0 || blocked.web_search > 0) {
+  if (webSearchTool && (blocked.tool_search > 0 || blocked.web_search > 0)) {
     if (!Array.isArray(payload.tools)) payload.tools = [];
-    payload.tools.push(structuredClone(HARNESS_WEB_SEARCH_TOOL));
-    injectedHarnessTools.push(HARNESS_WEB_SEARCH_TOOL.name);
+    payload.tools.push(structuredClone(webSearchTool));
+    injectedHarnessTools.push(webSearchTool.name);
   }
-  if (currentImageRefs.length > 0 && !directVision) {
+  if (visionTool && currentImageRefs.length > 0 && !directVision) {
     if (!Array.isArray(payload.tools)) payload.tools = [];
-    payload.tools.push(structuredClone(HARNESS_VISION_TOOL));
-    injectedHarnessTools.push(HARNESS_VISION_TOOL.name);
+    payload.tools.push(structuredClone(visionTool));
+    injectedHarnessTools.push(visionTool.name);
   }
-  const toolHistory = normalizeToolHistory(rewrittenInput, payload.tools);
-  const compactedHistory = shouldCompactCompletedToolHistory ? compactCompletedToolHistory(toolHistory.input) : { input: toolHistory.input, compacted: 0, outputBytes: 0 };
+  const toolHistory = normalizeToolHistory(rewrittenInput, payload.tools, mediaStore, imageRefs, { canonicalizeCallIds: shouldCanonicalizeCallIds });
+  const compactedHistory = shouldCompactCompletedToolHistory ? compactCompletedToolHistory(toolHistory.input, mediaStore, imageRefs) : { input: toolHistory.input, compacted: 0, outputBytes: 0 };
   const stringifiedAssistantMessages = Array.isArray(compactedHistory.input)
     ? compactedHistory.input.filter((item) => item?.role === "assistant" && Array.isArray(item.content) && assistantMessageText(item).length > 0).length
     : 0;
@@ -374,7 +400,8 @@ export function transformResponsesRequest(source, { mediaStore, defaultModel, ta
     ? normalizedInput.filter((item) => item?.role === "assistant").length
     : 0;
   const droppedAssistantMessages = assistantMessagesBefore - assistantMessagesAfter;
-  payload.input = ensureItemIds(removeSyntheticReasoningPlaceholder(normalizedInput));
+  const withIds = ensureItemIds(normalizedInput);
+  payload.input = shouldStripReasoningPlaceholder ? removeSyntheticReasoningPlaceholder(withIds) : withIds;
   payload.model = targetModel || payload.model || defaultModel;
   if (directVision) {
     const routeInstruction = [

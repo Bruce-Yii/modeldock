@@ -1,6 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { transformResponsesRequest } from "./transform.mjs";
+import { OPENCODE_GO_PROFILE } from "./profiles.mjs";
+
+const NATIVE_PAIR_PROFILE = { ...OPENCODE_GO_PROFILE, compactCompletedToolHistory: false };
 
 function fakeStore() {
   const puts = [];
@@ -33,7 +36,9 @@ function baseRequest() {
 
 test("passes through a plain request unchanged", () => {
   const source = baseRequest();
-  const { payload, report } = transformResponsesRequest(source, { mediaStore: fakeStore(), defaultModel: "deepseek-v4-flash" });
+  const { payload, report } = transformResponsesRequest(source, {
+      profile: OPENCODE_GO_PROFILE,
+      mediaStore: fakeStore(), defaultModel: "deepseek-v4-flash" });
   assert.equal(payload.model, "deepseek-v4-flash");
   assert.equal(payload.stream, true);
   assert.equal(payload.tools.length, 1);
@@ -52,7 +57,9 @@ test("filters web_search and tool_search tools and counts them", () => {
     { type: "function", name: "f1", description: "d" },
     { type: "web_search" },
   ];
-  const { payload, report } = transformResponsesRequest(source, { mediaStore: fakeStore(), defaultModel: "d" });
+  const { payload, report } = transformResponsesRequest(source, {
+      profile: OPENCODE_GO_PROFILE,
+      mediaStore: fakeStore(), defaultModel: "d" });
   assert.deepEqual(payload.tools.map((t) => t.name), ["f1", "harness_web_search"]);
   assert.deepEqual(report.blocked, { tool_search: 1, web_search: 2 });
   assert.equal(report.originalToolCount, 4);
@@ -63,7 +70,9 @@ test("filters web_search and tool_search tools and counts them", () => {
 test("rewrites tool_choice required to auto", () => {
   const source = baseRequest();
   source.tool_choice = "required";
-  const { payload, report } = transformResponsesRequest(source, { mediaStore: fakeStore(), defaultModel: "d" });
+  const { payload, report } = transformResponsesRequest(source, {
+      profile: OPENCODE_GO_PROFILE,
+      mediaStore: fakeStore(), defaultModel: "d" });
   assert.equal(payload.tool_choice, "auto");
   assert.equal(report.toolChoiceRewritten, true);
 });
@@ -72,7 +81,9 @@ test("leaves tool_choice auto and none untouched", () => {
   for (const value of ["auto", "none"]) {
     const source = baseRequest();
     source.tool_choice = value;
-    const { payload, report } = transformResponsesRequest(source, { mediaStore: fakeStore(), defaultModel: "d" });
+    const { payload, report } = transformResponsesRequest(source, {
+      profile: OPENCODE_GO_PROFILE,
+      mediaStore: fakeStore(), defaultModel: "d" });
     assert.equal(payload.tool_choice, value);
     assert.equal(report.toolChoiceRewritten, false);
   }
@@ -81,12 +92,16 @@ test("leaves tool_choice auto and none untouched", () => {
 test("defaults model when absent", () => {
   const source = baseRequest();
   delete source.model;
-  const { payload } = transformResponsesRequest(source, { mediaStore: fakeStore(), defaultModel: "fallback-model" });
+  const { payload } = transformResponsesRequest(source, {
+      profile: OPENCODE_GO_PROFILE,
+      mediaStore: fakeStore(), defaultModel: "fallback-model" });
   assert.equal(payload.model, "fallback-model");
 });
 
 test("normalizes string input into a user message", () => {
-  const { payload } = transformResponsesRequest({ input: "just a string" }, { mediaStore: fakeStore(), defaultModel: "d" });
+  const { payload } = transformResponsesRequest({ input: "just a string" }, {
+      profile: OPENCODE_GO_PROFILE,
+      mediaStore: fakeStore(), defaultModel: "d" });
   assert.equal(payload.input.length, 1);
   assert.equal(payload.input[0].role, "user");
   assert.deepEqual(payload.input[0].content, [{ type: "input_text", text: "just a string" }]);
@@ -104,7 +119,9 @@ test("replaces input_image with placeholder text and registers media ref", () =>
       ],
     },
   ];
-  const { payload, report } = transformResponsesRequest(source, { mediaStore: store, defaultModel: "d" });
+  const { payload, report } = transformResponsesRequest(source, {
+      profile: OPENCODE_GO_PROFILE,
+      mediaStore: store, defaultModel: "d" });
   const parts = payload.input[0].content;
   assert.equal(parts.length, 2);
   assert.equal(parts[0].type, "input_text");
@@ -145,7 +162,9 @@ test("historical images do not re-advertise the fallback vision tool after a Lun
     { role: "assistant", content: [{ type: "output_text", text: "The image shows a covered button." }] },
     { role: "user", content: [{ type: "input_text", text: "Now implement the fix." }] },
   ];
-  const { payload, report } = transformResponsesRequest(source, { mediaStore: fakeStore(), defaultModel: "deepseek-v4-flash" });
+  const { payload, report } = transformResponsesRequest(source, {
+      profile: OPENCODE_GO_PROFILE,
+      mediaStore: fakeStore(), defaultModel: "deepseek-v4-flash" });
   assert.match(payload.input[0].content[0].text, /Earlier image attachment/);
   assert.match(payload.input[0].content[0].text, /following assistant observation/);
   assert.equal(payload.tools.some((tool) => tool.name === "harness_vision_inspect"), false);
@@ -161,7 +180,9 @@ test("handles multiple images across multiple messages", () => {
       { role: "user", content: [{ type: "input_image", image_url: IMAGE_DATA_URL_2 }] },
     ],
   };
-  const { payload, report } = transformResponsesRequest(source, { mediaStore: store, defaultModel: "d" });
+  const { payload, report } = transformResponsesRequest(source, {
+      profile: OPENCODE_GO_PROFILE,
+      mediaStore: store, defaultModel: "d" });
   assert.deepEqual(report.imageRefs, ["img_1", "img_2"]);
   assert.equal(payload.input[1].content[0].type, "input_text");
   assert.deepEqual(store.puts, [IMAGE_DATA_URL, IMAGE_DATA_URL_2]);
@@ -175,14 +196,18 @@ test("deduplicates image refs in the report when the same url repeats", () => {
       { role: "user", content: [{ type: "input_image", image_url: IMAGE_DATA_URL }] },
     ],
   };
-  const { report } = transformResponsesRequest(source, { mediaStore: store, defaultModel: "d" });
+  const { report } = transformResponsesRequest(source, {
+      profile: OPENCODE_GO_PROFILE,
+      mediaStore: store, defaultModel: "d" });
   assert.deepEqual(report.imageRefs, ["img_1"]);
 });
 
 test("keeps string elements in input arrays untouched", () => {
   const store = fakeStore();
   const source = { input: ["plain string", { role: "user", content: [{ type: "input_text", text: "x" }] }] };
-  const { payload } = transformResponsesRequest(source, { mediaStore: store, defaultModel: "d" });
+  const { payload } = transformResponsesRequest(source, {
+      profile: OPENCODE_GO_PROFILE,
+      mediaStore: store, defaultModel: "d" });
   assert.equal(payload.input[0], "plain string");
   assert.equal(payload.input[1].role, "user");
 });
@@ -193,16 +218,22 @@ test("keeps items without content arrays untouched", () => {
       { type: "message", role: "user", content: "text-only-string-content" },
     ],
   };
-  const { payload } = transformResponsesRequest(source, { mediaStore: fakeStore(), defaultModel: "d" });
+  const { payload } = transformResponsesRequest(source, {
+      profile: OPENCODE_GO_PROFILE,
+      mediaStore: fakeStore(), defaultModel: "d" });
   assert.equal(payload.input[0].content, "text-only-string-content");
 });
 
 test("rejects null body", () => {
-  assert.throws(() => transformResponsesRequest(null, { mediaStore: fakeStore(), defaultModel: "d" }), /must be a JSON object/);
+  assert.throws(() => transformResponsesRequest(null, {
+      profile: OPENCODE_GO_PROFILE,
+      mediaStore: fakeStore(), defaultModel: "d" }), /must be a JSON object/);
 });
 
 test("rejects array body", () => {
-  assert.throws(() => transformResponsesRequest([], { mediaStore: fakeStore(), defaultModel: "d" }), /must be a JSON object/);
+  assert.throws(() => transformResponsesRequest([], {
+      profile: OPENCODE_GO_PROFILE,
+      mediaStore: fakeStore(), defaultModel: "d" }), /must be a JSON object/);
 });
 
 test("propagates media store errors for invalid image urls", () => {
@@ -212,13 +243,17 @@ test("propagates media store errors for invalid image urls", () => {
     },
   };
   const source = { input: [{ role: "user", content: [{ type: "input_image", image_url: "http://x/y.png" }] }] };
-  assert.throws(() => transformResponsesRequest(source, { mediaStore: store, defaultModel: "d" }), /Only image data URLs/);
+  assert.throws(() => transformResponsesRequest(source, {
+      profile: OPENCODE_GO_PROFILE,
+      mediaStore: store, defaultModel: "d" }), /Only image data URLs/);
 });
 
 test("handles missing tools array", () => {
   const source = baseRequest();
   delete source.tools;
-  const { payload, report } = transformResponsesRequest(source, { mediaStore: fakeStore(), defaultModel: "d" });
+  const { payload, report } = transformResponsesRequest(source, {
+      profile: OPENCODE_GO_PROFILE,
+      mediaStore: fakeStore(), defaultModel: "d" });
   assert.equal(payload.tools, undefined);
   assert.equal(report.originalToolCount, 0);
   assert.equal(report.forwardedToolCount, 0);
@@ -231,7 +266,9 @@ test("does not mutate the source object", () => {
   source.tools.push({ type: "web_search" });
   source.input[0].content.push({ type: "input_image", image_url: IMAGE_DATA_URL });
   const before = JSON.stringify(source);
-  transformResponsesRequest(source, { mediaStore: store, defaultModel: "d" });
+  transformResponsesRequest(source, {
+      profile: OPENCODE_GO_PROFILE,
+      mediaStore: store, defaultModel: "d" });
   assert.equal(JSON.stringify(source), before);
 });
 
@@ -239,7 +276,9 @@ test("forces parallel_tool_calls to false and reports the rewrite", () => {
   for (const incoming of [true, false, undefined]) {
     const source = baseRequest();
     if (incoming !== undefined) source.parallel_tool_calls = incoming;
-    const { payload, report } = transformResponsesRequest(source, { mediaStore: fakeStore(), defaultModel: "d" });
+    const { payload, report } = transformResponsesRequest(source, {
+      profile: OPENCODE_GO_PROFILE,
+      mediaStore: fakeStore(), defaultModel: "d" });
     assert.equal(payload.parallel_tool_calls, false);
     assert.equal(report.parallelToolCallsRewritten, incoming !== false);
   }
@@ -253,7 +292,9 @@ test("injects ids into replayable native tool result items for Go", () => {
       { type: "function_call_output", call_id: "call_123", output: "done" },
     ],
   };
-  const { payload } = transformResponsesRequest(source, { mediaStore: fakeStore(), defaultModel: "d" });
+  const { payload } = transformResponsesRequest(source, {
+      profile: NATIVE_PAIR_PROFILE,
+      mediaStore: fakeStore(), defaultModel: "d" });
   assert.equal(payload.input[1].id, "function_call_output_call_123");
 });
 
@@ -265,7 +306,9 @@ test("sanitizes call ids used in injected item ids", () => {
       { type: "function_call_output", call_id: "weird id/with spaces", output: "done" },
     ],
   };
-  const { payload } = transformResponsesRequest(source, { mediaStore: fakeStore(), defaultModel: "d" });
+  const { payload } = transformResponsesRequest(source, {
+      profile: NATIVE_PAIR_PROFILE,
+      mediaStore: fakeStore(), defaultModel: "d" });
   assert.equal(payload.input[1].id, "function_call_output_weird_id_with_spaces");
 });
 
@@ -278,7 +321,9 @@ test("canonicalizes function item ids to call ids and preserves output ids", () 
       { role: "user", content: [{ type: "input_text", text: "hi" }] },
     ],
   };
-  const { payload } = transformResponsesRequest(source, { mediaStore: fakeStore(), defaultModel: "d" });
+  const { payload } = transformResponsesRequest(source, {
+      profile: NATIVE_PAIR_PROFILE,
+      mediaStore: fakeStore(), defaultModel: "d" });
   assert.equal(payload.input[0].id, "c1");
   assert.equal(payload.input[1].id, "already_has_id");
   assert.equal(payload.input[2].id, undefined);
@@ -292,7 +337,9 @@ test("repairs mismatched temporary streaming item ids for Go history replay", ()
       { type: "function_call_output", id: "fco_result", call_id: "call_YaC6ucV1O2LnEtfbcQxSYycc", output: "ok" },
     ],
   };
-  const { payload, report } = transformResponsesRequest(source, { mediaStore: fakeStore(), defaultModel: "d" });
+  const { payload, report } = transformResponsesRequest(source, {
+      profile: NATIVE_PAIR_PROFILE,
+      mediaStore: fakeStore(), defaultModel: "d" });
   assert.equal(payload.input[0].id, "call_YaC6ucV1O2LnEtfbcQxSYycc");
   assert.equal(payload.input[0].id, payload.input[0].call_id);
   assert.equal(payload.input[1].call_id, payload.input[0].call_id);
@@ -301,7 +348,9 @@ test("repairs mismatched temporary streaming item ids for Go history replay", ()
 
 test("reports input shape for inspection", () => {
   const source = baseRequest();
-  const { report } = transformResponsesRequest(source, { mediaStore: fakeStore(), defaultModel: "d" });
+  const { report } = transformResponsesRequest(source, {
+      profile: NATIVE_PAIR_PROFILE,
+      mediaStore: fakeStore(), defaultModel: "d" });
   assert.ok(Array.isArray(report.inputShape));
   assert.equal(report.inputShape[0].role, "user");
   assert.equal(report.inputShape[0].contentKind, "array");
@@ -319,7 +368,9 @@ test("drops empty assistant shells and preserves native Responses tool pairs", (
       { role: "user", content: [{ type: "input_text", text: "continue" }] },
     ],
   };
-  const { payload, report } = transformResponsesRequest(source, { mediaStore: fakeStore(), defaultModel: "d" });
+  const { payload, report } = transformResponsesRequest(source, {
+      profile: NATIVE_PAIR_PROFILE,
+      mediaStore: fakeStore(), defaultModel: "d" });
   const roles = payload.input.map((item) => item.role || item.type);
   assert.deepEqual(roles, ["user", "function_call", "function_call_output", "user"]);
   assert.equal(payload.input[1].call_id, "call_1");
@@ -343,7 +394,9 @@ test("preserves interleaved assistant and tool-result chronology across repeated
       { type: "custom_tool_call_output", call_id: "call_2", output: "second result" },
     ],
   };
-  const { payload, report } = transformResponsesRequest(source, { mediaStore: fakeStore(), defaultModel: "d" });
+  const { payload, report } = transformResponsesRequest(source, {
+      profile: NATIVE_PAIR_PROFILE,
+      mediaStore: fakeStore(), defaultModel: "d" });
   assert.deepEqual(payload.input.map((item) => item.role || item.type), [
     "user", "assistant", "function_call", "function_call_output", "assistant", "function_call", "function_call_output",
   ]);
@@ -371,7 +424,9 @@ test("repairs a custom call whose streamed assistant preamble was recorded befor
       { type: "custom_tool_call_output", call_id: "call_patch", output: "Success" },
     ],
   };
-  const { payload, report } = transformResponsesRequest(source, { mediaStore: fakeStore(), defaultModel: "d" });
+  const { payload, report } = transformResponsesRequest(source, {
+      profile: NATIVE_PAIR_PROFILE,
+      mediaStore: fakeStore(), defaultModel: "d" });
   assert.deepEqual(payload.input.map((item) => item.role || item.type), [
     "user", "assistant", "function_call", "function_call_output",
   ]);
@@ -389,7 +444,9 @@ test("falls back to a receipt when historical tool declaration is unavailable", 
       { type: "custom_tool_call_output", call_id: "call_old", output: "historical result" },
     ],
   };
-  const { payload, report } = transformResponsesRequest(source, { mediaStore: fakeStore(), defaultModel: "d" });
+  const { payload, report } = transformResponsesRequest(source, {
+      profile: NATIVE_PAIR_PROFILE,
+      mediaStore: fakeStore(), defaultModel: "d" });
   assert.deepEqual(payload.input.map((item) => item.role || item.type), ["user"]);
   assert.match(payload.input[0].content[0].text, /TOOL_EXECUTION_COMPLETED[\s\S]*lazy_tool[\s\S]*historical result/);
   assert.equal(report.nativeToolCalls, 0);
@@ -401,7 +458,9 @@ test("keeps assistant messages with text content", () => {
   const source = {
     input: [{ role: "assistant", content: [{ type: "output_text", text: "I will check" }] }],
   };
-  const { payload } = transformResponsesRequest(source, { mediaStore: fakeStore(), defaultModel: "d" });
+  const { payload } = transformResponsesRequest(source, {
+      profile: NATIVE_PAIR_PROFILE,
+      mediaStore: fakeStore(), defaultModel: "d" });
   assert.equal(payload.input.length, 1);
   assert.equal(payload.input[0].content, "I will check", "Go accepts historical assistant content only as a string");
 });
@@ -413,7 +472,9 @@ test("joins multiple assistant text parts into Go-compatible string content", ()
       { type: "output_text", text: "second" },
     ] }],
   };
-  const { payload, report } = transformResponsesRequest(source, { mediaStore: fakeStore(), defaultModel: "d" });
+  const { payload, report } = transformResponsesRequest(source, {
+      profile: NATIVE_PAIR_PROFILE,
+      mediaStore: fakeStore(), defaultModel: "d" });
   assert.equal(payload.input[0].content, "first\nsecond");
   assert.equal(report.stringifiedAssistantMessages, 1);
   assert.equal(report.inputShape[0].contentKind, "string");
@@ -427,7 +488,9 @@ test("converts a complete Chat tool pair into native Responses items", () => {
       { role: "tool", tool_call_id: "t1", content: "ok" },
     ],
   };
-  const { payload } = transformResponsesRequest(source, { mediaStore: fakeStore(), defaultModel: "d" });
+  const { payload } = transformResponsesRequest(source, {
+      profile: NATIVE_PAIR_PROFILE,
+      mediaStore: fakeStore(), defaultModel: "d" });
   assert.deepEqual(payload.input.map((item) => item.type), ["function_call", "function_call_output"]);
   assert.equal(payload.input[0].call_id, "t1");
   assert.equal(payload.input[1].call_id, "t1");
@@ -437,7 +500,9 @@ test("drops assistant messages with reasoning-only content", () => {
   const source = {
     input: [{ role: "assistant", content: [{ type: "reasoning", summary: ["thinking"] }] }],
   };
-  const { payload } = transformResponsesRequest(source, { mediaStore: fakeStore(), defaultModel: "d" });
+  const { payload } = transformResponsesRequest(source, {
+      profile: NATIVE_PAIR_PROFILE,
+      mediaStore: fakeStore(), defaultModel: "d" });
   assert.equal(payload.input.length, 0, "reasoning-only content counts as empty");
 });
 
@@ -448,6 +513,8 @@ test("drops assistant messages with string empty content", () => {
       { role: "user", content: "hi" },
     ],
   };
-  const { payload } = transformResponsesRequest(source, { mediaStore: fakeStore(), defaultModel: "d" });
+  const { payload } = transformResponsesRequest(source, {
+      profile: NATIVE_PAIR_PROFILE,
+      mediaStore: fakeStore(), defaultModel: "d" });
   assert.deepEqual(payload.input.map((item) => item.role), ["user"]);
 });
