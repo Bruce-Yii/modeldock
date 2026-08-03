@@ -109,6 +109,19 @@ test("messaging mode is exposed and can switch at runtime", async (t) => {
   assert.equal(final.messaging.mode, "streaming");
 });
 
+test("model API exposes selectable main and vision-capable options", async (t) => {
+  const instance = await startApp();
+  t.after(instance.stop);
+  const initial = await (await fetch(`${instance.base}/api/models`)).json();
+  assert.equal(initial.selected.mainModel, "deepseek-v4-flash");
+  assert.deepEqual(initial.options.filter((model) => model.supportsVision).map((model) => model.id), ["gpt-5.6-luna", "kimi-k2.5"]);
+  const changed = await fetch(`${instance.base}/api/models`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ mainModel: "gpt-5.6-luna", visionModel: "kimi-k2.5" }) });
+  assert.equal(changed.status, 200);
+  assert.deepEqual((await changed.json()).selected, { mainModel: "gpt-5.6-luna", visionModel: "kimi-k2.5" });
+  const invalid = await fetch(`${instance.base}/api/models`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ visionModel: "deepseek-v4-flash" }) });
+  assert.equal(invalid.status, 400);
+});
+
 test("non-streaming relay: forwards normalized body with auth and parses usage", async (t) => {
   let received;
   let auth;

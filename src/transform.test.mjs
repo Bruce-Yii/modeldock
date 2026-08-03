@@ -391,7 +391,7 @@ test("falls back to a receipt when historical tool declaration is unavailable", 
   };
   const { payload, report } = transformResponsesRequest(source, { mediaStore: fakeStore(), defaultModel: "d" });
   assert.deepEqual(payload.input.map((item) => item.role || item.type), ["user"]);
-  assert.match(payload.input[0].content[0].text, /TOOL_EXECUTION_RECEIPT[\s\S]*lazy_tool[\s\S]*historical result/);
+  assert.match(payload.input[0].content[0].text, /TOOL_EXECUTION_COMPLETED[\s\S]*lazy_tool[\s\S]*historical result/);
   assert.equal(report.nativeToolCalls, 0);
   assert.equal(report.fallbackToolResults, 1);
   assert.equal(report.compactedToolResults, 1);

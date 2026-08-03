@@ -25,10 +25,26 @@ function goUrl(config, resource) {
   return `${config.goBaseUrl.replace(/\/$/, "")}/${resource.replace(/^\//, "")}`;
 }
 
-function statusPayload({ config, metrics, mediaStore, routeAffinity, messaging }) {
+const MODEL_CATALOG = [
+  { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash", supportsVision: false },
+  { id: "gpt-5.6-luna", label: "Luna", supportsVision: true },
+  { id: "kimi-k2.5", label: "Kimi K2.5", supportsVision: true },
+];
+
+function modelOptions(config) {
+  const entries = [...MODEL_CATALOG];
+  for (const id of [config.mainModel, config.visionModel, config.visionFallbackModel]) {
+    if (id && !entries.some((entry) => entry.id === id)) entries.push({ id, label: id, supportsVision: id === config.visionModel || id === config.visionFallbackModel });
+  }
+  return entries;
+}
+
+function statusPayload({ config, metrics, mediaStore, routeAffinity, messaging, modelSelection }) {
+  const selected = modelSelection || { mainModel: config.mainModel, visionModel: config.visionModel };
   return metrics.snapshot({
     ready: Boolean(config.goToken),
-    config: publicConfig(config),
+    config: publicConfig({ ...config, mainModel: selected.mainModel, visionModel: selected.visionModel }),
+    models: { selected, options: modelOptions(config) },
     messaging: { mode: messaging?.mode || "streaming" },
     media: mediaStore.snapshot(),
     routing: routeAffinity?.snapshot?.() || { activeCallIds: 0 },
@@ -310,7 +326,7 @@ async function relayLiveResponses(payload, res, services, signal) {
 
     if (mode !== "harness") {
       if (mode === "custom" && call) writer.customFunction(call, argumentsText);
-      if (call?.call_id && payload.model === services.config.visionModel) {
+      if (call?.call_id && payload.model === services.modelSelection.visionModel) {
         services.routeAffinity.register(call.call_id, payload.model);
       }
       const response = writer.finish(usage);
@@ -372,12 +388,12 @@ async function relayBufferedResponses(payload, res, services, signal) {
 }
 
 async function relayResponses(req, res, services) {
-  const { config, metrics, mediaStore, routeAffinity } = services;
+  const { config, metrics, mediaStore, routeAffinity, modelSelection } = services;
   const source = req.body;
   const bytesIn = Buffer.byteLength(JSON.stringify(source ?? {}));
   const finish = metrics.begin("responses", {
     operation: "responses",
-    requestedModel: source?.model || config.mainModel,
+    requestedModel: source?.model || modelSelection.mainModel,
     streaming: source?.stream === true,
   });
 
@@ -390,13 +406,13 @@ async function relayResponses(req, res, services) {
   let route;
   try {
     route = routeResponsesRequest(source, {
-      mainModel: config.mainModel,
-      visionModel: config.visionModel,
+      mainModel: modelSelection.mainModel,
+      visionModel: modelSelection.visionModel,
       affinity: routeAffinity,
     });
     transformed = transformResponsesRequest(source, {
       mediaStore,
-      defaultModel: config.mainModel,
+      defaultModel: modelSelection.mainModel,
       targetModel: route.model,
       directVision: route.directVision,
     });
@@ -622,7 +638,7 @@ export function codexModelCatalog(config) {
   };
 }
 
-function serveModels(req, res, { config }) {
+function serveModels(req, res, { config, modelSelection }) {
   return res.json(codexModelCatalog(config));
 }
 
@@ -633,7 +649,8 @@ export function createServices(config = loadConfig()) {
     maxBytes: config.mediaMaxBytes,
     maxEntries: config.mediaMaxEntries,
   });
-  const upstreams = createUpstreams({ config, metrics, mediaStore });
+  const modelSelection = { mainModel: config.mainModel, visionModel: config.visionModel };
+  const upstreams = createUpstreams({ config, metrics, mediaStore, getVisionModel: () => modelSelection.visionModel });
   const configSwitcher = new CodexConfigSwitcher({
     codexHome: config.codexHome,
     baseUrl: `http://${urlHost(config.host)}:${config.port}/v1`,
@@ -641,7 +658,7 @@ export function createServices(config = loadConfig()) {
   });
   const routeAffinity = new RouteAffinity();
   const messaging = { mode: config.messagingMode === "buffered" ? "buffered" : "streaming" };
-  return { config, metrics, mediaStore, upstreams, configSwitcher, routeAffinity, messaging };
+  return { config, metrics, mediaStore, upstreams, configSwitcher, routeAffinity, messaging, modelSelection };
 }
 
 export function createApp(services = createServices()) {
@@ -696,6 +713,21 @@ export function createApp(services = createServices()) {
   app.post("/api/config/enable", mutateConfig, configAction("enable"));
   app.post("/api/config/disable", mutateConfig, configAction("disable"));
   app.post("/api/config/restart-ack", mutateConfig, configAction("acknowledgeRestart"));
+  app.get("/api/models", (req, res) => res.json({ selected: services.modelSelection, options: modelOptions(config) }));
+  app.post("/api/models", mutateConfig, (req, res) => {
+    const current = services.modelSelection;
+    const nextMain = req.body?.mainModel === undefined ? current.mainModel : req.body.mainModel;
+    const nextVision = req.body?.visionModel === undefined ? current.visionModel : req.body.visionModel;
+    const options = modelOptions(config);
+    const main = options.find((entry) => entry.id === nextMain);
+    const vision = options.find((entry) => entry.id === nextVision);
+    if (!main || !vision || !vision.supportsVision) return res.status(400).json({ error: { type: "invalid_model_selection", message: "Vision must be selected from a vision-capable model." } });
+    services.modelSelection.mainModel = nextMain;
+    services.modelSelection.visionModel = nextVision;
+    services.configSwitcher.model = nextMain;
+    recordConfigAction(metrics, "models_update", { ok: true });
+    return res.json({ selected: services.modelSelection, options });
+  });
   app.post("/api/messaging", mutateConfig, (req, res) => {
     const mode = req.body?.mode;
     if (mode !== "buffered" && mode !== "streaming") {

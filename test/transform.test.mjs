@@ -80,6 +80,36 @@ test("does not invent reasoning content on returned function calls", () => {
   assert.equal(result.payload.input[0].reasoning_content, undefined);
 });
 
+test("preserves an existing reasoning_content on returned function calls", () => {
+  const result = transformResponsesRequest(
+    {
+      tools: [{ type: "function", name: "lookup", parameters: { type: "object", properties: {} } }],
+      input: [
+        { type: "function_call", id: "fc_1", call_id: "call_1", name: "lookup", arguments: "{}", reasoning_content: "original" },
+        { type: "function_call_output", call_id: "call_1", output: "ok" },
+      ],
+    },
+    { mediaStore: store(), defaultModel: "deepseek-v4-flash" },
+  );
+  assert.equal(result.payload.input[0].reasoning_content, "original");
+});
+
+test("removes the legacy ModelDock reasoning placeholder from history", () => {
+  const result = transformResponsesRequest(
+    {
+      tools: [{ type: "function", name: "lookup", parameters: { type: "object", properties: {} } }],
+      input: [
+        { role: "assistant", content: [{ type: "output_text", text: "Checking." }], reasoning_content: "tool call" },
+        { type: "function_call", id: "fc_1", call_id: "call_1", name: "lookup", arguments: "{}", reasoning_content: "tool call" },
+        { type: "function_call_output", call_id: "call_1", output: "ok" },
+      ],
+    },
+    { mediaStore: store(), defaultModel: "deepseek-v4-flash" },
+  );
+  assert.equal(result.payload.input[0].reasoning_content, undefined);
+  assert.equal(result.payload.input[1].reasoning_content, undefined);
+});
+
 test("preserves all completed tool turns as native Responses pairs", () => {
   const result = transformResponsesRequest(
     {

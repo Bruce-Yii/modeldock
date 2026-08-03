@@ -105,6 +105,7 @@ function render(data) {
   const status = $("live-status");
   status.className = `status-pill ${ready ? "ready" : "error"}`;
   status.querySelector("strong").textContent = ready ? "Gate ready" : "Token missing";
+  renderModelOptions(data);
   set("uptime", `Uptime ${uptime(data.uptimeMs)}`);
   set("main-model", data.config.mainModel);
 
@@ -157,8 +158,45 @@ function render(data) {
   renderRecent(data.recent || []);
 }
 
+function renderModelOptions(data) {
+  const models = data.models;
+  if (!models?.options) return;
+  const selected = models.selected || {};
+  for (const [id, filter, value] of [["main-model-select", () => true, selected.mainModel], ["vision-model-select", (model) => model.supportsVision, selected.visionModel]]) {
+    const select = $(id);
+    if (!select) continue;
+    const previous = select.value;
+    select.replaceChildren();
+    for (const model of models.options.filter(filter)) {
+      const option = document.createElement("option");
+      option.value = model.id;
+      option.textContent = model.label;
+      select.append(option);
+    }
+    select.value = value || previous;
+    select.disabled = modelBusy;
+  }
+}
+
 let messagingBusy = false;
+let modelBusy = false;
 let messagingMode = "streaming";
+
+async function setModels() {
+  modelBusy = true;
+  $("main-model-select").disabled = true;
+  $("vision-model-select").disabled = true;
+  try {
+    const response = await fetch("/api/models", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ mainModel: $("main-model-select").value, visionModel: $("vision-model-select").value }) });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.error?.message || `Model update ${response.status}`);
+  } catch (error) {
+    window.alert(error.message);
+  } finally {
+    modelBusy = false;
+    poll().catch(() => {});
+  }
+}
 
 function renderMessaging(data) {
   messagingMode = data.mode === "streaming" ? "streaming" : "buffered";
@@ -207,17 +245,10 @@ function renderConfigSwitch(data) {
       ? "Codex is configured to use other APIs through the local ModelDock bridge."
       : "Codex is using its own configuration. Enabling backs it up and selects the local ModelDock provider.",
   );
-  set("switch-config-path", data.configPath || "—");
-  $("switch-config-path").title = data.configPath || "";
-  set("switch-backup-path", data.backupPath || "created when enabled");
-  $("switch-backup-path").title = data.backupPath || "";
   const message = $("switch-message");
   message.className = "";
   if (data.stateError) {
     message.textContent = `State error: ${data.stateError}`;
-    message.className = "error";
-  } else if (data.drifted) {
-    message.textContent = "Managed provider fields changed outside ModelDock; restore needs review.";
     message.className = "error";
   } else if (data.externallyRestored) {
     message.textContent = "Codex config is already restored; ModelDock state will reconcile on the next action.";
@@ -295,6 +326,9 @@ $("proxy-toggle").addEventListener("change", async (event) => {
 $("messaging-toggle").addEventListener("change", (event) => {
   setMessagingMode(event.target.checked ? "streaming" : "buffered");
 });
+
+$("main-model-select").addEventListener("change", setModels);
+$("vision-model-select").addEventListener("change", setModels);
 
 $("restart-ack").addEventListener("click", () => configAction("restart-ack"));
 $("trace-detail-close").addEventListener("click", () => { $("trace-detail").hidden = true; });

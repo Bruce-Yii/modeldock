@@ -41,7 +41,7 @@ export function parseMcpTextResult(body) {
   return "";
 }
 
-export function createUpstreams({ config, metrics, mediaStore }) {
+export function createUpstreams({ config, metrics, mediaStore, getVisionModel = () => config.visionModel }) {
   async function searchWeb(args) {
     const finish = metrics.begin("web", { operation: "web_search_exa", query: args.query.slice(0, 160) });
     const endpoint = new URL(config.exaMcpUrl);
@@ -122,7 +122,7 @@ export function createUpstreams({ config, metrics, mediaStore }) {
       question,
       "Return a concise, evidence-based answer. Preserve exact visible text and numbers. Do not expose chain-of-thought.",
     ].join("\n");
-    const models = [...new Set([config.visionModel, config.visionFallbackModel].filter(Boolean))];
+    const models = [...new Set([getVisionModel(), config.visionFallbackModel].filter(Boolean))];
     const failures = [];
 
     for (let index = 0; index < models.length; index += 1) {
