@@ -117,7 +117,7 @@ export function buildManagedCodexConfig(source, { baseUrl, model }) {
     "",
     "# Managed by ModelDock OpenCode Go Gate. Use the dashboard to restore the backup.",
     "[model_providers.modeldock_go]",
-    'name = "ModelDock OpenCode Go gate"',
+    'name = "ModelDock"',
     `base_url = ${tomlString(baseUrl)}`,
     'wire_api = "responses"',
     "# Local-only placeholder; ModelDock replaces it with OPENCODE_GO_TOKEN upstream.",

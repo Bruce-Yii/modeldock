@@ -4,7 +4,7 @@ model_provider = "modeldock_go"
 web_search = "disabled"
 
 [model_providers.modeldock_go]
-name = "ModelDock OpenCode Go gate"
+name = "ModelDock"
 base_url = "http://127.0.0.1:4097/v1"
 wire_api = "responses"
 # This token is local-only. The gate replaces it with OPENCODE_GO_TOKEN upstream.
