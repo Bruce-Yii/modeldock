@@ -3,99 +3,10 @@
 **Give DeepSeek eyes. Connect Codex to Other API providers.**
 
 <p align="center">
-  <a href="#zh">中文</a> ·
   <a href="#en">English</a> ·
+  <a href="#zh">中文</a> ·
   <a href="#ja">日本語</a>
 </p>
-
-<details open id="zh">
-<summary>中文</summary>
-
-**给 DeepSeek 装上眼睛，让 Codex 用上其他 API。**
-
-ModelDock 是一个本地小工具，两件本事：
-
-- **给 DeepSeek V4 Flash 增加 Vision 能力** —— 当前视觉轮次自动交给视觉模型 Luna（Kimi 备用），下一轮再回到 DeepSeek；DeepSeek 也可以通过本地视觉工具请求 Luna 观察图片。
-- **把其他 API 桥接给 Codex（API Bridge）** —— ModelDock 在本地转发并规范化 Codex Responses 请求；Codex 的 Shell、文件和 MCP 等本地工具照常工作，不兼容的 hosted web/tool search 会替换成本地编排的 Exa 搜索。
-
-## 你得到什么
-
-| 能力 | 说明 |
-| --- | --- |
-| 🖼️ DeepSeek 也能看图 | 截图、图表、UI 图，视觉模型分析后回传文字结果 |
-| 🔗 接入 Codex | 仪表盘备份并切换用户配置，重启 Codex 后生效 |
-| 🧰 工具循环保留 | 保留 Codex 本地工具，并适配上游 API 不接受的 hosted tool schema |
-| 📊 一目了然的仪表盘 | 用量、延迟、最近请求，打开浏览器就能看 |
-
-## 快速开始
-
-**方法一：自己动手（约 5 分钟）**
-
-**第 0 步：把项目拿下来**
-
-- 方式 A（推荐）：在终端运行 `git clone https://github.com/architectds/modeldock`
-- 方式 B：到 <https://github.com/architectds/modeldock> 点绿色 **Code** 按钮 → **Download ZIP**，解压到你喜欢的文件夹
-
-完成后，你会看到一个文件夹（含 `package.json`、`src`、`public` 等）。
-
-**第 1 步：确认/安装 Node.js**
-
-在终端运行 `node -v`：
-- 显示 `v22.x` 或更高 → 跳过
-- 没有或版本低于 22 → 到 <https://nodejs.org> 下载安装 **LTS 版本**，装完重开终端
-
-**第 2 步：填 API token（.env 文件）**
-
-在**项目根目录**（和 `package.json` 同一个文件夹）里：
-
-1. 找到 `.env.example` 文件
-2. 复制一份，重命名为 `.env`
-3. 用记事本打开 `.env`，把这一行改成：
-
-   ```
-   OPENCODE_GO_TOKEN=你的token
-   ```
-
-   Token 从 <https://opencode.ai/auth> 登录获取（你的 API key，与其他第三方 API 的接入方式相同）。
-
-   （`.env` 只在本地生效，不会上传或被提交到 GitHub。）
-
-**第 3 步：安装依赖并启动**
-
-在项目文件夹打开终端，先运行 `npm install`，再运行 `npm start`。
-
-Windows 用户也可以运行 `powershell -ExecutionPolicy Bypass -File scripts/create-shortcut.ps1` 创建 `ModelDock` 桌面快捷方式，以后双击启动。
-
-**第 4 步：接入 Codex**
-
-1. 浏览器打开 <http://127.0.0.1:4097>
-2. 打开页面上的开关
-3. **完全退出并重启 Codex**
-4. Codex 里选择 ModelDock 模型 —— 完成
-
-**方法二：让 AI 帮你装**
-
-把本仓库地址发给你的 AI 编程助手（Codex / Claude Code / Cursor 等）：
-
-```
-https://github.com/architectds/modeldock
-```
-
-告诉它："帮我安装这个 ModelDock，并按 .env.example 配置好 API token。" 它会把安装、配置、启动全部搞定。
-
-## 它怎么工作（大白话版）
-
-```text
-Codex ──> ModelDock ──> 你的 API / DeepSeek
-                │
-                └──> 图片交给视觉模型 ──> 结果回灌 DeepSeek
-```
-
-ModelDock 的网关和仪表盘只监听本机（127.0.0.1）；模型、视觉和 Exa 搜索请求仍会发往对应云服务。仪表盘只显示脱敏后的用量和状态，不显示提示词、图片内容或密钥。
-
----
-
-</details>
 
 <details open id="en">
 <summary>English</summary>
@@ -181,6 +92,95 @@ Codex ──> ModelDock ──> your API / DeepSeek
 ```
 
 The ModelDock gate and dashboard listen only on your machine (127.0.0.1). Model, vision, and Exa search requests still go to their cloud services. The dashboard shows sanitized usage and status, not prompt text, image content, or keys.
+
+---
+
+</details>
+
+<details open id="zh">
+<summary>中文</summary>
+
+**给 DeepSeek 装上眼睛，让 Codex 用上其他 API。**
+
+ModelDock 是一个本地小工具，两件本事：
+
+- **给 DeepSeek V4 Flash 增加 Vision 能力** —— 当前视觉轮次自动交给视觉模型 Luna（Kimi 备用），下一轮再回到 DeepSeek；DeepSeek 也可以通过本地视觉工具请求 Luna 观察图片。
+- **把其他 API 桥接给 Codex（API Bridge）** —— ModelDock 在本地转发并规范化 Codex Responses 请求；Codex 的 Shell、文件和 MCP 等本地工具照常工作，不兼容的 hosted web/tool search 会替换成本地编排的 Exa 搜索。
+
+## 你得到什么
+
+| 能力 | 说明 |
+| --- | --- |
+| 🖼️ DeepSeek 也能看图 | 截图、图表、UI 图，视觉模型分析后回传文字结果 |
+| 🔗 接入 Codex | 仪表盘备份并切换用户配置，重启 Codex 后生效 |
+| 🧰 工具循环保留 | 保留 Codex 本地工具，并适配上游 API 不接受的 hosted tool schema |
+| 📊 一目了然的仪表盘 | 用量、延迟、最近请求，打开浏览器就能看 |
+
+## 快速开始
+
+**方法一：自己动手（约 5 分钟）**
+
+**第 0 步：把项目拿下来**
+
+- 方式 A（推荐）：在终端运行 `git clone https://github.com/architectds/modeldock`
+- 方式 B：到 <https://github.com/architectds/modeldock> 点绿色 **Code** 按钮 → **Download ZIP**，解压到你喜欢的文件夹
+
+完成后，你会看到一个文件夹（含 `package.json`、`src`、`public` 等）。
+
+**第 1 步：确认/安装 Node.js**
+
+在终端运行 `node -v`：
+- 显示 `v22.x` 或更高 → 跳过
+- 没有或版本低于 22 → 到 <https://nodejs.org> 下载安装 **LTS 版本**，装完重开终端
+
+**第 2 步：填 API token（.env 文件）**
+
+在**项目根目录**（和 `package.json` 同一个文件夹）里：
+
+1. 找到 `.env.example` 文件
+2. 复制一份，重命名为 `.env`
+3. 用记事本打开 `.env`，把这一行改成：
+
+   ```
+   OPENCODE_GO_TOKEN=你的token
+   ```
+
+   Token 从 <https://opencode.ai/auth> 登录获取（你的 API key，与其他第三方 API 的接入方式相同）。
+
+   （`.env` 只在本地生效，不会上传或被提交到 GitHub。）
+
+**第 3 步：安装依赖并启动**
+
+在项目文件夹打开终端，先运行 `npm install`，再运行 `npm start`。
+
+Windows 用户也可以运行 `powershell -ExecutionPolicy Bypass -File scripts/create-shortcut.ps1` 创建 `ModelDock` 桌面快捷方式，以后双击启动。
+
+**第 4 步：接入 Codex**
+
+1. 浏览器打开 <http://127.0.0.1:4097>
+2. 打开页面上的开关
+3. **完全退出并重启 Codex**
+4. Codex 里选择 ModelDock 模型 —— 完成
+
+**方法二：让 AI 帮你装**
+
+把本仓库地址发给你的 AI 编程助手（Codex / Claude Code / Cursor 等）：
+
+```
+https://github.com/architectds/modeldock
+```
+
+告诉它："帮我安装这个 ModelDock，并按 .env.example 配置好 API token。" 它会把安装、配置、启动全部搞定。
+
+## 它怎么工作（大白话版）
+
+```text
+Codex ──> ModelDock ──> 你的 API / DeepSeek
+                │
+                └──> 图片交给视觉模型 ──> 结果回灌 DeepSeek
+```
+
+ModelDock 的网关和仪表盘只监听本机（127.0.0.1）；模型、视觉和 Exa 搜索请求仍会发往对应云服务。仪表盘只显示脱敏后的用量和状态，不显示提示词、图片内容或密钥。
 
 ---
 
