@@ -118,6 +118,72 @@ try {
     throw new Error(`Second-turn assistant history probe failed with HTTP ${secondTurn.status}`);
   }
 
+  const historyTool = { type: "custom", name: "history_probe", description: "Return protocol probe input." };
+  const historyPrompt = [{ role: "user", content: [{ type: "input_text", text: "Call history_probe exactly once with input HISTORY_PROBE." }] }];
+  const historyCallResponse = await fetch(`${baseUrl}/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: config.mainModel,
+      input: historyPrompt,
+      tools: [historyTool],
+      tool_choice: "auto",
+      max_output_tokens: 256,
+      stream: false,
+    }),
+  });
+  const historyCallBody = await historyCallResponse.json();
+  const providerCall = historyCallBody.output?.find((item) => item?.type === "function_call");
+  if (!historyCallResponse.ok || !providerCall?.call_id) {
+    throw new Error(`Tool-history first round failed with HTTP ${historyCallResponse.status}`);
+  }
+  const codexCall = {
+    id: providerCall.id,
+    type: "custom_tool_call",
+    name: providerCall.name,
+    call_id: providerCall.call_id,
+    input: "HISTORY_PROBE",
+  };
+  const historyReplay = await fetch(`${baseUrl}/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: config.mainModel,
+      input: [
+        ...historyPrompt,
+        { role: "assistant", content: [] },
+        codexCall,
+        { type: "custom_tool_call_output", call_id: codexCall.call_id, output: "HISTORY_RESULT_OK" },
+        { role: "user", content: [{ type: "input_text", text: "Reply exactly TOOL_HISTORY_OK." }] },
+      ],
+      tools: [historyTool],
+      tool_choice: "none",
+      max_output_tokens: 256,
+      stream: false,
+    }),
+  });
+  const historyReplayBody = await historyReplay.json();
+  const historyTrace = instance.services.metrics.recent.find((item) => item.kind === "responses");
+  result.responses.toolHistory = {
+    status: historyReplay.status,
+    output: extractOutputText(historyReplayBody),
+    nativeToolCalls: historyTrace?.nativeToolCalls || 0,
+    nativeToolOutputs: historyTrace?.nativeToolOutputs || 0,
+    fallbackToolResults: historyTrace?.fallbackToolResults || 0,
+    droppedAssistantMessages: historyTrace?.droppedAssistantMessages || 0,
+    chatToolCallMessages: historyTrace?.inputShape?.filter((item) => item.toolCallCount > 0).length || 0,
+  };
+  if (
+    historyReplay.status !== 200
+    || !result.responses.toolHistory.output.includes("TOOL_HISTORY_OK")
+    || result.responses.toolHistory.nativeToolCalls !== 1
+    || result.responses.toolHistory.nativeToolOutputs !== 1
+    || result.responses.toolHistory.fallbackToolResults !== 0
+    || result.responses.toolHistory.chatToolCallMessages !== 0
+  ) {
+    throw new Error(`Native tool-history replay failed with HTTP ${historyReplay.status}`);
+  }
+
   const visualDataUrl = solidBluePngDataUrl();
   const directVision = await fetch(`${baseUrl}/v1/responses`, {
     method: "POST",

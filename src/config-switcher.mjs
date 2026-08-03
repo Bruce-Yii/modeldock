@@ -23,7 +23,9 @@ function removeManagedProvider(lines) {
       continue;
     }
     if (skipping && /^\s*\[/.test(line)) skipping = false;
-    if (!skipping) output.push(line);
+    if (skipping) continue;
+    if (/^\s*#\s*Managed by ModelDock/i.test(line)) continue;
+    output.push(line);
   }
   return output;
 }
@@ -115,8 +117,8 @@ export function buildManagedCodexConfig(source, { baseUrl, model }) {
   lines = setTopLevel(lines, "web_search", "disabled");
   lines.push(
     "",
-    "# Managed by ModelDock OpenCode Go Gate. Use the dashboard to restore the backup.",
     "[model_providers.modeldock_go]",
+    "# Managed by ModelDock. Use the dashboard to restore the backup.",
     'name = "ModelDock"',
     `base_url = ${tomlString(baseUrl)}`,
     'wire_api = "responses"',

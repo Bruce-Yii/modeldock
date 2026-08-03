@@ -64,12 +64,22 @@ test("recent is capped at recentLimit", () => {
 test("recordResponseTransform accumulates counters", () => {
   const metrics = makeMetrics();
   metrics.recordResponseTransform(
-    { blocked: { tool_search: 2, web_search: 1 }, toolChoiceRewritten: true, imageRefs: ["a", "b", "a"] },
+    {
+      blocked: { tool_search: 2, web_search: 1 },
+      toolChoiceRewritten: true,
+      imageRefs: ["a", "b", "a"],
+      nativeToolCalls: 4,
+      nativeToolOutputs: 3,
+      fallbackToolResults: 1,
+    },
     { bytesIn: 100, streaming: true },
   );
   assert.equal(metrics.responses.filteredToolSearch, 2);
   assert.equal(metrics.responses.filteredWebSearch, 1);
   assert.equal(metrics.responses.rewrittenToolChoice, 1);
+  assert.equal(metrics.responses.nativeToolCalls, 4);
+  assert.equal(metrics.responses.nativeToolOutputs, 3);
+  assert.equal(metrics.responses.fallbackToolResults, 1);
   assert.equal(metrics.responses.imageAttachments, 3);
   assert.equal(metrics.responses.bytesIn, 100);
   assert.equal(metrics.responses.streaming, 1);

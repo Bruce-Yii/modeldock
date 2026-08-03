@@ -55,10 +55,20 @@ h2 { margin: 0; font-size: 17px; }
 .toggle b { min-width: 24px; color: var(--muted); font: 700 11px ui-monospace, monospace; text-transform: uppercase; }
 .toggle input:checked ~ b { color: var(--green); }
 .control-defaults { display: grid; grid-template-columns: repeat(4, 1fr); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
-.control-defaults div { padding: 13px 20px; border-right: 1px solid var(--line); }
-.control-defaults div:last-child { border-right: 0; }
-.control-defaults span { display: block; margin-bottom: 5px; color: var(--muted); font-size: 9px; text-transform: uppercase; letter-spacing: .08em; }
-.control-defaults strong { font-size: 11px; }
+.control-defaults > div { padding: 13px 20px; border-right: 1px solid var(--line); }
+.control-defaults > div:last-child { border-right: 0; }
+.control-defaults > div > span { display: block; margin-bottom: 5px; color: var(--muted); font-size: 9px; text-transform: uppercase; letter-spacing: .08em; }
+.control-defaults > div > strong { font-size: 11px; }
+.messaging-default { display: flex; flex-direction: column; justify-content: center; }
+.mode-toggle { display: flex; align-items: center; gap: 8px; width: max-content; cursor: pointer; user-select: none; }
+.mode-toggle input { position: absolute; opacity: 0; pointer-events: none; }
+.mode-toggle b { color: var(--muted); font: 700 10px ui-monospace, monospace; text-transform: uppercase; transition: color .2s ease; }
+.mode-toggle b.active { color: var(--blue); }
+.mode-track { position: relative; width: 40px; height: 20px; border: 1px solid #365064; border-radius: 99px; background: rgba(80,183,255,.12); transition: .2s ease; }
+.mode-track i { position: absolute; top: 3px; left: 3px; width: 12px; height: 12px; border-radius: 50%; background: var(--blue); transition: .2s ease; }
+.mode-toggle input:checked + .mode-track i { left: 23px; }
+.mode-toggle input:focus-visible + .mode-track { outline: 2px solid var(--blue); outline-offset: 3px; }
+.mode-toggle input:disabled + .mode-track { opacity: .48; cursor: wait; }
 .control-meta { display: flex; gap: 24px; align-items: center; min-height: 42px; padding: 9px 20px; color: var(--muted); font-size: 9px; }
 .control-meta span { min-width: 0; }
 .control-meta code { color: #b9c9d2; font-size: 9px; }

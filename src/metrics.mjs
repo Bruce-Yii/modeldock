@@ -21,6 +21,9 @@ export class Metrics extends EventEmitter {
       filteredWebSearch: 0,
       rewrittenToolChoice: 0,
       droppedAssistantMessages: 0,
+      nativeToolCalls: 0,
+      nativeToolOutputs: 0,
+      fallbackToolResults: 0,
       imageAttachments: 0,
       directVisionRoutes: 0,
       lunaToolContinuations: 0,
@@ -67,6 +70,9 @@ export class Metrics extends EventEmitter {
     this.responses.filteredWebSearch += report.blocked.web_search;
     this.responses.rewrittenToolChoice += report.toolChoiceRewritten ? 1 : 0;
     this.responses.droppedAssistantMessages += Number(report.droppedAssistantMessages || 0);
+    this.responses.nativeToolCalls += Number(report.nativeToolCalls || 0);
+    this.responses.nativeToolOutputs += Number(report.nativeToolOutputs || 0);
+    this.responses.fallbackToolResults += Number(report.fallbackToolResults || 0);
     this.responses.imageAttachments += report.imageRefs.length;
     this.responses.directVisionRoutes += report.directVision ? 1 : 0;
     this.responses.lunaToolContinuations += routeReason === "luna_tool_continuation" ? 1 : 0;

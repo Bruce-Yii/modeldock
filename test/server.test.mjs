@@ -78,7 +78,8 @@ test("proxies Responses while filtering unsupported hosted tool schemas", async 
   });
   const sse = await streamed.text();
   assert.match(streamed.headers.get("content-type"), /text\/event-stream/);
-  assert.equal(streamed.headers.get("x-modeldock-stream-mode"), "live-normalized");
+  assert.equal(streamed.headers.get("x-modeldock-stream-mode"), "buffered");
+  assert.equal(received.stream, false, "buffer mode asks Go for one complete JSON response");
   assert.match(sse, /event: response\.created/);
   assert.match(sse, /event: response\.completed/);
 });

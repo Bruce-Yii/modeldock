@@ -38,6 +38,8 @@ test("managed config replaces only top-level provider defaults", () => {
   assert.match(managed, /\[features\]\nmulti_agent = true/);
   assert.match(managed, /\[mcp_servers\.docs\]/);
   assert.equal((managed.match(/\[model_providers\.modeldock_go\]/g) || []).length, 1);
+  assert.match(managed, /\[model_providers\.modeldock_go\]\n# Managed by ModelDock\./);
+  assert.equal((managed.match(/# Managed by ModelDock/g) || []).length, 1);
 });
 
 test("defaults off, backs up on enable, and restores exact config on disable", async (t) => {
@@ -68,6 +70,7 @@ test("preserves unrelated edits made after enable while restoring managed fields
   const restored = await readFile(configPath, "utf8");
   assert.match(restored, /model = "gpt-5.6-sol"/);
   assert.doesNotMatch(restored, /modeldock_go/);
+  assert.doesNotMatch(restored, /Managed by ModelDock/);
   assert.match(restored, /\[plugins\.user_added\]\nenabled = true/);
 });
 

@@ -9,6 +9,7 @@ import { transformResponsesRequest } from "./transform.mjs";
 import { createUpstreams } from "./upstreams.mjs";
 import { createMcpNodeHandler } from "./mcp.mjs";
 import { LiveResponsesWriter, parseSse } from "./live-responses.mjs";
+import { responseToSse } from "./responses-sse.mjs";
 import { CodexConfigSwitcher } from "./config-switcher.mjs";
 import { RouteAffinity, routeResponsesRequest } from "./router.mjs";
 
@@ -24,10 +25,11 @@ function goUrl(config, resource) {
   return `${config.goBaseUrl.replace(/\/$/, "")}/${resource.replace(/^\//, "")}`;
 }
 
-function statusPayload({ config, metrics, mediaStore, routeAffinity }) {
+function statusPayload({ config, metrics, mediaStore, routeAffinity, messaging }) {
   return metrics.snapshot({
     ready: Boolean(config.goToken),
     config: publicConfig(config),
+    messaging: { mode: messaging?.mode || "buffered" },
     media: mediaStore.snapshot(),
     routing: routeAffinity?.snapshot?.() || { activeCallIds: 0 },
   });
@@ -295,6 +297,7 @@ async function relayLiveResponses(payload, res, services, signal) {
         argumentsText = typeof call.arguments === "string" ? call.arguments : "";
         mode = HARNESS_TOOL_NAMES.has(call.name) ? "harness" : customTools.has(call.name) ? "custom" : "function";
         if (mode === "function") writer.functionAdded(call);
+        if (mode === "custom") writer.customFunctionAdded(call);
         continue;
       }
       if (data.type === "response.function_call_arguments.delta" && typeof data.delta === "string") {
@@ -326,6 +329,46 @@ async function relayLiveResponses(payload, res, services, signal) {
     currentPayload = { ...currentPayload, input: [...(currentPayload.input || []), resultMessage], stream: true };
     if (call.name === "harness_vision_inspect") currentPayload = removeHarnessTool(currentPayload, call.name);
   }
+}
+
+async function relayBufferedResponses(payload, res, services, signal) {
+  const upstreamPayload = { ...payload, stream: false };
+  const initial = await fetchGoResponses(upstreamPayload, services, signal, "application/json");
+  const loop = await runHarnessToolLoop(initial, upstreamPayload, services, signal);
+  const upstream = loop.upstream;
+
+  if (!upstream.ok || !loop.response) {
+    const body = Buffer.from(await upstream.arrayBuffer());
+    const error = upstreamError(body, upstream.status);
+    res.status(upstream.status);
+    copyUpstreamHeaders(upstream, res);
+    res.send(body);
+    return {
+      ok: false,
+      httpStatus: upstream.status,
+      bytesOut: body.byteLength,
+      usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
+      rounds: loop.rounds,
+      error,
+    };
+  }
+
+  const sse = responseToSse(loop.response, payload);
+  const bytesOut = Buffer.byteLength(sse);
+  res.status(200);
+  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("X-Accel-Buffering", "no");
+  res.setHeader("X-ModelDock-Stream-Mode", "buffered");
+  res.send(sse);
+  return {
+    ok: true,
+    httpStatus: 200,
+    bytesOut,
+    usage: extractResponseUsage(loop.response) || { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
+    rounds: loop.rounds,
+    response: loop.response,
+  };
 }
 
 async function relayResponses(req, res, services) {
@@ -372,35 +415,41 @@ async function relayResponses(req, res, services) {
   });
 
   if (streaming) {
+    const streamMode = services.messaging.mode === "streaming" ? "live-normalized" : "buffered";
     try {
-      const live = await relayLiveResponses(transformed.payload, res, services, controller.signal);
-      if (live.ok && route.directVision) routeAffinity.registerResponse(live.response, route.model);
-      metrics.recordResponseUsage({ bytesOut: live.bytesOut, usage: live.usage });
+      const relay = streamMode === "live-normalized"
+        ? await relayLiveResponses(transformed.payload, res, services, controller.signal)
+        : await relayBufferedResponses(transformed.payload, res, services, controller.signal);
+      if (relay.ok && route.directVision) routeAffinity.registerResponse(relay.response, route.model);
+      metrics.recordResponseUsage({ bytesOut: relay.bytesOut, usage: relay.usage });
       finish({
-        ok: live.ok,
-        httpStatus: live.httpStatus,
+        ok: relay.ok,
+        httpStatus: relay.httpStatus,
         model: transformed.payload.model,
         routeReason: route.reason,
         routePinned: Boolean(route.pinnedCallId),
         directVision: route.directVision,
-        bytesOut: live.bytesOut,
-        inputTokens: live.usage?.input_tokens || 0,
-        outputTokens: live.usage?.output_tokens || 0,
+        bytesOut: relay.bytesOut,
+        inputTokens: relay.usage?.input_tokens || 0,
+        outputTokens: relay.usage?.output_tokens || 0,
         filteredTools: transformed.report.blocked.tool_search + transformed.report.blocked.web_search,
         imageRefs: transformed.report.imageRefs,
-        streamMode: "live-normalized",
+        streamMode,
         inputShape: transformed.report.inputShape,
         droppedAssistantMessages: transformed.report.droppedAssistantMessages,
         stringifiedAssistantMessages: transformed.report.stringifiedAssistantMessages,
+        nativeToolCalls: transformed.report.nativeToolCalls,
+        nativeToolOutputs: transformed.report.nativeToolOutputs,
+        fallbackToolResults: transformed.report.fallbackToolResults,
         compactedToolResults: transformed.report.compactedToolResults,
         compactedToolOutputBytes: transformed.report.compactedToolOutputBytes,
-        responseShape: describeResponse(live.response),
-        harnessToolRounds: live.rounds,
-        error: live.ok ? undefined : live.error,
+        responseShape: describeResponse(relay.response),
+        harnessToolRounds: relay.rounds,
+        error: relay.ok ? undefined : relay.error,
       });
       return;
     } catch (error) {
-      finish({ ok: false, error: error.message, model: route.model, routeReason: route.reason, directVision: route.directVision, streamMode: "live-normalized", inputShape: transformed.report.inputShape, droppedAssistantMessages: transformed.report.droppedAssistantMessages, stringifiedAssistantMessages: transformed.report.stringifiedAssistantMessages, compactedToolResults: transformed.report.compactedToolResults, compactedToolOutputBytes: transformed.report.compactedToolOutputBytes });
+      finish({ ok: false, error: error.message, model: route.model, routeReason: route.reason, directVision: route.directVision, streamMode, inputShape: transformed.report.inputShape, droppedAssistantMessages: transformed.report.droppedAssistantMessages, stringifiedAssistantMessages: transformed.report.stringifiedAssistantMessages, nativeToolCalls: transformed.report.nativeToolCalls, nativeToolOutputs: transformed.report.nativeToolOutputs, fallbackToolResults: transformed.report.fallbackToolResults, compactedToolResults: transformed.report.compactedToolResults, compactedToolOutputBytes: transformed.report.compactedToolOutputBytes });
       if (!res.headersSent) return res.status(502).json({ error: { message: `OpenCode Go request failed: ${error.message}`, type: "upstream_error" } });
       return res.end();
     }
@@ -495,6 +544,9 @@ async function relayResponses(req, res, services) {
     inputShape: transformed.report.inputShape,
     droppedAssistantMessages: transformed.report.droppedAssistantMessages,
     stringifiedAssistantMessages: transformed.report.stringifiedAssistantMessages,
+    nativeToolCalls: transformed.report.nativeToolCalls,
+    nativeToolOutputs: transformed.report.nativeToolOutputs,
+    fallbackToolResults: transformed.report.fallbackToolResults,
     compactedToolResults: transformed.report.compactedToolResults,
     compactedToolOutputBytes: transformed.report.compactedToolOutputBytes,
     responseShape: describeResponse(parsed),
@@ -586,7 +638,8 @@ export function createServices(config = loadConfig()) {
     model: config.mainModel,
   });
   const routeAffinity = new RouteAffinity();
-  return { config, metrics, mediaStore, upstreams, configSwitcher, routeAffinity };
+  const messaging = { mode: config.messagingMode === "streaming" ? "streaming" : "buffered" };
+  return { config, metrics, mediaStore, upstreams, configSwitcher, routeAffinity, messaging };
 }
 
 export function createApp(services = createServices()) {
@@ -641,10 +694,19 @@ export function createApp(services = createServices()) {
   app.post("/api/config/enable", mutateConfig, configAction("enable"));
   app.post("/api/config/disable", mutateConfig, configAction("disable"));
   app.post("/api/config/restart-ack", mutateConfig, configAction("acknowledgeRestart"));
+  app.post("/api/messaging", mutateConfig, (req, res) => {
+    const mode = req.body?.mode;
+    if (mode !== "buffered" && mode !== "streaming") {
+      return res.status(400).json({ error: { type: "invalid_messaging_mode", message: "Messaging mode must be buffered or streaming." } });
+    }
+    services.messaging.mode = mode;
+    recordConfigAction(metrics, `messaging_${mode}`, { ok: true });
+    return res.json({ mode });
+  });
 
   const eventClients = new Set();
   const broadcast = () => {
-    const data = `data: ${JSON.stringify(statusPayload({ config, metrics, mediaStore, routeAffinity }))}\n\n`;
+    const data = `data: ${JSON.stringify(statusPayload(services))}\n\n`;
     for (const client of eventClients) client.write(data);
   };
   metrics.on("change", broadcast);

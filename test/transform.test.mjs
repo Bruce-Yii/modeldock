@@ -51,28 +51,42 @@ test("rejects local and non-HTTPS image URLs", () => {
   assert.throws(() => mediaStore.put("https://localhost/image.png"), /Local image URLs/);
 });
 
-test("adds IDs required by Go to Responses tool result items", () => {
+test("adds IDs required by Go to replayable Responses tool result items", () => {
   const result = transformResponsesRequest(
     {
       model: "deepseek-v4-flash",
-      input: [{ type: "function_call_output", call_id: "call_123", output: "done" }],
+      tools: [{ type: "function", name: "lookup", parameters: { type: "object", properties: {} } }],
+      input: [
+        { type: "function_call", call_id: "call_123", name: "lookup", arguments: "{}" },
+        { type: "function_call_output", call_id: "call_123", output: "done" },
+      ],
     },
     { mediaStore: store(), defaultModel: "deepseek-v4-flash" },
   );
-  assert.equal(result.payload.input[0].id, "function_call_output_call_123");
+  assert.equal(result.payload.input[1].id, "function_call_output_call_123");
 });
 
-test("adds the non-empty reasoning marker Go requires on returned function calls", () => {
-  const result = transformResponsesRequest(
-    { input: [{ type: "function_call", id: "fc_1", call_id: "call_1", name: "lookup", arguments: "{}" }] },
-    { mediaStore: store(), defaultModel: "deepseek-v4-flash" },
-  );
-  assert.equal(result.payload.input[0].reasoning_content, "tool call");
-});
-
-test("compacts all completed tool turns into untrusted-data messages", () => {
+test("does not invent reasoning content on returned function calls", () => {
   const result = transformResponsesRequest(
     {
+      tools: [{ type: "function", name: "lookup", parameters: { type: "object", properties: {} } }],
+      input: [
+        { type: "function_call", id: "fc_1", call_id: "call_1", name: "lookup", arguments: "{}" },
+        { type: "function_call_output", call_id: "call_1", output: "ok" },
+      ],
+    },
+    { mediaStore: store(), defaultModel: "deepseek-v4-flash" },
+  );
+  assert.equal(result.payload.input[0].reasoning_content, undefined);
+});
+
+test("preserves all completed tool turns as native Responses pairs", () => {
+  const result = transformResponsesRequest(
+    {
+      tools: [
+        { type: "function", name: "first", parameters: { type: "object", properties: {} } },
+        { type: "function", name: "second", parameters: { type: "object", properties: {} } },
+      ],
       input: [
         { type: "function_call", id: "fc_1", call_id: "call_1", name: "first", arguments: "{}" },
         { type: "function_call_output", call_id: "call_1", output: "old result" },
@@ -82,8 +96,12 @@ test("compacts all completed tool turns into untrusted-data messages", () => {
     },
     { mediaStore: store(), defaultModel: "deepseek-v4-flash" },
   );
-  assert.equal(result.report.compactedToolResults, 2);
-  assert.deepEqual(result.payload.input.map((item) => item.type), ["message", "message"]);
-  assert.match(result.payload.input[0].content[0].text, /old result/);
-  assert.match(result.payload.input[1].content[0].text, /new result/);
+  assert.equal(result.report.compactedToolResults, 0);
+  assert.equal(result.report.nativeToolCalls, 2);
+  assert.equal(result.report.nativeToolOutputs, 2);
+  assert.deepEqual(result.payload.input.map((item) => item.type), [
+    "function_call", "function_call_output", "function_call", "function_call_output",
+  ]);
+  assert.equal(result.payload.input[1].output, "old result");
+  assert.equal(result.payload.input[3].output, "new result");
 });

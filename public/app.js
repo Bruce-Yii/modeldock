@@ -153,7 +153,43 @@ function render(data) {
   set("cfg-vision", data.config.visionModel);
   set("cfg-fallback", data.config.visionFallbackModel);
   set("cfg-exa", data.config.exaMcpUrl);
+  renderMessaging(data.messaging || { mode: "buffered" });
   renderRecent(data.recent || []);
+}
+
+let messagingBusy = false;
+let messagingMode = "buffered";
+
+function renderMessaging(data) {
+  messagingMode = data.mode === "streaming" ? "streaming" : "buffered";
+  const streaming = messagingMode === "streaming";
+  const toggle = $("messaging-toggle");
+  toggle.checked = streaming;
+  toggle.disabled = messagingBusy;
+  $("buffer-mode-label").classList.toggle("active", !streaming);
+  $("streaming-mode-label").classList.toggle("active", streaming);
+  toggle.title = streaming ? "Live normalized SSE" : "Wait for completion, then emit one complete SSE response";
+}
+
+async function setMessagingMode(mode) {
+  messagingBusy = true;
+  $("messaging-toggle").disabled = true;
+  try {
+    const response = await fetch("/api/messaging", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ mode }),
+    });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.error?.message || `Messaging update ${response.status}`);
+    renderMessaging(body);
+  } catch (error) {
+    renderMessaging({ mode: messagingMode });
+    window.alert(error.message);
+  } finally {
+    messagingBusy = false;
+    $("messaging-toggle").disabled = false;
+  }
 }
 
 let switchBusy = false;
@@ -254,6 +290,10 @@ $("proxy-toggle").addEventListener("change", async (event) => {
     return;
   }
   await configAction(enabling ? "enable" : "disable");
+});
+
+$("messaging-toggle").addEventListener("change", (event) => {
+  setMessagingMode(event.target.checked ? "streaming" : "buffered");
 });
 
 $("restart-ack").addEventListener("click", () => configAction("restart-ack"));

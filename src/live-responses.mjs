@@ -60,6 +60,7 @@ export class LiveResponsesWriter {
     this.started = false;
     this.bytes = 0;
     this.output = [];
+    this.nextOutputIndex = 0;
     this.message = null;
     this.call = null;
   }
@@ -82,14 +83,15 @@ export class LiveResponsesWriter {
     this.start();
     if (!this.message) {
       const id = `msg_${randomUUID().replace(/-/g, "")}`;
-      this.message = { id, type: "message", role: "assistant", status: "in_progress", content: [], text: "" };
+      const index = this.nextOutputIndex++;
+      this.message = { id, index, type: "message", role: "assistant", status: "in_progress", content: [], text: "" };
       this.#emit("response.output_item.added", {
-        output_index: this.output.length,
+        output_index: index,
         item: { id, type: "message", role: "assistant", status: "in_progress", content: [] },
       });
       this.#emit("response.content_part.added", {
         item_id: id,
-        output_index: this.output.length,
+        output_index: index,
         content_index: 0,
         part: { type: "output_text", text: "", annotations: [] },
       });
@@ -97,7 +99,7 @@ export class LiveResponsesWriter {
     this.message.text += delta;
     this.#emit("response.output_text.delta", {
       item_id: this.message.id,
-      output_index: this.output.length,
+      output_index: this.message.index,
       content_index: 0,
       delta,
       logprobs: [],
@@ -106,7 +108,7 @@ export class LiveResponsesWriter {
 
   functionAdded(source) {
     this.start();
-    const index = this.output.length;
+    const index = this.nextOutputIndex++;
     const item = {
       id: source.id || `fc_${randomUUID().replace(/-/g, "")}`,
       type: "function_call",
@@ -129,26 +131,34 @@ export class LiveResponsesWriter {
     });
   }
 
-  customFunction(source, argumentsText) {
+  customFunctionAdded(source) {
     this.start();
+    const adapted = adaptGoResponse(
+      { id: this.responseId, output: [{ ...source, type: "function_call", arguments: "" }] },
+      this.payload,
+    ).output[0];
+    const index = this.nextOutputIndex++;
+    const item = { ...adapted, status: "in_progress", input: "" };
+    this.call = { source, item, index, custom: true, completed: false };
+    this.#emit("response.output_item.added", { output_index: index, item });
+  }
+
+  customFunction(source, argumentsText) {
+    if (!this.call?.custom) this.customFunctionAdded(source);
+    const { index } = this.call;
     const adapted = adaptGoResponse(
       { id: this.responseId, output: [{ ...source, type: "function_call", arguments: argumentsText }] },
       this.payload,
     ).output[0];
-    const index = this.output.length;
-    const item = { ...adapted, status: "in_progress", input: "" };
-    this.#emit("response.output_item.added", { output_index: index, item });
     if (adapted.input) this.#emit("response.custom_tool_call_input.delta", { item_id: adapted.id, output_index: index, delta: adapted.input });
     this.#emit("response.custom_tool_call_input.done", { item_id: adapted.id, output_index: index, input: adapted.input || "" });
-    const completed = { ...adapted, status: "completed" };
-    this.#emit("response.output_item.done", { output_index: index, item: completed });
-    this.output.push(completed);
+    this.call.completedItem = { ...adapted, status: "completed" };
   }
 
   finish(usage) {
     this.start();
     if (this.message) {
-      const index = this.output.length;
+      const index = this.message.index;
       const part = { type: "output_text", text: this.message.text, annotations: [] };
       this.#emit("response.output_text.done", {
         item_id: this.message.id,
@@ -160,21 +170,24 @@ export class LiveResponsesWriter {
       this.#emit("response.content_part.done", { item_id: this.message.id, output_index: index, content_index: 0, part });
       const completed = { id: this.message.id, type: "message", role: "assistant", status: "completed", content: [part] };
       this.#emit("response.output_item.done", { output_index: index, item: completed });
-      this.output.push(completed);
+      this.output[index] = completed;
     }
     if (this.call) {
       const { item, index } = this.call;
-      this.#emit("response.function_call_arguments.done", {
-        item_id: item.id,
-        output_index: index,
-        name: item.name,
-        arguments: item.arguments,
-      });
-      const completed = { ...item, status: "completed" };
+      let completed = this.call.completedItem;
+      if (!completed) {
+        this.#emit("response.function_call_arguments.done", {
+          item_id: item.id,
+          output_index: index,
+          name: item.name,
+          arguments: item.arguments,
+        });
+        completed = { ...item, status: "completed" };
+      }
       this.#emit("response.output_item.done", { output_index: index, item: completed });
-      this.output.push(completed);
+      this.output[index] = completed;
     }
-    const response = baseResponse(this.responseId, this.payload, "completed", this.output, usage);
+    const response = baseResponse(this.responseId, this.payload, "completed", this.output.filter(Boolean), usage);
     this.#emit("response.completed", { response });
     const done = "data: [DONE]\n\n";
     this.bytes += Buffer.byteLength(done);

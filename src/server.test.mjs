@@ -22,6 +22,7 @@ function baseConfig() {
     exaMcpUrl: "https://mcp.exa.ai/mcp",
     exaApiKey: "",
     recentLimit: 50,
+    messagingMode: "streaming",
   };
 }
 
@@ -82,6 +83,30 @@ test("with token: healthz returns 200", async (t) => {
   const response = await fetch(`${instance.base}/healthz`);
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), { ok: true });
+});
+
+test("messaging mode is exposed and can switch at runtime", async (t) => {
+  const instance = await startApp({ messagingMode: "buffered" });
+  t.after(instance.stop);
+
+  const initial = await (await fetch(`${instance.base}/api/status`)).json();
+  assert.equal(initial.messaging.mode, "buffered");
+
+  const invalid = await fetch(`${instance.base}/api/messaging`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ mode: "sometimes" }),
+  });
+  assert.equal(invalid.status, 400);
+
+  const changed = await fetch(`${instance.base}/api/messaging`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ mode: "streaming" }),
+  });
+  assert.deepEqual(await changed.json(), { mode: "streaming" });
+  const final = await (await fetch(`${instance.base}/api/status`)).json();
+  assert.equal(final.messaging.mode, "streaming");
 });
 
 test("non-streaming relay: forwards normalized body with auth and parses usage", async (t) => {
@@ -285,6 +310,107 @@ test("second-turn Codex assistant arrays are stringified for strict Console Go",
   assert.equal(trace.inputShape.find((item) => item.role === "assistant").contentKind, "string");
 });
 
+test("replays Codex custom tool history to Go as ordered native Responses pairs", async (t) => {
+  let received;
+  const upstream = createServer(async (req, res) => {
+    received = await jsonBody(req);
+    res.setHeader("content-type", "text/event-stream");
+    sendSse(res, "response.output_text.delta", { id: "resp_history", delta: "HISTORY_OK", response: { id: "resp_history", model: received.model } });
+    sendSse(res, "response.completed", { id: "resp_history", response: { id: "resp_history", usage: { input_tokens: 20, output_tokens: 2 } } });
+    res.end("data: [DONE]\n\n");
+  });
+  const port = await listen(upstream);
+  t.after(() => upstream.close());
+  const instance = await startApp({ goBaseUrl: `http://127.0.0.1:${port}` });
+  t.after(instance.stop);
+
+  const response = await fetch(`${instance.base}/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      stream: true,
+      tools: [{ type: "custom", name: "shell_command", description: "run a command" }],
+      input: [
+        { role: "user", content: [{ type: "input_text", text: "Run both checks" }] },
+        { role: "assistant", content: [] },
+        { id: "ctc_1", type: "custom_tool_call", call_id: "call_1", name: "shell_command", input: "first" },
+        { type: "custom_tool_call_output", call_id: "call_1", output: "first result" },
+        { role: "assistant", content: [{ type: "output_text", text: "Running the second check" }] },
+        { id: "ctc_2", type: "custom_tool_call", call_id: "call_2", name: "shell_command", input: "second" },
+        { type: "custom_tool_call_output", call_id: "call_2", output: "second result" },
+        { role: "user", content: [{ type: "input_text", text: "Finish" }] },
+      ],
+    }),
+  });
+  const sse = await response.text();
+  assert.equal(response.status, 200);
+  assert.match(sse, /HISTORY_OK/);
+  assert.deepEqual(received.input.map((item) => item.role || item.type), [
+    "user", "function_call", "function_call_output", "assistant", "function_call", "function_call_output", "user",
+  ]);
+  assert.equal(received.input.some((item) => Array.isArray(item.tool_calls)), false);
+  assert.deepEqual(received.input.filter((item) => item.type === "function_call").map((item) => item.arguments), ["first", "second"]);
+  assert.deepEqual(received.input.filter((item) => item.type === "function_call_output").map((item) => item.output), ["first result", "second result"]);
+  const trace = instance.services.metrics.recent.find((item) => item.kind === "responses");
+  assert.equal(trace.nativeToolCalls, 2);
+  assert.equal(trace.nativeToolOutputs, 2);
+  assert.equal(trace.fallbackToolResults, 0);
+  assert.equal(trace.droppedAssistantMessages, 1);
+});
+
+test("buffered relay asks Go for JSON and emits one complete Codex SSE response", async (t) => {
+  let received;
+  const upstream = createServer(async (req, res) => {
+    received = await jsonBody(req);
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({
+      id: "resp_buffered",
+      object: "response",
+      status: "completed",
+      model: received.model,
+      output: [
+        { type: "message", role: "assistant", content: [{ type: "output_text", text: "Buffered answer." }] },
+        { type: "function_call", name: "apply_patch", call_id: "call_patch", arguments: JSON.stringify({ patch: "PATCH_OK" }) },
+      ],
+      usage: { input_tokens: 12, output_tokens: 5, total_tokens: 17 },
+    }));
+  });
+  const upstreamPort = await listen(upstream);
+  t.after(() => upstream.close());
+
+  const instance = await startApp({ goBaseUrl: `http://127.0.0.1:${upstreamPort}`, messagingMode: "buffered" });
+  t.after(instance.stop);
+  const response = await fetch(`${instance.base}/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "text/event-stream" },
+    body: JSON.stringify({
+      input: "apply a change",
+      stream: true,
+      tools: [{ type: "custom", name: "apply_patch", description: "apply a patch" }],
+    }),
+  });
+  const sse = await response.text();
+
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("x-modeldock-stream-mode"), "buffered");
+  assert.equal(received.stream, false);
+  assert.match(response.headers.get("content-type"), /text\/event-stream/);
+  assert.match(sse, /event: response\.created/);
+  assert.match(sse, /event: response\.completed/);
+  assert.match(sse, /Buffered answer\./);
+  assert.match(sse, /custom_tool_call/);
+  assert.match(sse, /PATCH_OK/);
+  assert.match(sse, /data: \[DONE\]/);
+  const completed = [...sse.matchAll(/^data: (\{.*\})$/gm)]
+    .map((match) => JSON.parse(match[1]))
+    .find((event) => event.type === "response.completed");
+  assert.deepEqual(completed.response.output.map((item) => item.type), ["message", "custom_tool_call"]);
+  const trace = instance.services.metrics.recent.find((item) => item.kind === "responses");
+  assert.equal(trace.streamMode, "buffered");
+  assert.equal(instance.services.metrics.responses.inputTokens, 12);
+  assert.equal(instance.services.metrics.responses.outputTokens, 5);
+});
+
 test("streaming relay emits the first delta before upstream completion", async (t) => {
   let received;
   let releaseCompletion;
@@ -351,6 +477,86 @@ test("streaming relay emits the first delta before upstream completion", async (
   assert.equal(snap.responses.streaming, 1);
   assert.equal(snap.responses.inputTokens, 333);
   assert.equal(snap.responses.outputTokens, 44);
+});
+
+test("streaming relay keeps preamble text and a following tool call at distinct output indexes", async (t) => {
+  const upstream = createServer((req, res) => {
+    res.setHeader("content-type", "text/event-stream");
+    sendSse(res, "response.output_text.delta", { id: "resp_mixed", delta: "I will verify this now: ", response: { id: "resp_mixed", model: "deepseek-v4-flash" } });
+    sendSse(res, "response.output_item.added", {
+      output_index: 1,
+      item: { id: "fc_verify", type: "function_call", name: "shell_command", call_id: "call_verify", arguments: "" },
+    });
+    sendSse(res, "response.function_call_arguments.delta", { output_index: 1, delta: '{"command":"pwd"}' });
+    sendSse(res, "response.completed", { id: "resp_mixed", response: { id: "resp_mixed", usage: { input_tokens: 10, output_tokens: 4 } } });
+    res.end("data: [DONE]\n\n");
+  });
+  const port = await listen(upstream);
+  t.after(() => upstream.close());
+  const instance = await startApp({ goBaseUrl: `http://127.0.0.1:${port}` });
+  t.after(instance.stop);
+
+  const response = await fetch(`${instance.base}/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      input: "locate the current session",
+      stream: true,
+      tools: [{ type: "function", name: "shell_command", description: "run shell", parameters: { type: "object", properties: {} } }],
+    }),
+  });
+  const sse = await response.text();
+  assert.equal(response.status, 200);
+  const events = [...sse.matchAll(/^data: (\{.*\})$/gm)].map((match) => JSON.parse(match[1]));
+  const added = events.filter((event) => event.type === "response.output_item.added");
+  const done = events.filter((event) => event.type === "response.output_item.done");
+  const completed = events.find((event) => event.type === "response.completed");
+  assert.deepEqual(added.map((event) => [event.output_index, event.item.type]), [[0, "message"], [1, "function_call"]]);
+  assert.deepEqual(done.map((event) => [event.output_index, event.item.type]), [[0, "message"], [1, "function_call"]]);
+  assert.deepEqual(completed.response.output.map((item) => item.type), ["message", "function_call"]);
+  assert.equal(new Set(added.map((event) => event.output_index)).size, 2);
+  assert.match(sse, /I will verify this now/);
+  assert.match(sse, /call_verify/);
+});
+
+test("streaming relay keeps preamble text and a following custom tool call at distinct output indexes", async (t) => {
+  const upstream = createServer((req, res) => {
+    res.setHeader("content-type", "text/event-stream");
+    sendSse(res, "response.output_text.delta", { id: "resp_custom_mixed", delta: "I will apply the change: ", response: { id: "resp_custom_mixed", model: "deepseek-v4-flash" } });
+    sendSse(res, "response.output_item.added", {
+      output_index: 1,
+      item: { id: "fc_patch", type: "function_call", name: "apply_patch", call_id: "call_patch", arguments: "" },
+    });
+    sendSse(res, "response.function_call_arguments.delta", { output_index: 1, delta: '{"patch":"PATCH_OK"}' });
+    sendSse(res, "response.completed", { id: "resp_custom_mixed", response: { id: "resp_custom_mixed", usage: { input_tokens: 10, output_tokens: 4 } } });
+    res.end("data: [DONE]\n\n");
+  });
+  const port = await listen(upstream);
+  t.after(() => upstream.close());
+  const instance = await startApp({ goBaseUrl: `http://127.0.0.1:${port}` });
+  t.after(instance.stop);
+
+  const response = await fetch(`${instance.base}/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      input: "apply the patch",
+      stream: true,
+      tools: [{ type: "custom", name: "apply_patch", description: "apply a patch" }],
+    }),
+  });
+  const sse = await response.text();
+  assert.equal(response.status, 200);
+  const events = [...sse.matchAll(/^data: (\{.*\})$/gm)].map((match) => JSON.parse(match[1]));
+  const added = events.filter((event) => event.type === "response.output_item.added");
+  const done = events.filter((event) => event.type === "response.output_item.done");
+  const completed = events.find((event) => event.type === "response.completed");
+  assert.deepEqual(added.map((event) => [event.output_index, event.item.type]), [[0, "message"], [1, "custom_tool_call"]]);
+  assert.deepEqual(done.map((event) => [event.output_index, event.item.type]), [[0, "message"], [1, "custom_tool_call"]]);
+  assert.deepEqual(completed.response.output.map((item) => item.type), ["message", "custom_tool_call"]);
+  assert.equal(new Set(added.map((event) => event.output_index)).size, 2);
+  assert.match(sse, /I will apply the change/);
+  assert.match(sse, /PATCH_OK/);
 });
 
 test("streaming relay hides a harness web round and streams only the final answer", async (t) => {

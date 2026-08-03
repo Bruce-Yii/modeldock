@@ -46,7 +46,15 @@
           <div><span>Main model</span><strong>DeepSeek V4 Flash</strong></div>
           <div><span>Vision</span><strong>Luna · Kimi fallback</strong></div>
           <div><span>Web</span><strong>Exa hosted MCP</strong></div>
-          <div><span>Streaming</span><strong>Live normalized SSE</strong></div>
+          <div class="messaging-default">
+            <span>MESSASING</span>
+            <label class="mode-toggle" for="messaging-toggle">
+              <b id="buffer-mode-label">Buffer</b>
+              <input id="messaging-toggle" type="checkbox" role="switch" aria-label="Use streaming messaging" />
+              <span class="mode-track"><i></i></span>
+              <b id="streaming-mode-label">Streaming (Beta)</b>
+            </label>
+          </div>
         </div>
         <div class="control-meta">
           <span>Config <code id="switch-config-path">—</code></span>

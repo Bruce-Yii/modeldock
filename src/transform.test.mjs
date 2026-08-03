@@ -245,32 +245,42 @@ test("forces parallel_tool_calls to false and reports the rewrite", () => {
   }
 });
 
-test("injects ids into tool result items for Go", () => {
+test("injects ids into replayable native tool result items for Go", () => {
   const source = {
-    input: [{ type: "function_call_output", call_id: "call_123", output: "done" }],
+    tools: [{ type: "function", name: "lookup", parameters: { type: "object", properties: {} } }],
+    input: [
+      { type: "function_call", call_id: "call_123", name: "lookup", arguments: "{}" },
+      { type: "function_call_output", call_id: "call_123", output: "done" },
+    ],
   };
   const { payload } = transformResponsesRequest(source, { mediaStore: fakeStore(), defaultModel: "d" });
-  assert.equal(payload.input[0].id, "function_call_output_call_123");
+  assert.equal(payload.input[1].id, "function_call_output_call_123");
 });
 
 test("sanitizes call ids used in injected item ids", () => {
   const source = {
-    input: [{ type: "function_call_output", call_id: "weird id/with spaces", output: "done" }],
+    tools: [{ type: "function", name: "lookup", parameters: { type: "object", properties: {} } }],
+    input: [
+      { type: "function_call", call_id: "weird id/with spaces", name: "lookup", arguments: "{}" },
+      { type: "function_call_output", call_id: "weird id/with spaces", output: "done" },
+    ],
   };
   const { payload } = transformResponsesRequest(source, { mediaStore: fakeStore(), defaultModel: "d" });
-  assert.equal(payload.input[0].id, "function_call_output_weird_id_with_spaces");
+  assert.equal(payload.input[1].id, "function_call_output_weird_id_with_spaces");
 });
 
 test("leaves items with ids or roles untouched by id injection", () => {
   const source = {
+    tools: [{ type: "function", name: "lookup", parameters: { type: "object", properties: {} } }],
     input: [
+      { type: "function_call", id: "call_has_id", call_id: "c1", name: "lookup", arguments: "{}" },
       { id: "already_has_id", type: "function_call_output", call_id: "c1", output: "x" },
       { role: "user", content: [{ type: "input_text", text: "hi" }] },
     ],
   };
   const { payload } = transformResponsesRequest(source, { mediaStore: fakeStore(), defaultModel: "d" });
-  assert.equal(payload.input[0].id, "already_has_id");
-  assert.equal(payload.input[1].id, undefined);
+  assert.equal(payload.input[1].id, "already_has_id");
+  assert.equal(payload.input[2].id, undefined);
 });
 
 test("reports input shape for inspection", () => {
@@ -282,8 +292,9 @@ test("reports input shape for inspection", () => {
   assert.deepEqual(report.inputShape[0].contentTypes, ["input_text"]);
 });
 
-test("drops assistant messages with empty content (tool-loop placeholder shells)", () => {
+test("drops empty assistant shells and preserves native Responses tool pairs", () => {
   const source = {
+    tools: [{ type: "function", name: "shell_command", parameters: { type: "object", properties: {} } }],
     input: [
       { role: "user", content: [{ type: "input_text", text: "run the test" }] },
       { role: "assistant", content: [] },
@@ -294,12 +305,18 @@ test("drops assistant messages with empty content (tool-loop placeholder shells)
   };
   const { payload, report } = transformResponsesRequest(source, { mediaStore: fakeStore(), defaultModel: "d" });
   const roles = payload.input.map((item) => item.role || item.type);
-  assert.deepEqual(roles, ["user", "user", "user"]);
-  assert.equal(report.compactedToolResults, 1);
+  assert.deepEqual(roles, ["user", "function_call", "function_call_output", "user"]);
+  assert.equal(payload.input[1].call_id, "call_1");
+  assert.equal(payload.input[2].call_id, "call_1");
+  assert.equal(report.nativeToolCalls, 1);
+  assert.equal(report.nativeToolOutputs, 1);
+  assert.equal(report.compactedToolResults, 0);
+  assert.equal(report.droppedAssistantMessages, 1);
 });
 
 test("preserves interleaved assistant and tool-result chronology across repeated calls", () => {
   const source = {
+    tools: [{ type: "custom", name: "shell_command", description: "run a command" }],
     input: [
       { role: "user", content: [{ type: "input_text", text: "check once" }] },
       { role: "assistant", content: [{ type: "output_text", text: "running first check" }] },
@@ -311,13 +328,57 @@ test("preserves interleaved assistant and tool-result chronology across repeated
     ],
   };
   const { payload, report } = transformResponsesRequest(source, { mediaStore: fakeStore(), defaultModel: "d" });
-  assert.deepEqual(payload.input.map((item) => item.role), ["user", "assistant", "user", "assistant", "user"]);
+  assert.deepEqual(payload.input.map((item) => item.role || item.type), [
+    "user", "assistant", "function_call", "function_call_output", "assistant", "function_call", "function_call_output",
+  ]);
   assert.equal(payload.input[1].content, "running first check");
-  assert.match(payload.input[2].content[0].text, /TOOL_EXECUTION_COMPLETED[\s\S]*first result/);
-  assert.equal(payload.input[3].content, "running second check");
-  assert.match(payload.input[4].content[0].text, /TOOL_EXECUTION_COMPLETED[\s\S]*second result/);
-  assert.equal(report.compactedToolResults, 2);
-  assert.equal(report.compactedToolOutputBytes, Buffer.byteLength("first resultsecond result"));
+  assert.deepEqual(payload.input.slice(2, 4).map((item) => item.type), ["function_call", "function_call_output"]);
+  assert.equal(payload.input[2].call_id, "call_1");
+  assert.equal(payload.input[2].arguments, "{}");
+  assert.equal(payload.input[3].output, "first result");
+  assert.equal(payload.input[4].content, "running second check");
+  assert.equal(payload.input[5].call_id, "call_2");
+  assert.equal(payload.input[6].output, "second result");
+  assert.equal(report.nativeToolCalls, 2);
+  assert.equal(report.nativeToolOutputs, 2);
+  assert.equal(report.compactedToolResults, 0);
+  assert.equal(report.compactedToolOutputBytes, 0);
+});
+
+test("repairs a custom call whose streamed assistant preamble was recorded before its output", () => {
+  const source = {
+    tools: [{ type: "custom", name: "apply_patch", description: "apply a patch" }],
+    input: [
+      { role: "user", content: [{ type: "input_text", text: "rewrite the README" }] },
+      { id: "ctc_1", type: "custom_tool_call", call_id: "call_patch", name: "apply_patch", input: "patch text" },
+      { role: "assistant", content: [{ type: "output_text", text: "I will simplify the README." }] },
+      { type: "custom_tool_call_output", call_id: "call_patch", output: "Success" },
+    ],
+  };
+  const { payload, report } = transformResponsesRequest(source, { mediaStore: fakeStore(), defaultModel: "d" });
+  assert.deepEqual(payload.input.map((item) => item.role || item.type), [
+    "user", "assistant", "function_call", "function_call_output",
+  ]);
+  assert.equal(payload.input[1].content, "I will simplify the README.");
+  assert.equal(payload.input[2].call_id, "call_patch");
+  assert.equal(payload.input[3].call_id, "call_patch");
+  assert.equal(report.nativeToolCalls, 1);
+  assert.equal(report.nativeToolOutputs, 1);
+});
+
+test("falls back to a receipt when historical tool declaration is unavailable", () => {
+  const source = {
+    input: [
+      { type: "custom_tool_call", call_id: "call_old", name: "lazy_tool", input: "raw input" },
+      { type: "custom_tool_call_output", call_id: "call_old", output: "historical result" },
+    ],
+  };
+  const { payload, report } = transformResponsesRequest(source, { mediaStore: fakeStore(), defaultModel: "d" });
+  assert.deepEqual(payload.input.map((item) => item.role || item.type), ["user"]);
+  assert.match(payload.input[0].content[0].text, /TOOL_EXECUTION_RECEIPT[\s\S]*lazy_tool[\s\S]*historical result/);
+  assert.equal(report.nativeToolCalls, 0);
+  assert.equal(report.fallbackToolResults, 1);
+  assert.equal(report.compactedToolResults, 1);
 });
 
 test("keeps assistant messages with text content", () => {
@@ -342,13 +403,18 @@ test("joins multiple assistant text parts into Go-compatible string content", ()
   assert.equal(report.inputShape[0].contentKind, "string");
 });
 
-test("keeps assistant messages that carry tool_calls", () => {
+test("converts a complete Chat tool pair into native Responses items", () => {
   const source = {
-    input: [{ role: "assistant", content: [], tool_calls: [{ id: "t1", type: "function", function: { name: "x", arguments: "{}" } }] }],
+    tools: [{ type: "function", name: "x", parameters: { type: "object", properties: {} } }],
+    input: [
+      { role: "assistant", content: [], tool_calls: [{ id: "t1", type: "function", function: { name: "x", arguments: "{}" } }] },
+      { role: "tool", tool_call_id: "t1", content: "ok" },
+    ],
   };
   const { payload } = transformResponsesRequest(source, { mediaStore: fakeStore(), defaultModel: "d" });
-  assert.equal(payload.input.length, 1);
-  assert.equal("content" in payload.input[0], false);
+  assert.deepEqual(payload.input.map((item) => item.type), ["function_call", "function_call_output"]);
+  assert.equal(payload.input[0].call_id, "t1");
+  assert.equal(payload.input[1].call_id, "t1");
 });
 
 test("drops assistant messages with reasoning-only content", () => {
