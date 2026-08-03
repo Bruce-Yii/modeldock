@@ -610,6 +610,7 @@ export function codexModelCatalog(config) {
   if (typeof config.profile?.modelCatalog === "function") {
     return config.profile.modelCatalog({ mainModel: config.mainModel, visionModel: config.visionModel, baseInstructions });
   }
+  const contextWindow = 1_048_576;
   return {
     models: [
       {
@@ -630,10 +631,10 @@ export function codexModelCatalog(config) {
         use_responses_lite: false,
         include_skills_usage_instructions: false,
         auto_review_model_override: null,
-        context_window: 1_048_576,
-        max_context_window: 1_048_576,
+        context_window: contextWindow,
+        max_context_window: contextWindow,
         effective_context_window_percent: 95,
-        auto_compact_token_limit: null,
+        auto_compact_token_limit: Math.floor(contextWindow * 0.8),
         comp_hash: `modeldock-${config.profileId || "default"}-v1`,
         reasoning_summary_format: "experimental",
         default_reasoning_summary: "none",

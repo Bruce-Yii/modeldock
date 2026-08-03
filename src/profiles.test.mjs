@@ -7,6 +7,9 @@ import {
   profileOptions,
   HARNESS_WEB_SEARCH_TOOL,
   HARNESS_VISION_TOOL,
+  CONTEXT_WINDOW,
+  AUTO_COMPACT_PERCENT,
+  AUTO_COMPACT_TOKEN_LIMIT,
 } from "./profiles.mjs";
 
 test("exposes every registered profile through the registry", () => {
@@ -55,6 +58,18 @@ test("model catalog is generated per profile with distinct comp hashes", () => {
   assert.equal(officialCatalog.models[0].comp_hash, "modeldock-deepseek-official-v1");
   assert.equal(officialCatalog.models[0].supports_search_tool, false);
   assert.notEqual(goCatalog.models[0].comp_hash, officialCatalog.models[0].comp_hash);
+});
+
+test("every profile compacts at 80% of the model context window", () => {
+  const expected = Math.floor(CONTEXT_WINDOW * AUTO_COMPACT_PERCENT);
+  assert.equal(AUTO_COMPACT_TOKEN_LIMIT, expected);
+  for (const profile of [OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE]) {
+    const catalog = profile.modelCatalog({ mainModel: "deepseek-v4-flash", baseInstructions: "base" });
+    const model = catalog.models[0];
+    assert.equal(model.context_window, CONTEXT_WINDOW);
+    assert.equal(model.max_context_window, CONTEXT_WINDOW);
+    assert.equal(model.auto_compact_token_limit, expected, `${profile.id} must auto-compact at 80% of context`);
+  }
 });
 
 test("harness tool schemas stay immutable between profiles", () => {
