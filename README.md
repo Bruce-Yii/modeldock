@@ -1,5 +1,14 @@
 # ModelDock
 
+**Give DeepSeek eyes. Connect Codex to OpenCode Go.**
+
+![ModelDock dashboard](assets/dashboard.png)
+
+> Select a language below.
+
+<details open>
+<summary>中文</summary>
+
 **给 DeepSeek 装上眼睛，让 Codex 用上 OpenCode Go。**
 
 ModelDock 是一个本地小工具，两件本事：
@@ -84,7 +93,10 @@ ModelDock 的网关和仪表盘只监听本机（127.0.0.1）；模型、视觉�
 
 ---
 
-## English
+</details>
+
+<details>
+<summary>English</summary>
 
 **Give DeepSeek eyes. Connect Codex to OpenCode Go.**
 
@@ -170,7 +182,10 @@ The ModelDock gate and dashboard listen only on your machine (127.0.0.1). Model,
 
 ---
 
-## 日本語
+</details>
+
+<details>
+<summary>日本語</summary>
 
 **DeepSeek に視覚を。Codex を OpenCode Go へ。**
 
@@ -253,3 +268,5 @@ Codex ──> ModelDock ──> OpenCode Go / DeepSeek
 ```
 
 ModelDock のゲートとダッシュボードはローカル（127.0.0.1）のみで待ち受けます。モデル、視覚、Exa 検索のリクエストは各クラウドサービスへ送信されます。ダッシュボードにはサニタイズ済みの使用量と状態だけが表示され、プロンプト本文、画像内容、キーは表示されません。
+
+</details>

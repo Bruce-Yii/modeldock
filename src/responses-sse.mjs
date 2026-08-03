@@ -19,11 +19,13 @@ export function adaptGoResponse(response, requestPayload = {}) {
   );
   const output = (response.output || []).map((sourceItem, index) => {
     if (!sourceItem || typeof sourceItem !== "object") return sourceItem;
-    const itemId = sourceItem.id || `${sourceItem.type || "item"}_${response.id || "response"}_${index}`;
+    const generatedId = `${sourceItem.type || "item"}_${response.id || "response"}_${index}`;
+    const callId = sourceItem.type === "function_call" ? sourceItem.call_id || sourceItem.id || `call_${response.id || "response"}_${index}` : null;
+    const itemId = callId || sourceItem.id || generatedId;
     const item = {
       ...sourceItem,
       id: itemId,
-      ...(sourceItem.type === "function_call" && !sourceItem.call_id ? { call_id: `call_${response.id || "response"}_${index}` } : {}),
+      ...(sourceItem.type === "function_call" ? { call_id: callId } : {}),
     };
     if (item.type !== "function_call" || !customTools.has(item.name)) return item;
     return {

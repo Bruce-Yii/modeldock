@@ -68,6 +68,6 @@ test("adds stable item and call IDs when Go omits them", () => {
     { id: "resp_123", output: [{ type: "function_call", name: "lookup", arguments: "{}" }] },
     { tools: [{ type: "function", name: "lookup" }] },
   );
-  assert.equal(adapted.output[0].id, "function_call_resp_123_0");
+  assert.equal(adapted.output[0].id, "call_resp_123_0");
   assert.equal(adapted.output[0].call_id, "call_resp_123_0");
 });

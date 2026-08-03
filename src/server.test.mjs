@@ -512,6 +512,8 @@ test("streaming relay keeps preamble text and a following tool call at distinct 
   const done = events.filter((event) => event.type === "response.output_item.done");
   const completed = events.find((event) => event.type === "response.completed");
   assert.deepEqual(added.map((event) => [event.output_index, event.item.type]), [[0, "message"], [1, "function_call"]]);
+  assert.equal(added[1].item.id, "call_verify");
+  assert.equal(added[1].item.id, added[1].item.call_id);
   assert.deepEqual(done.map((event) => [event.output_index, event.item.type]), [[0, "message"], [1, "function_call"]]);
   assert.deepEqual(completed.response.output.map((item) => item.type), ["message", "function_call"]);
   assert.equal(new Set(added.map((event) => event.output_index)).size, 2);
@@ -552,6 +554,8 @@ test("streaming relay keeps preamble text and a following custom tool call at di
   const done = events.filter((event) => event.type === "response.output_item.done");
   const completed = events.find((event) => event.type === "response.completed");
   assert.deepEqual(added.map((event) => [event.output_index, event.item.type]), [[0, "message"], [1, "custom_tool_call"]]);
+  assert.equal(added[1].item.id, "call_patch");
+  assert.equal(added[1].item.id, added[1].item.call_id);
   assert.deepEqual(done.map((event) => [event.output_index, event.item.type]), [[0, "message"], [1, "custom_tool_call"]]);
   assert.deepEqual(completed.response.output.map((item) => item.type), ["message", "custom_tool_call"]);
   assert.equal(new Set(added.map((event) => event.output_index)).size, 2);

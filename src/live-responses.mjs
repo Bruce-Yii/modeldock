@@ -109,11 +109,12 @@ export class LiveResponsesWriter {
   functionAdded(source) {
     this.start();
     const index = this.nextOutputIndex++;
+    const callId = source.call_id || source.id || `call_${randomUUID().replace(/-/g, "")}`;
     const item = {
-      id: source.id || `fc_${randomUUID().replace(/-/g, "")}`,
+      id: callId,
       type: "function_call",
       name: source.name,
-      call_id: source.call_id || source.id || `call_${randomUUID().replace(/-/g, "")}`,
+      call_id: callId,
       arguments: "",
       status: "in_progress",
     };

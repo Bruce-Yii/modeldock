@@ -173,7 +173,7 @@ function fallbackToolReceipt(call, output) {
 function normalizeToolHistory(input, tools) {
   const expanded = moveInterleavedAssistantBeforeToolCalls(expandChatToolHistory(input));
   if (!Array.isArray(expanded)) {
-    return { input: expanded, nativeCalls: 0, nativeOutputs: 0, fallbackResults: 0, fallbackOutputBytes: 0 };
+    return { input: expanded, nativeCalls: 0, nativeOutputs: 0, fallbackResults: 0, fallbackOutputBytes: 0, canonicalizedCallIds: 0 };
   }
 
   const declaredNames = new Set(
@@ -202,14 +202,16 @@ function normalizeToolHistory(input, tools) {
   let nativeOutputs = 0;
   let fallbackResults = 0;
   let fallbackOutputBytes = 0;
+  let canonicalizedCallIds = 0;
   const normalized = expanded.flatMap((item) => {
     if (!item || typeof item !== "object") return [item];
     if (item.type === "function_call" || item.type === "custom_tool_call") {
       if (!item.call_id || !outputCallIds.has(item.call_id) || !replayableCallIds.has(item.call_id)) return [];
       nativeCalls += 1;
+      if (item.id !== item.call_id) canonicalizedCallIds += 1;
       return [{
         type: "function_call",
-        ...(item.id ? { id: item.id } : {}),
+        id: item.call_id,
         call_id: item.call_id,
         name: item.name,
         arguments: toolCallArguments(item.type === "custom_tool_call" ? item.input : item.arguments),
@@ -233,7 +235,7 @@ function normalizeToolHistory(input, tools) {
     return [item];
   });
 
-  return { input: normalized, nativeCalls, nativeOutputs, fallbackResults, fallbackOutputBytes };
+  return { input: normalized, nativeCalls, nativeOutputs, fallbackResults, fallbackOutputBytes, canonicalizedCallIds };
 }
 
 function describeInput(input) {
@@ -365,6 +367,7 @@ export function transformResponsesRequest(source, { mediaStore, defaultModel, ta
       inputShape: describeInput(payload.input),
       nativeToolCalls: toolHistory.nativeCalls,
       nativeToolOutputs: toolHistory.nativeOutputs,
+      canonicalizedToolCallIds: toolHistory.canonicalizedCallIds,
       fallbackToolResults: toolHistory.fallbackResults,
       compactedToolResults: toolHistory.fallbackResults,
       compactedToolOutputBytes: toolHistory.fallbackOutputBytes,

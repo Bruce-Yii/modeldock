@@ -153,12 +153,12 @@ function render(data) {
   set("cfg-vision", data.config.visionModel);
   set("cfg-fallback", data.config.visionFallbackModel);
   set("cfg-exa", data.config.exaMcpUrl);
-  renderMessaging(data.messaging || { mode: "buffered" });
+  renderMessaging(data.messaging || { mode: "streaming" });
   renderRecent(data.recent || []);
 }
 
 let messagingBusy = false;
-let messagingMode = "buffered";
+let messagingMode = "streaming";
 
 function renderMessaging(data) {
   messagingMode = data.mode === "streaming" ? "streaming" : "buffered";

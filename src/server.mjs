@@ -29,7 +29,7 @@ function statusPayload({ config, metrics, mediaStore, routeAffinity, messaging }
   return metrics.snapshot({
     ready: Boolean(config.goToken),
     config: publicConfig(config),
-    messaging: { mode: messaging?.mode || "buffered" },
+    messaging: { mode: messaging?.mode || "streaming" },
     media: mediaStore.snapshot(),
     routing: routeAffinity?.snapshot?.() || { activeCallIds: 0 },
   });
@@ -440,6 +440,7 @@ async function relayResponses(req, res, services) {
         stringifiedAssistantMessages: transformed.report.stringifiedAssistantMessages,
         nativeToolCalls: transformed.report.nativeToolCalls,
         nativeToolOutputs: transformed.report.nativeToolOutputs,
+        canonicalizedToolCallIds: transformed.report.canonicalizedToolCallIds,
         fallbackToolResults: transformed.report.fallbackToolResults,
         compactedToolResults: transformed.report.compactedToolResults,
         compactedToolOutputBytes: transformed.report.compactedToolOutputBytes,
@@ -449,7 +450,7 @@ async function relayResponses(req, res, services) {
       });
       return;
     } catch (error) {
-      finish({ ok: false, error: error.message, model: route.model, routeReason: route.reason, directVision: route.directVision, streamMode, inputShape: transformed.report.inputShape, droppedAssistantMessages: transformed.report.droppedAssistantMessages, stringifiedAssistantMessages: transformed.report.stringifiedAssistantMessages, nativeToolCalls: transformed.report.nativeToolCalls, nativeToolOutputs: transformed.report.nativeToolOutputs, fallbackToolResults: transformed.report.fallbackToolResults, compactedToolResults: transformed.report.compactedToolResults, compactedToolOutputBytes: transformed.report.compactedToolOutputBytes });
+      finish({ ok: false, error: error.message, model: route.model, routeReason: route.reason, directVision: route.directVision, streamMode, inputShape: transformed.report.inputShape, droppedAssistantMessages: transformed.report.droppedAssistantMessages, stringifiedAssistantMessages: transformed.report.stringifiedAssistantMessages, nativeToolCalls: transformed.report.nativeToolCalls, nativeToolOutputs: transformed.report.nativeToolOutputs, canonicalizedToolCallIds: transformed.report.canonicalizedToolCallIds, fallbackToolResults: transformed.report.fallbackToolResults, compactedToolResults: transformed.report.compactedToolResults, compactedToolOutputBytes: transformed.report.compactedToolOutputBytes });
       if (!res.headersSent) return res.status(502).json({ error: { message: `OpenCode Go request failed: ${error.message}`, type: "upstream_error" } });
       return res.end();
     }
@@ -546,6 +547,7 @@ async function relayResponses(req, res, services) {
     stringifiedAssistantMessages: transformed.report.stringifiedAssistantMessages,
     nativeToolCalls: transformed.report.nativeToolCalls,
     nativeToolOutputs: transformed.report.nativeToolOutputs,
+    canonicalizedToolCallIds: transformed.report.canonicalizedToolCallIds,
     fallbackToolResults: transformed.report.fallbackToolResults,
     compactedToolResults: transformed.report.compactedToolResults,
     compactedToolOutputBytes: transformed.report.compactedToolOutputBytes,
@@ -638,7 +640,7 @@ export function createServices(config = loadConfig()) {
     model: config.mainModel,
   });
   const routeAffinity = new RouteAffinity();
-  const messaging = { mode: config.messagingMode === "streaming" ? "streaming" : "buffered" };
+  const messaging = { mode: config.messagingMode === "buffered" ? "buffered" : "streaming" };
   return { config, metrics, mediaStore, upstreams, configSwitcher, routeAffinity, messaging };
 }
 

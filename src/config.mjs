@@ -27,7 +27,7 @@ function normalizedBaseUrl(value) {
 }
 
 function messagingMode(value) {
-  const mode = String(value || "buffered").trim().toLowerCase();
+  const mode = String(value || "streaming").trim().toLowerCase();
   if (mode !== "buffered" && mode !== "streaming") {
     throw new Error("MODELDOCK_MESSAGING_MODE must be buffered or streaming");
   }

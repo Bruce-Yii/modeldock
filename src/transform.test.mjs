@@ -269,7 +269,7 @@ test("sanitizes call ids used in injected item ids", () => {
   assert.equal(payload.input[1].id, "function_call_output_weird_id_with_spaces");
 });
 
-test("leaves items with ids or roles untouched by id injection", () => {
+test("canonicalizes function item ids to call ids and preserves output ids", () => {
   const source = {
     tools: [{ type: "function", name: "lookup", parameters: { type: "object", properties: {} } }],
     input: [
@@ -279,8 +279,24 @@ test("leaves items with ids or roles untouched by id injection", () => {
     ],
   };
   const { payload } = transformResponsesRequest(source, { mediaStore: fakeStore(), defaultModel: "d" });
+  assert.equal(payload.input[0].id, "c1");
   assert.equal(payload.input[1].id, "already_has_id");
   assert.equal(payload.input[2].id, undefined);
+});
+
+test("repairs mismatched temporary streaming item ids for Go history replay", () => {
+  const source = {
+    tools: [{ type: "function", name: "shell_command", parameters: { type: "object", properties: {} } }],
+    input: [
+      { type: "function_call", id: "fc_tmp_wj6q2wobvr", call_id: "call_YaC6ucV1O2LnEtfbcQxSYycc", name: "shell_command", arguments: "{}" },
+      { type: "function_call_output", id: "fco_result", call_id: "call_YaC6ucV1O2LnEtfbcQxSYycc", output: "ok" },
+    ],
+  };
+  const { payload, report } = transformResponsesRequest(source, { mediaStore: fakeStore(), defaultModel: "d" });
+  assert.equal(payload.input[0].id, "call_YaC6ucV1O2LnEtfbcQxSYycc");
+  assert.equal(payload.input[0].id, payload.input[0].call_id);
+  assert.equal(payload.input[1].call_id, payload.input[0].call_id);
+  assert.equal(report.canonicalizedToolCallIds, 1);
 });
 
 test("reports input shape for inspection", () => {
