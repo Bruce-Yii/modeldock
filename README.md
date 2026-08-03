@@ -8,6 +8,10 @@
   <a href="#ja">日本語</a>
 </p>
 
+<p align="center">
+  <img src="assets/dashboard.png" alt="ModelDock dashboard" width="100%" />
+</p>
+
 <details open id="en">
 <summary>English</summary>
 
