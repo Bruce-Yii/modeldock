@@ -57,13 +57,13 @@ test("proxies Responses while filtering unsupported hosted tool schemas", async 
     body: JSON.stringify({
       input: "hello",
       tool_choice: "required",
-      tools: [{ type: "tool_search" }, { type: "web_search" }, { type: "function", name: "safe", parameters: { type: "object" } }],
+      tools: [{ type: "tool_search" }, { type: "web_search" }, { type: "function", name: "shell_command", parameters: { type: "object" } }],
     }),
   });
   assert.equal(response.status, 200);
   assert.equal(received.model, "deepseek-v4-flash");
   assert.equal(received.tool_choice, "auto");
-  assert.deepEqual(received.tools.map((tool) => tool.name), ["safe", "harness_web_search"]);
+  assert.deepEqual(received.tools.map((tool) => tool.name), ["shell_command", "harness_tool_search", "harness_web_search"]);
 
   const status = await (await fetch(`http://127.0.0.1:${port}/api/status`)).json();
   assert.equal(status.responses.filteredToolSearch, 1);

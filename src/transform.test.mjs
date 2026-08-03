@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { transformResponsesRequest } from "./transform.mjs";
 import { OPENCODE_GO_PROFILE } from "./profiles.mjs";
 
-const NATIVE_PAIR_PROFILE = { ...OPENCODE_GO_PROFILE, compactCompletedToolHistory: false };
+const NATIVE_PAIR_PROFILE = { ...OPENCODE_GO_PROFILE, compactCompletedToolHistory: false, coreTools: null };
+const UNFILTERED_GO_PROFILE = { ...OPENCODE_GO_PROFILE, coreTools: null };
 
 function fakeStore() {
   const puts = [];
@@ -37,7 +38,7 @@ function baseRequest() {
 test("passes through a plain request unchanged", () => {
   const source = baseRequest();
   const { payload, report } = transformResponsesRequest(source, {
-      profile: OPENCODE_GO_PROFILE,
+      profile: UNFILTERED_GO_PROFILE,
       mediaStore: fakeStore(), defaultModel: "deepseek-v4-flash" });
   assert.equal(payload.model, "deepseek-v4-flash");
   assert.equal(payload.stream, true);
@@ -58,7 +59,7 @@ test("filters web_search and tool_search tools and counts them", () => {
     { type: "web_search" },
   ];
   const { payload, report } = transformResponsesRequest(source, {
-      profile: OPENCODE_GO_PROFILE,
+      profile: UNFILTERED_GO_PROFILE,
       mediaStore: fakeStore(), defaultModel: "d" });
   assert.deepEqual(payload.tools.map((t) => t.name), ["f1", "harness_web_search"]);
   assert.deepEqual(report.blocked, { tool_search: 1, web_search: 2 });
@@ -71,7 +72,7 @@ test("rewrites tool_choice required to auto", () => {
   const source = baseRequest();
   source.tool_choice = "required";
   const { payload, report } = transformResponsesRequest(source, {
-      profile: OPENCODE_GO_PROFILE,
+      profile: UNFILTERED_GO_PROFILE,
       mediaStore: fakeStore(), defaultModel: "d" });
   assert.equal(payload.tool_choice, "auto");
   assert.equal(report.toolChoiceRewritten, true);
@@ -82,7 +83,7 @@ test("leaves tool_choice auto and none untouched", () => {
     const source = baseRequest();
     source.tool_choice = value;
     const { payload, report } = transformResponsesRequest(source, {
-      profile: OPENCODE_GO_PROFILE,
+      profile: UNFILTERED_GO_PROFILE,
       mediaStore: fakeStore(), defaultModel: "d" });
     assert.equal(payload.tool_choice, value);
     assert.equal(report.toolChoiceRewritten, false);
@@ -93,14 +94,14 @@ test("defaults model when absent", () => {
   const source = baseRequest();
   delete source.model;
   const { payload } = transformResponsesRequest(source, {
-      profile: OPENCODE_GO_PROFILE,
+      profile: UNFILTERED_GO_PROFILE,
       mediaStore: fakeStore(), defaultModel: "fallback-model" });
   assert.equal(payload.model, "fallback-model");
 });
 
 test("normalizes string input into a user message", () => {
   const { payload } = transformResponsesRequest({ input: "just a string" }, {
-      profile: OPENCODE_GO_PROFILE,
+      profile: UNFILTERED_GO_PROFILE,
       mediaStore: fakeStore(), defaultModel: "d" });
   assert.equal(payload.input.length, 1);
   assert.equal(payload.input[0].role, "user");
@@ -120,7 +121,7 @@ test("replaces input_image with placeholder text and registers media ref", () =>
     },
   ];
   const { payload, report } = transformResponsesRequest(source, {
-      profile: OPENCODE_GO_PROFILE,
+      profile: UNFILTERED_GO_PROFILE,
       mediaStore: store, defaultModel: "d" });
   const parts = payload.input[0].content;
   assert.equal(parts.length, 2);
@@ -163,7 +164,7 @@ test("historical images do not re-advertise the fallback vision tool after a Lun
     { role: "user", content: [{ type: "input_text", text: "Now implement the fix." }] },
   ];
   const { payload, report } = transformResponsesRequest(source, {
-      profile: OPENCODE_GO_PROFILE,
+      profile: UNFILTERED_GO_PROFILE,
       mediaStore: fakeStore(), defaultModel: "deepseek-v4-flash" });
   assert.match(payload.input[0].content[0].text, /Earlier image attachment/);
   assert.match(payload.input[0].content[0].text, /following assistant observation/);
@@ -181,7 +182,7 @@ test("handles multiple images across multiple messages", () => {
     ],
   };
   const { payload, report } = transformResponsesRequest(source, {
-      profile: OPENCODE_GO_PROFILE,
+      profile: UNFILTERED_GO_PROFILE,
       mediaStore: store, defaultModel: "d" });
   assert.deepEqual(report.imageRefs, ["img_1", "img_2"]);
   assert.equal(payload.input[1].content[0].type, "input_text");
@@ -197,7 +198,7 @@ test("deduplicates image refs in the report when the same url repeats", () => {
     ],
   };
   const { report } = transformResponsesRequest(source, {
-      profile: OPENCODE_GO_PROFILE,
+      profile: UNFILTERED_GO_PROFILE,
       mediaStore: store, defaultModel: "d" });
   assert.deepEqual(report.imageRefs, ["img_1"]);
 });
@@ -206,7 +207,7 @@ test("keeps string elements in input arrays untouched", () => {
   const store = fakeStore();
   const source = { input: ["plain string", { role: "user", content: [{ type: "input_text", text: "x" }] }] };
   const { payload } = transformResponsesRequest(source, {
-      profile: OPENCODE_GO_PROFILE,
+      profile: UNFILTERED_GO_PROFILE,
       mediaStore: store, defaultModel: "d" });
   assert.equal(payload.input[0], "plain string");
   assert.equal(payload.input[1].role, "user");
@@ -219,20 +220,20 @@ test("keeps items without content arrays untouched", () => {
     ],
   };
   const { payload } = transformResponsesRequest(source, {
-      profile: OPENCODE_GO_PROFILE,
+      profile: UNFILTERED_GO_PROFILE,
       mediaStore: fakeStore(), defaultModel: "d" });
   assert.equal(payload.input[0].content, "text-only-string-content");
 });
 
 test("rejects null body", () => {
   assert.throws(() => transformResponsesRequest(null, {
-      profile: OPENCODE_GO_PROFILE,
+      profile: UNFILTERED_GO_PROFILE,
       mediaStore: fakeStore(), defaultModel: "d" }), /must be a JSON object/);
 });
 
 test("rejects array body", () => {
   assert.throws(() => transformResponsesRequest([], {
-      profile: OPENCODE_GO_PROFILE,
+      profile: UNFILTERED_GO_PROFILE,
       mediaStore: fakeStore(), defaultModel: "d" }), /must be a JSON object/);
 });
 
@@ -244,7 +245,7 @@ test("propagates media store errors for invalid image urls", () => {
   };
   const source = { input: [{ role: "user", content: [{ type: "input_image", image_url: "http://x/y.png" }] }] };
   assert.throws(() => transformResponsesRequest(source, {
-      profile: OPENCODE_GO_PROFILE,
+      profile: UNFILTERED_GO_PROFILE,
       mediaStore: store, defaultModel: "d" }), /Only image data URLs/);
 });
 
@@ -252,7 +253,7 @@ test("handles missing tools array", () => {
   const source = baseRequest();
   delete source.tools;
   const { payload, report } = transformResponsesRequest(source, {
-      profile: OPENCODE_GO_PROFILE,
+      profile: UNFILTERED_GO_PROFILE,
       mediaStore: fakeStore(), defaultModel: "d" });
   assert.equal(payload.tools, undefined);
   assert.equal(report.originalToolCount, 0);
@@ -267,7 +268,7 @@ test("does not mutate the source object", () => {
   source.input[0].content.push({ type: "input_image", image_url: IMAGE_DATA_URL });
   const before = JSON.stringify(source);
   transformResponsesRequest(source, {
-      profile: OPENCODE_GO_PROFILE,
+      profile: UNFILTERED_GO_PROFILE,
       mediaStore: store, defaultModel: "d" });
   assert.equal(JSON.stringify(source), before);
 });
@@ -277,7 +278,7 @@ test("forces parallel_tool_calls to false and reports the rewrite", () => {
     const source = baseRequest();
     if (incoming !== undefined) source.parallel_tool_calls = incoming;
     const { payload, report } = transformResponsesRequest(source, {
-      profile: OPENCODE_GO_PROFILE,
+      profile: UNFILTERED_GO_PROFILE,
       mediaStore: fakeStore(), defaultModel: "d" });
     assert.equal(payload.parallel_tool_calls, false);
     assert.equal(report.parallelToolCallsRewritten, incoming !== false);

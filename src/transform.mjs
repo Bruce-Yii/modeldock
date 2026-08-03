@@ -35,7 +35,43 @@ function resolveProfileOptions(profile) {
   const blockedToolTypes = profile?.blockedToolTypes || DEFAULT_BLOCKED_TOOL_TYPES;
   const webSearchTool = profile?.harnessTools?.webSearch || null;
   const visionTool = profile?.harnessTools?.vision || null;
-  return { blockedToolTypes, webSearchTool, visionTool };
+  const toolSearchTool = profile?.harnessTools?.toolSearch || null;
+  const coreTools = profile?.coreTools || null;
+  return { blockedToolTypes, webSearchTool, visionTool, toolSearchTool, coreTools };
+}
+
+function disclosedToolNamesFromHistory(input) {
+  if (!Array.isArray(input)) return new Set();
+  const disclosed = new Set();
+  for (const item of input) {
+    if (item?.type === "function_call" && item.name === "harness_tool_search") continue;
+    if (item?.type === "function_call_output" && item.call_id) {
+      const text = typeof item.output === "string" ? item.output : "";
+      for (const match of text.matchAll(/"name"\s*:\s*"([^"]+)"/g)) {
+        if (!match[1].startsWith("harness_")) disclosed.add(match[1]);
+      }
+    }
+  }
+  return disclosed;
+}
+
+function selectForwardedTools(tools, { coreTools, toolSearchTool, disclosed }) {
+  if (!Array.isArray(tools) || tools.length === 0) return tools;
+  if (!coreTools) return tools;
+  const forwarded = [];
+  for (const tool of tools) {
+    if (!tool || typeof tool !== "object") continue;
+    if (tool.type === "namespace") {
+      const children = Array.isArray(tool.tools) ? tool.tools : [];
+      const kept = children.filter((child) => coreTools.has(child?.name) || disclosed.has(child?.name));
+      if (kept.length === 0) continue;
+      forwarded.push({ ...tool, tools: kept.map((child) => structuredClone(child)) });
+      continue;
+    }
+    if (coreTools.has(tool.name) || disclosed.has(tool.name)) forwarded.push(structuredClone(tool));
+  }
+  if (toolSearchTool) forwarded.push(structuredClone(toolSearchTool));
+  return forwarded;
 }
 
 function normalizeInput(input) {
@@ -343,12 +379,12 @@ function rewriteImages(input, mediaStore, imageRefs, currentImageRefs, { preserv
   });
 }
 
-export function transformResponsesRequest(source, { mediaStore, defaultModel, targetModel, directVision = false, profile = null }) {
+export function transformResponsesRequest(source, { mediaStore, defaultModel, targetModel, directVision = false, profile = null, disclosedTools = null }) {
   if (!source || typeof source !== "object" || Array.isArray(source)) {
     throw new Error("Responses request body must be a JSON object");
   }
 
-  const { blockedToolTypes, webSearchTool, visionTool } = resolveProfileOptions(profile);
+  const { blockedToolTypes, webSearchTool, visionTool, toolSearchTool, coreTools } = resolveProfileOptions(profile);
   const shouldCompactCompletedToolHistory = Boolean(profile?.compactCompletedToolHistory);
   const shouldCanonicalizeCallIds = profile?.canonicalizeCallIds !== false;
   const shouldStripReasoningPlaceholder = profile?.stripSyntheticReasoningPlaceholder !== false;
@@ -362,6 +398,12 @@ export function transformResponsesRequest(source, { mediaStore, defaultModel, ta
       blocked[tool.type] += 1;
       return false;
     });
+  }
+  const rawInput = normalizeInput(payload.input);
+  const historyDisclosed = disclosedToolNamesFromHistory(rawInput);
+  const disclosed = disclosedTools ? new Set([...historyDisclosed, ...disclosedTools]) : historyDisclosed;
+  if (coreTools) {
+    payload.tools = selectForwardedTools(payload.tools, { coreTools, toolSearchTool, disclosed });
   }
 
   let toolChoiceRewritten = false;

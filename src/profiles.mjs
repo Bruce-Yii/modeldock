@@ -94,6 +94,23 @@ function modelCatalogDefaults({ mainModel, displayName, description, compHash, i
   };
 }
 
+const HARNESS_TOOL_SEARCH = {
+  type: "function",
+  name: "harness_tool_search",
+  description: "Search for additional tools that are not currently loaded. Use this when the task requires a capability you do not see in your available tools, such as sub-agents, goals, MCP resources, or app features. Describe the goal plainly in any language; the search matches semantically.",
+  parameters: {
+    type: "object",
+    properties: {
+      goal: {
+        type: "string",
+        description: "Plain-language description of what you are trying to accomplish and what capability you need.",
+      },
+    },
+    required: ["goal"],
+    additionalProperties: false,
+  },
+};
+
 const OPENCODE_GO_PROFILE = {
   id: "opencode-go",
   label: "OpenCode Go",
@@ -107,8 +124,10 @@ const OPENCODE_GO_PROFILE = {
   harnessTools: {
     webSearch: HARNESS_WEB_SEARCH_TOOL,
     vision: HARNESS_VISION_TOOL,
+    toolSearch: HARNESS_TOOL_SEARCH,
   },
-  harnessToolNames: new Set(["harness_web_search", "harness_vision_inspect"]),
+  harnessToolNames: new Set(["harness_web_search", "harness_vision_inspect", "harness_tool_search"]),
+  coreTools: new Set(["shell_command", "apply_patch", "update_plan", "list_mcp_resources", "read_mcp_resource", "harness_web_search"]),
 
   modelCatalog({ mainModel, visionModel, baseInstructions }) {
     return modelCatalogDefaults({
@@ -165,4 +184,4 @@ export function profileOptions() {
   return Object.values(PROFILES).map((profile) => ({ id: profile.id, label: profile.label }));
 }
 
-export { OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE, HARNESS_WEB_SEARCH_TOOL, HARNESS_VISION_TOOL };
+export { OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE, HARNESS_WEB_SEARCH_TOOL, HARNESS_VISION_TOOL, HARNESS_TOOL_SEARCH };
