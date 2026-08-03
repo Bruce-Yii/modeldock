@@ -2,8 +2,6 @@
 
 **Give DeepSeek eyes. Connect Codex to OpenCode Go.**
 
-![ModelDock dashboard](assets/dashboard.png)
-
 > Select a language below.
 
 <details open>
