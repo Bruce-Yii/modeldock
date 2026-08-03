@@ -1,18 +1,18 @@
 # ModelDock
 
-**Give DeepSeek eyes. Connect Codex to OpenCode Go.**
+**Give DeepSeek eyes. Connect Codex to Other API providers.**
 
 > Select a language below.
 
 <details open>
 <summary>中文</summary>
 
-**给 DeepSeek 装上眼睛，让 Codex 用上 OpenCode Go。**
+**给 DeepSeek 装上眼睛，让 Codex 用上其他 API。**
 
 ModelDock 是一个本地小工具，两件本事：
 
-- **给 DeepSeek V4 Flash 增加 Vision 能力** —— 当前视觉轮次自动交给 Go 内的 Luna（Kimi 备用），下一轮再回到 DeepSeek；DeepSeek 也可以通过本地视觉工具请求 Luna 观察图片。
-- **把 OpenCode Go 桥接给 Codex（API Bridge）** —— ModelDock 在本地转发并规范化 Codex Responses 请求；Codex 的 Shell、文件和 MCP 等本地工具照常工作，不兼容的 hosted web/tool search 会替换成本地编排的 Exa 搜索。
+- **给 DeepSeek V4 Flash 增加 Vision 能力** —— 当前视觉轮次自动交给视觉模型 Luna（Kimi 备用），下一轮再回到 DeepSeek；DeepSeek 也可以通过本地视觉工具请求 Luna 观察图片。
+- **把其他 API 桥接给 Codex（API Bridge）** —— ModelDock 在本地转发并规范化 Codex Responses 请求；Codex 的 Shell、文件和 MCP 等本地工具照常工作，不兼容的 hosted web/tool search 会替换成本地编排的 Exa 搜索。
 
 ## 你得到什么
 
@@ -20,7 +20,7 @@ ModelDock 是一个本地小工具，两件本事：
 | --- | --- |
 | 🖼️ DeepSeek 也能看图 | 截图、图表、UI 图，视觉模型分析后回传文字结果 |
 | 🔗 接入 Codex | 仪表盘备份并切换用户配置，重启 Codex 后生效 |
-| 🧰 工具循环保留 | 保留 Codex 本地工具，并适配 Go 不接受的 hosted tool schema |
+| 🧰 工具循环保留 | 保留 Codex 本地工具，并适配上游 API 不接受的 hosted tool schema |
 | 📊 一目了然的仪表盘 | 用量、延迟、最近请求，打开浏览器就能看 |
 
 ## 快速开始
@@ -52,7 +52,7 @@ ModelDock 是一个本地小工具，两件本事：
    OPENCODE_GO_TOKEN=你的token
    ```
 
-   Token 从 <https://opencode.ai/auth> 登录获取（OpenCode Go 订阅的 API key）。
+   Token 从 <https://opencode.ai/auth> 登录获取（你的 API key，与其他第三方 API 的接入方式相同）。
 
    （`.env` 只在本地生效，不会上传或被提交到 GitHub。）
 
@@ -77,12 +77,12 @@ Windows 用户也可以运行 `powershell -ExecutionPolicy Bypass -File scripts/
 https://github.com/architectds/modeldock
 ```
 
-告诉它："帮我安装这个 ModelDock，并按 .env.example 配置好 OpenCode Go token。" 它会把安装、配置、启动全部搞定。
+告诉它："帮我安装这个 ModelDock，并按 .env.example 配置好 API token。" 它会把安装、配置、启动全部搞定。
 
 ## 它怎么工作（大白话版）
 
 ```text
-Codex ──> ModelDock ──> OpenCode Go / DeepSeek
+Codex ──> ModelDock ──> 你的 API / DeepSeek
                 │
                 └──> 图片交给视觉模型 ──> 结果回灌 DeepSeek
 ```
@@ -96,12 +96,12 @@ ModelDock 的网关和仪表盘只监听本机（127.0.0.1）；模型、视觉�
 <details>
 <summary>English</summary>
 
-**Give DeepSeek eyes. Connect Codex to OpenCode Go.**
+**Give DeepSeek eyes. Connect Codex to Other API providers.**
 
 ModelDock is a small local helper with two superpowers:
 
-- **Vision for DeepSeek V4 Flash** — Visual turns are routed to Luna on Go (with Kimi fallback), then the next independent turn returns to DeepSeek. DeepSeek can also request a Luna observation through a local vision tool.
-- **OpenCode Go bridge for Codex** — ModelDock forwards and normalizes Codex Responses requests. Local shell, file, and MCP tools keep working; incompatible hosted web/tool-search schemas are replaced with locally orchestrated Exa search.
+- **Vision for DeepSeek V4 Flash** — Visual turns are routed to a vision model (Luna, with Kimi fallback), then the next independent turn returns to DeepSeek. DeepSeek can also request a Luna observation through a local vision tool.
+- **API bridge for Codex** — ModelDock forwards and normalizes Codex Responses requests. Local shell, file, and MCP tools keep working; incompatible hosted web/tool-search schemas are replaced with locally orchestrated Exa search.
 
 ## What you get
 
@@ -141,7 +141,7 @@ In the **project root folder** (the same folder as `package.json`):
    OPENCODE_GO_TOKEN=your-token
    ```
 
-   Get the token by signing in at <https://opencode.ai/auth> (the OpenCode Go subscription API key).
+   Get the token by signing in at <https://opencode.ai/auth> (the API key for your provider, same as with any third-party API).
 
    (`.env` stays local — it's never uploaded or committed to GitHub.)
 
@@ -166,12 +166,12 @@ Send this repo URL to your AI coding assistant (Codex / Claude Code / Cursor, et
 https://github.com/architectds/modeldock
 ```
 
-Tell it: "Help me install ModelDock and configure the OpenCode Go token from .env.example." It will handle the clone, install, setup, and launch for you.
+Tell it: "Help me install ModelDock and configure the API token from .env.example." It will handle the clone, install, setup, and launch for you.
 
 ## How it works (plain English)
 
 ```text
-Codex ──> ModelDock ──> OpenCode Go / DeepSeek
+Codex ──> ModelDock ──> your API / DeepSeek
                 │
                 └──> images go to a vision model ──> results feed back to DeepSeek
 ```
@@ -185,12 +185,12 @@ The ModelDock gate and dashboard listen only on your machine (127.0.0.1). Model,
 <details>
 <summary>日本語</summary>
 
-**DeepSeek に視覚を。Codex を OpenCode Go へ。**
+**DeepSeek に視覚を。Codex を他の API プロバイダーへ。**
 
 ModelDock はローカルで動く小さなヘルパーです。できることはふたつ：
 
-- **DeepSeek V4 Flash にビジョン機能を追加** — 画像を含むターンは Go 上の Luna（Kimi フォールバック）へ送り、次の独立したターンで DeepSeek に戻ります。DeepSeek からローカルの視覚ツール経由で Luna に観察を依頼することもできます。
-- **Codex と OpenCode Go の API ブリッジ** — ModelDock は Codex Responses をローカルで転送・正規化します。Shell、ファイル、MCP などのローカルツールを保ち、Go が受け付けない hosted web/tool search は Exa 検索に置き換えます。
+- **DeepSeek V4 Flash にビジョン機能を追加** — 画像を含むターンはビジョンモデル Luna（Kimi フォールバック）へ送り、次の独立したターンで DeepSeek に戻ります。DeepSeek からローカルの視覚ツール経由で Luna に観察を依頼することもできます。
+- **Codex への API ブリッジ** — ModelDock は Codex Responses をローカルで転送・正規化します。Shell、ファイル、MCP などのローカルツールを保ち、上流 API が受け付けない hosted web/tool search は Exa 検索に置き換えます。
 
 ## できること
 
@@ -198,7 +198,7 @@ ModelDock はローカルで動く小さなヘルパーです。できること�
 | --- | --- |
 | 🖼️ DeepSeek で画像認識 | スクリーンショット、グラフ、UI をビジョンモデルが解析し、テキストで返却 |
 | 🔗 Codex に接続 | ダッシュボードがユーザー設定をバックアップして切り替え、Codex 再起動後に反映 |
-| 🧰 ツールループを維持 | ローカルツールを保ち、Go 非対応の hosted schema を変換 |
+| 🧰 ツールループを維持 | ローカルツールを保ち、上流 API 非対応の hosted schema を変換 |
 | 📊 一目でわかるダッシュボード | 使用量・遅延・直近のリクエストをブラウザで確認 |
 
 ## クイックスタート
@@ -230,7 +230,7 @@ ModelDock はローカルで動く小さなヘルパーです。できること�
    OPENCODE_GO_TOKEN=あなたのトークン
    ```
 
-   トークンは <https://opencode.ai/auth> にログインして取得します（OpenCode Go サブスクリプションの API キー）。
+   トークンは <https://opencode.ai/auth> にログインして取得します（ご利用のプロバイダーの API キー。他のサードパーティ API と同じ方式）。
 
    （`.env` はローカルのみで有効。アップロードや GitHub へのコミットはされません。）
 
@@ -260,7 +260,7 @@ https://github.com/architectds/modeldock
 ## 仕組み（やさしい説明）
 
 ```text
-Codex ──> ModelDock ──> OpenCode Go / DeepSeek
+Codex ──> ModelDock ──> ご利用の API / DeepSeek
                 │
                 └──> 画像はビジョンモデルへ ──> 結果を DeepSeek へフィードバック
 ```
