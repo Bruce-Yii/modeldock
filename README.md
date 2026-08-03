@@ -2,9 +2,13 @@
 
 **Give DeepSeek eyes. Connect Codex to Other API providers.**
 
-> Select a language below.
+<p align="center">
+  <a href="#zh">中文</a> ·
+  <a href="#en">English</a> ·
+  <a href="#ja">日本語</a>
+</p>
 
-<details open>
+<details open id="zh">
 <summary>中文</summary>
 
 **给 DeepSeek 装上眼睛，让 Codex 用上其他 API。**
@@ -93,7 +97,7 @@ ModelDock 的网关和仪表盘只监听本机（127.0.0.1）；模型、视觉�
 
 </details>
 
-<details>
+<details open id="en">
 <summary>English</summary>
 
 **Give DeepSeek eyes. Connect Codex to Other API providers.**
@@ -182,7 +186,7 @@ The ModelDock gate and dashboard listen only on your machine (127.0.0.1). Model,
 
 </details>
 
-<details>
+<details open id="ja">
 <summary>日本語</summary>
 
 **DeepSeek に視覚を。Codex を他の API プロバイダーへ。**
