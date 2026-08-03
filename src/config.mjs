@@ -2,6 +2,7 @@ import process from "node:process";
 import os from "node:os";
 import path from "node:path";
 import { readdirSync, readFileSync, statSync } from "node:fs";
+import { profileById } from "./profiles.mjs";
 
 try {
   process.loadEnvFile?.(".env");
@@ -92,14 +93,25 @@ export function loadConfig() {
   }
 
   const codexHome = path.resolve(process.env.MODELDOCK_CODEX_HOME || process.env.CODEX_HOME || path.join(os.homedir(), ".codex"));
-  const discovered = process.env.OPENCODE_GO_TOKEN
-    ? { token: process.env.OPENCODE_GO_TOKEN, source: "environment" }
+  const profileId = (process.env.MODELDOCK_PROFILE || "opencode-go").trim().toLowerCase();
+  const profile = profileById(profileId);
+  const discovered = process.env[profile.tokenEnvName]
+    ? { token: process.env[profile.tokenEnvName], source: "environment" }
     : discoverCodexGoToken(codexHome);
+
+  const debug = {
+    enabled: process.env.MODELDOCK_DEBUG === "1" || process.env.MODELDOCK_DEBUG === "true",
+    noReasoning: process.env.MODELDOCK_NO_REASONING === "1",
+    dumpDir: process.env.MODELDOCK_DUMP_DIR || "",
+  };
 
   return Object.freeze({
     host,
     port: integer("MODELDOCK_PORT", 4097, { min: 1, max: 65535 }),
-    goBaseUrl: normalizedBaseUrl(process.env.OPENCODE_GO_BASE_URL || "https://opencode.ai/zen/go/v1"),
+    profile,
+    profileId: profile.id,
+    debug,
+    goBaseUrl: normalizedBaseUrl(process.env.MODELDOCK_UPSTREAM_BASE_URL || profile.baseUrl),
     goToken: discovered.token,
     goTokenSource: discovered.source,
     mainModel: process.env.MODELDOCK_MAIN_MODEL || "deepseek-v4-flash",
@@ -120,6 +132,7 @@ export function loadConfig() {
 export function publicConfig(config) {
   return {
     bind: `${config.host}:${config.port}`,
+    profile: config.profileId,
     goBaseUrl: config.goBaseUrl,
     mainModel: config.mainModel,
     visionModel: config.visionModel,
@@ -127,5 +140,10 @@ export function publicConfig(config) {
     exaMcpUrl: config.exaMcpUrl,
     tokenConfigured: Boolean(config.goToken),
     tokenSource: config.goTokenSource || (config.goToken ? "configured" : "missing"),
+    debug: {
+      enabled: Boolean(config.debug?.enabled),
+      noReasoning: Boolean(config.debug?.noReasoning),
+      dumpDir: config.debug?.dumpDir || "",
+    },
   };
 }
