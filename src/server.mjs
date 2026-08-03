@@ -415,6 +415,7 @@ async function relayResponses(req, res, services) {
       defaultModel: modelSelection.mainModel,
       targetModel: route.model,
       directVision: route.directVision,
+      compactCompletedToolHistory: true,
     });
   } catch (error) {
     finish({ ok: false, error: error.message });

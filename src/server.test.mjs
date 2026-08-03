@@ -323,7 +323,7 @@ test("second-turn Codex assistant arrays are stringified for strict Console Go",
   assert.equal(trace.inputShape.find((item) => item.role === "assistant").contentKind, "string");
 });
 
-test("replays Codex custom tool history to Go as ordered native Responses pairs", async (t) => {
+test("compresses completed Codex tool history to ordered receipts for Go", async (t) => {
   let received;
   const upstream = createServer(async (req, res) => {
     received = await jsonBody(req);
@@ -359,14 +359,17 @@ test("replays Codex custom tool history to Go as ordered native Responses pairs"
   assert.equal(response.status, 200);
   assert.match(sse, /HISTORY_OK/);
   assert.deepEqual(received.input.map((item) => item.role || item.type), [
-    "user", "function_call", "function_call_output", "assistant", "function_call", "function_call_output", "user",
+    "user", "user", "assistant", "user", "user",
   ]);
   assert.equal(received.input.some((item) => Array.isArray(item.tool_calls)), false);
-  assert.deepEqual(received.input.filter((item) => item.type === "function_call").map((item) => item.arguments), ["first", "second"]);
-  assert.deepEqual(received.input.filter((item) => item.type === "function_call_output").map((item) => item.output), ["first result", "second result"]);
+  assert.deepEqual(received.input.filter((item) => item.role === "user").map((item) => item.content?.[0]?.text).filter((text) => text?.includes("tool_output_begin")), [
+    received.input[1].content[0].text,
+    received.input[3].content[0].text,
+  ]);
   const trace = instance.services.metrics.recent.find((item) => item.kind === "responses");
-  assert.equal(trace.nativeToolCalls, 2);
-  assert.equal(trace.nativeToolOutputs, 2);
+  assert.equal(trace.nativeToolCalls, 0);
+  assert.equal(trace.nativeToolOutputs, 0);
+  assert.equal(trace.compactedToolResults, 2);
   assert.equal(trace.fallbackToolResults, 0);
   assert.equal(trace.droppedAssistantMessages, 1);
 });

@@ -249,6 +249,27 @@ function normalizeToolHistory(input, tools) {
   return { input: normalized, nativeCalls, nativeOutputs, fallbackResults, fallbackOutputBytes, canonicalizedCallIds };
 }
 
+function compactCompletedToolHistory(input) {
+  if (!Array.isArray(input)) return { input, compacted: 0, outputBytes: 0 };
+  const calls = new Map(input
+    .filter((item) => (item?.type === "function_call" || item?.type === "custom_tool_call") && item.call_id)
+    .map((item) => [item.call_id, item]));
+  const completed = new Set(input
+    .filter((item) => (item?.type === "function_call_output" || item?.type === "custom_tool_call_output") && item.call_id && calls.has(item.call_id))
+    .map((item) => item.call_id));
+  let outputBytes = 0;
+  const compacted = input.flatMap((item) => {
+    if (item?.call_id && completed.has(item.call_id) && (item.type === "function_call" || item.type === "custom_tool_call")) return [];
+    if (item?.call_id && completed.has(item.call_id) && (item.type === "function_call_output" || item.type === "custom_tool_call_output")) {
+      const receipt = fallbackToolReceipt(calls.get(item.call_id), item.output);
+      outputBytes += receipt.bytes;
+      return [receipt.item];
+    }
+    return [item];
+  });
+  return { input: compacted, compacted: completed.size, outputBytes };
+}
+
 function describeInput(input) {
   if (!Array.isArray(input)) return [];
   return input.map((item) => ({
@@ -301,7 +322,7 @@ function rewriteImages(input, mediaStore, imageRefs, currentImageRefs, { preserv
   });
 }
 
-export function transformResponsesRequest(source, { mediaStore, defaultModel, targetModel, directVision = false }) {
+export function transformResponsesRequest(source, { mediaStore, defaultModel, targetModel, directVision = false, compactCompletedToolHistory: shouldCompactCompletedToolHistory = false }) {
   if (!source || typeof source !== "object" || Array.isArray(source)) {
     throw new Error("Responses request body must be a JSON object");
   }
@@ -341,13 +362,14 @@ export function transformResponsesRequest(source, { mediaStore, defaultModel, ta
     injectedHarnessTools.push(HARNESS_VISION_TOOL.name);
   }
   const toolHistory = normalizeToolHistory(rewrittenInput, payload.tools);
-  const stringifiedAssistantMessages = Array.isArray(toolHistory.input)
-    ? toolHistory.input.filter((item) => item?.role === "assistant" && Array.isArray(item.content) && assistantMessageText(item).length > 0).length
+  const compactedHistory = shouldCompactCompletedToolHistory ? compactCompletedToolHistory(toolHistory.input) : { input: toolHistory.input, compacted: 0, outputBytes: 0 };
+  const stringifiedAssistantMessages = Array.isArray(compactedHistory.input)
+    ? compactedHistory.input.filter((item) => item?.role === "assistant" && Array.isArray(item.content) && assistantMessageText(item).length > 0).length
     : 0;
-  const assistantMessagesBefore = Array.isArray(toolHistory.input)
-    ? toolHistory.input.filter((item) => item?.role === "assistant").length
+  const assistantMessagesBefore = Array.isArray(compactedHistory.input)
+    ? compactedHistory.input.filter((item) => item?.role === "assistant").length
     : 0;
-  const normalizedInput = normalizeAssistantMessages(toolHistory.input);
+  const normalizedInput = normalizeAssistantMessages(compactedHistory.input);
   const assistantMessagesAfter = Array.isArray(normalizedInput)
     ? normalizedInput.filter((item) => item?.role === "assistant").length
     : 0;
@@ -376,12 +398,12 @@ export function transformResponsesRequest(source, { mediaStore, defaultModel, ta
       imageRefs: [...new Set(imageRefs)],
       currentImageRefs: [...new Set(currentImageRefs)],
       inputShape: describeInput(payload.input),
-      nativeToolCalls: toolHistory.nativeCalls,
-      nativeToolOutputs: toolHistory.nativeOutputs,
+      nativeToolCalls: shouldCompactCompletedToolHistory ? 0 : toolHistory.nativeCalls,
+      nativeToolOutputs: shouldCompactCompletedToolHistory ? 0 : toolHistory.nativeOutputs,
       canonicalizedToolCallIds: toolHistory.canonicalizedCallIds,
       fallbackToolResults: toolHistory.fallbackResults,
-      compactedToolResults: toolHistory.fallbackResults,
-      compactedToolOutputBytes: toolHistory.fallbackOutputBytes,
+      compactedToolResults: toolHistory.fallbackResults + compactedHistory.compacted,
+      compactedToolOutputBytes: toolHistory.fallbackOutputBytes + compactedHistory.outputBytes,
       droppedAssistantMessages,
       stringifiedAssistantMessages,
       directVision,
