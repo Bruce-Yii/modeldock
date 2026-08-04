@@ -12,8 +12,9 @@ import { LiveResponsesWriter, parseSse } from "./live-responses.mjs";
 import { responseToSse } from "./responses-sse.mjs";
 import { CodexConfigSwitcher } from "./config-switcher.mjs";
 import { RouteAffinity, routeResponsesRequest } from "./router.mjs";
-import { profileOptions, profileById } from "./profiles.mjs";
+import { profileOptions, profileById, providerForModel, tokenFor } from "./profiles.mjs";
 import { LoopBreaker } from "./loop-breaker.mjs";
+import { chatEndpointFor, chatChunkToResponsesEvents, responsesToChatRequest } from "./chat-bridge.mjs";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.resolve(dirname, "../public");
@@ -110,8 +111,9 @@ function statusPayload({ config, metrics, mediaStore, routeAffinity, modelSelect
   const selected = modelSelection || { mainModel: config.mainModel, visionModel: config.visionModel };
   const options = modelOptions(config);
   const visionOptions = options.filter((entry) => entry.supportsVision);
+  const mainTokenReady = Boolean(tokenFor(config, selected.mainModel) || (config.tokens && Object.values(config.tokens).some(Boolean)));
   return metrics.snapshot({
-    ready: Boolean(config.goToken),
+    ready: mainTokenReady,
     config: publicConfig({ ...config, mainModel: selected.mainModel, visionModel: selected.visionModel }),
     models: {
       selected,
@@ -246,25 +248,32 @@ function toolCatalogText(flat) {
 const ZEN_FREE_BASE = "https://opencode.ai/zen/v1";
 
 function upstreamBaseForModel(config, model) {
+  const provider = providerForModel(config, model);
+  if (provider === "deepseek-official") return (config.deepseekBaseUrl || profileById("deepseek-official").baseUrl).replace(/\/$/, "");
   if (model && (model.endsWith("-free") || model === "big-pickle")) return ZEN_FREE_BASE;
-  return config.goBaseUrl.replace(/\/$/, "");
+  return (config.opencodeBaseUrl || config.goBaseUrl).replace(/\/$/, "");
 }
 
 function coordinatorFetch(config, purpose, input, maxTokens = 256) {
-  return fetch(`${upstreamBaseForModel(config, config.mainModel)}/responses`, {
+  const model = config.mainModel;
+  return fetch(`${upstreamBaseForModel(config, model)}/responses`, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${config.goToken}`,
+      Authorization: `Bearer ${tokenFor(config, model)}`,
       "Content-Type": "application/json",
       "User-Agent": "modeldock-opencode-go-gate/0.1.0",
       "x-modeldock-role": "coordinator",
       "x-modeldock-purpose": purpose,
     },
     body: JSON.stringify({
-      model: config.mainModel,
+      model,
       input,
       stream: false,
       max_output_tokens: maxTokens,
+      // DeepSeek thinks by default and can burn the whole budget on reasoning (observed
+      // as empty checker verdicts and retries); coordinator calls are tiny judgments, so
+      // pin effort none on that provider.
+      ...(config.profile?.id === "deepseek-official" ? { reasoning: { effort: "none" } } : {}),
       metadata: { modeldock_role: "coordinator", purpose },
     }),
     signal: AbortSignal.timeout(config.visionTimeoutMs),
@@ -587,17 +596,34 @@ function debugLog(services, message) {
 }
 
 async function fetchGoResponses(payload, services, signal, accept = "application/json") {
-  // Go strips reasoning from its own responses, so thinking mode can never satisfy its
-  // "reasoning_content must be passed back" requirement on tool-loop turns (400). Drop the
-  // reasoning field on every upstream call; A/B testing showed the model reasons correctly
-  // without it.
+  const requestModel = payload.model || services.config.mainModel;
+  const endpoint = chatEndpointFor(requestModel, services.config);
+  debugLog(services, `go request model=${requestModel} style=${endpoint.style} max_output_tokens=${payload.max_output_tokens ?? "unset"} inputItems=${Array.isArray(payload.input) ? payload.input.length : typeof payload.input} reasoning=${JSON.stringify(payload.reasoning ?? null)}`);
+  if (endpoint.style === "chat") {
+    const chatBody = responsesToChatRequest({ ...payload, model: requestModel });
+    const chatPayload = { ...chatBody };
+    return fetch(endpoint.url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${tokenFor(services.config, requestModel)}`,
+        Accept: accept,
+        "Content-Type": "application/json",
+        "User-Agent": "modeldock-opencode-go-gate/0.1.0",
+      },
+      body: JSON.stringify(chatPayload),
+      signal,
+    });
+  }
+  // Responses camp: strip reasoning for the OpenCode Go camp (Go strips it from
+  // responses and demands it back on tool-loop turns -> 400), but forward it untouched
+  // for providers that speak reasoning natively (deepseek-official accepts effort in
+  // { none, minimal, low, medium, high, xhigh, max }).
   const forwarded = { ...payload };
-  delete forwarded.reasoning;
-  debugLog(services, `go request max_output_tokens=${forwarded.max_output_tokens ?? "unset"} inputItems=${Array.isArray(forwarded.input) ? forwarded.input.length : typeof forwarded.input} reasoning=${JSON.stringify(forwarded.reasoning ?? null)}`);
-  return fetch(`${upstreamBaseForModel(services.config, forwarded.model || services.config.mainModel)}/responses`, {
+  if (services.config.profile?.id !== "deepseek-official") delete forwarded.reasoning;
+  return fetch(`${upstreamBaseForModel(services.config, requestModel)}/responses`, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${services.config.goToken}`,
+      Authorization: `Bearer ${tokenFor(services.config, requestModel)}`,
       Accept: accept,
       "Content-Type": "application/json",
       "User-Agent": "modeldock-opencode-go-gate/0.1.0",
@@ -651,28 +677,39 @@ async function relayLiveResponses(payload, res, services, signal) {
     let call = null;
     let argumentsText = "";
     let mode = null;
+    const requestModel = currentPayload.model || services.config.mainModel;
+    const isChatCamp = chatEndpointFor(requestModel, services.config).style === "chat";
     for await (const event of parseSse(upstream.body)) {
       const data = event.data;
-      if (data.type === "response.output_text.delta" && typeof data.delta === "string") {
-        mode = mode || "text";
-        writer.textDelta(data.delta);
-        continue;
-      }
-      if (data.type === "response.output_item.added" && data.item?.type === "function_call") {
-        call = { ...data.item };
-        argumentsText = typeof call.arguments === "string" ? call.arguments : "";
-        const harnessNames = harnessToolNamesFor(services.config.profile);
-        mode = harnessNames.has(call.name) ? "harness" : customTools.has(call.name) ? "custom" : "function";
-        if (mode === "function") writer.functionAdded(call);
-        if (mode === "custom") writer.customFunctionAdded(call);
-        continue;
-      }
-      if (data.type === "response.function_call_arguments.delta" && typeof data.delta === "string") {
-        argumentsText += data.delta;
-        if (mode === "function") writer.functionDelta(data.delta);
-        continue;
-      }
-      if (data.type === "response.completed") usage = addUsage(usage, data.response?.usage);
+      const events = isChatCamp ? [...chatChunkToResponsesEvents(data)] : [data];
+      for (const ev of events) {
+        if (ev.type === "response.output_text.delta" && typeof ev.delta === "string") {
+          mode = mode || "text";
+          writer.textDelta(ev.delta);
+          continue;
+        }
+        if (ev.type === "response.output_item.added" && (ev.item?.type === "function_call" || ev.item?.type === "custom_tool_call")) {
+          call = { ...ev.item };
+          argumentsText = typeof call.arguments === "string" ? call.arguments : typeof call.input === "string" ? call.input : "";
+          const harnessNames = harnessToolNamesFor(services.config.profile);
+          // DeepSeek emits custom tools (apply_patch) directly as custom_tool_call items;
+          // any such item is by construction a custom tool for this profile.
+          mode = harnessNames.has(call.name) ? "harness" : (ev.item.type === "custom_tool_call" || customTools.has(call.name)) ? "custom" : "function";
+          if (mode === "function") writer.functionAdded(call);
+          if (mode === "custom") writer.customFunctionAdded(call);
+          continue;
+        }
+        if (ev.type === "response.function_call_arguments.delta" && typeof ev.delta === "string") {
+          argumentsText += ev.delta;
+          if (mode === "function") writer.functionDelta(ev.delta);
+          continue;
+        }
+        if (ev.type === "response.custom_tool_call_input.delta" && typeof ev.delta === "string") {
+          argumentsText += ev.delta;
+          continue;
+        }
+      if (ev.type === "response.completed") usage = addUsage(usage, ev.response?.usage);
+    }
     }
 
     if (mode !== "harness") {
@@ -695,17 +732,20 @@ async function relayLiveResponses(payload, res, services, signal) {
         const check = await checkCompletion(lastText, currentPayload, services);
         debugLog(services, `checker verdict: completed=${check.completed} needed=${check.neededTools.join(",")} hint="${check.hint}" lastText="${lastText.slice(0, 100)}"`);
         if (!check.completed) {
-          const nudgeOk = services.loopBreaker?.nudgeAllowed(sessionKey) ?? true;
-          if (!nudgeOk) {
-            debugLog(services, `checker nudge throttled (5s window) session=${sessionKey}; returning reply as-is rounds=${rounds}`);
+          // Every "not done" verdict counts toward the trip (regardless of whether the
+          // nudge below is throttled): the throttled requests still got a reply that the
+          // checker considers incomplete, so they must accumulate toward the session trip.
+          const trip = services.loopBreaker?.recordNag(sessionKey, { goal: lastUserGoal(currentPayload.input) }) || { tripped: false, justTripped: false, nags: 0 };
+          if (trip.justTripped) {
+            console.log(`[gate] loop breaker tripped session=${sessionKey} nags=${trip.nags}; disabling checker for this session`);
+            recordLoopBreak(services.metrics, sessionKey, trip.nags);
+          }
+          if (trip.tripped) {
+            debugLog(services, `checker halted by loop breaker; returning reply as-is rounds=${rounds}`);
           } else {
-            const trip = services.loopBreaker?.recordNag(sessionKey, { goal: lastUserGoal(currentPayload.input) }) || { tripped: false, justTripped: false, nags: 0 };
-            if (trip.justTripped) {
-              console.log(`[gate] loop breaker tripped session=${sessionKey} nags=${trip.nags}; disabling checker for this session`);
-              recordLoopBreak(services.metrics, sessionKey, trip.nags);
-            }
-            if (trip.tripped) {
-              debugLog(services, `checker halted by loop breaker; returning reply as-is rounds=${rounds}`);
+            const nudgeOk = services.loopBreaker?.nudgeAllowed(sessionKey) ?? true;
+            if (!nudgeOk) {
+              debugLog(services, `checker nudge throttled (5s window) session=${sessionKey}; returning reply as-is rounds=${rounds}`);
             } else {
               debugLog(services, `checker continuing turn rounds=${rounds} mode=${mode}`);
               const disclosureSet = services.activeDisclosureSet || new Set();
@@ -765,9 +805,10 @@ async function relayResponses(req, res, services) {
     streaming: source?.stream === true,
   });
 
-  if (!config.goToken) {
-    finish({ ok: false, error: "OPENCODE_GO_TOKEN is not configured" });
-    return res.status(503).json({ error: { message: "OPENCODE_GO_TOKEN is not configured", type: "configuration_error" } });
+  const mainToken = tokenFor(config, modelSelection.mainModel);
+  if (!mainToken) {
+    finish({ ok: false, error: "No token configured for the main model provider" });
+    return res.status(503).json({ error: { message: "No token configured for the main model provider", type: "configuration_error" } });
   }
 
   let transformed;
@@ -1044,8 +1085,9 @@ function modelEndpoint(modelId) {
 let VISION_PROBE_IMAGE = null;
 
 function visionProbeUrlAndBody(modelId, config, imageUrl) {
-  const base = config.goBaseUrl.replace(/\/$/, "");
-  const headers = { "Content-Type": "application/json", Authorization: `Bearer ${config.goToken}` };
+  const provider = providerForModel(config, modelId);
+  const base = (provider === "deepseek-official" ? profileById("deepseek-official").baseUrl : config.goBaseUrl).replace(/\/$/, "");
+  const headers = { "Content-Type": "application/json", Authorization: `Bearer ${tokenFor(config, modelId)}` };
   if (["gpt-5.6-luna", "grok-4.5"].includes(modelId)) {
     return {
       url: `${base}/responses`,
@@ -1216,12 +1258,14 @@ async function probeVisionCandidates(profile, candidates, config) {
 }
 
 async function refreshProfileModels(profile, config) {
-  if (!profile || profile.id !== "opencode-go" || !config.goToken) return;
+  if (!profile || profile.id !== "opencode-go") return;
+  const opencodeToken = config.tokens?.["opencode-go"] || config.goToken;
+  if (!opencodeToken) return;
   if (!config.goBaseUrl.includes("opencode.ai")) return;
   if (config.modelProbeEnabled === false) return;
   try {
     const base = config.goBaseUrl.replace(/\/$/, "");
-    const headers = { Authorization: `Bearer ${config.goToken}` };
+    const headers = { Authorization: `Bearer ${opencodeToken}` };
     const goRes = await fetch(`${base}/models`, { headers, signal: AbortSignal.timeout(10_000) });
     const goIds = goRes.ok ? ((await goRes.json())?.data || []).map((entry) => entry?.id).filter((id) => typeof id === "string" && id) : [];
     const fetchedIds = [...new Set(goIds)];
@@ -1317,7 +1361,10 @@ export function createApp(services = createServices()) {
   app.all("/mcp", (req, res) => mcpHandler(req, res, req.body));
   app.post(["/v1/responses", "/responses"], (req, res) => relayResponses(req, res, services));
   app.get(["/v1/models", "/models"], (req, res) => serveModels(req, res, services));
-  app.get("/healthz", (req, res) => res.status(config.goToken ? 200 : 503).json({ ok: Boolean(config.goToken) }));
+  app.get("/healthz", (req, res) => {
+    const tokenReady = Boolean(tokenFor(config, services.modelSelection?.mainModel) || (config.tokens && Object.values(config.tokens).some(Boolean)));
+    return res.status(tokenReady ? 200 : 503).json({ ok: tokenReady });
+  });
   app.get("/api/status", (req, res) => res.json(statusPayload(services)));
   app.get("/api/config", async (req, res) => {
     try {
@@ -1427,7 +1474,10 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   console.log(`Dashboard: ${instance.url}/`);
   console.log(`Responses: ${instance.url}/v1/responses`);
   console.log(`MCP: ${instance.url}/mcp`);
-  if (!instance.services.config.goToken) console.warn("OPENCODE_GO_TOKEN is not configured; the dashboard is available but upstream calls will return 503.");
+  const missingTokens = Object.entries(instance.services.config.tokens || { "opencode-go": instance.services.config.goToken })
+    .filter(([, token]) => !token)
+    .map(([provider]) => provider);
+  if (missingTokens.length) console.warn(`Tokens missing for provider(s): ${missingTokens.join(", ")}; the dashboard is available but those upstream calls will return 503.`);
 
   const shutdown = async () => {
     await instance.stop();

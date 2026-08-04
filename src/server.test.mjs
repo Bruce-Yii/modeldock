@@ -5,9 +5,9 @@ import os from "node:os";
 import path from "node:path";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createApp, createServices, codexModelCatalog, parseCoordinatorVerdict } from "./server.mjs";
-import { OPENCODE_GO_PROFILE } from "./profiles.mjs";
+import { OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE } from "./profiles.mjs";
 
-const TEST_PROFILE = { ...OPENCODE_GO_PROFILE, checkerEnabled: false };
+const TEST_PROFILE = { ...OPENCODE_GO_PROFILE, checkerEnabled: false, chatCampOverride: "responses" };
 
 function baseConfig() {
   return {
@@ -578,6 +578,46 @@ test("streaming relay hides a harness web round and streams only the final answe
   assert.equal(instance.services.metrics.responses.outputTokens, 5);
 });
 
+test("streaming relay adapts a DeepSeek-style custom_tool_call item with input deltas", async (t) => {
+  const upstream = createServer((req, res) => {
+    res.setHeader("content-type", "text/event-stream");
+    sendSse(res, "response.output_item.added", {
+      output_index: 0,
+      item: { id: "ds_patch", type: "custom_tool_call", call_id: "call_ds_patch", name: "apply_patch", input: "" },
+    });
+    sendSse(res, "response.custom_tool_call_input.delta", { output_index: 0, delta: "*** Begin Patch\n" });
+    sendSse(res, "response.custom_tool_call_input.delta", { output_index: 0, delta: "*** End Patch\n" });
+    sendSse(res, "response.completed", { id: "resp_ds", response: { id: "resp_ds", model: "deepseek-v4-flash", usage: { input_tokens: 12, output_tokens: 3 } } });
+    res.end("data: [DONE]\n\n");
+  });
+  const port = await listen(upstream);
+  t.after(() => upstream.close());
+  const instance = await startApp({ goBaseUrl: `http://127.0.0.1:${port}`, deepseekBaseUrl: `http://127.0.0.1:${port}` });
+  t.after(instance.stop);
+
+  const response = await fetch(`${instance.base}/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      input: "apply the patch",
+      stream: true,
+      tools: [{ type: "custom", name: "apply_patch", description: "apply a patch" }],
+    }),
+  });
+  const sse = await response.text();
+  assert.equal(response.status, 200);
+  const events = [...sse.matchAll(/^data: (\{.*\})$/gm)].map((match) => JSON.parse(match[1]));
+  const added = events.filter((event) => event.type === "response.output_item.added");
+  const done = events.find((event) => event.type === "response.custom_tool_call_input.done");
+  const completed = events.find((event) => event.type === "response.completed");
+  assert.deepEqual(added.map((event) => [event.output_index, event.item.type]), [[0, "custom_tool_call"]]);
+  assert.equal(added[0].item.id, "call_ds_patch");
+  assert.equal(done.input, "*** Begin Patch\n*** End Patch\n");
+  assert.equal(completed.response.output[0].type, "custom_tool_call");
+  assert.match(JSON.stringify(completed.response.output), /Begin Patch/);
+  assert.match(sse, /data: \[DONE\]/);
+});
+
 test("streaming upstream errors preserve the provider message in the trace", async (t) => {
   const upstream = createServer((req, res) => {
     res.statusCode = 400;
@@ -940,6 +980,43 @@ test("debug mode strips reasoning from the upstream request", async (t) => {
   assert.equal(receivedReasoning, undefined, "reasoning field must be stripped in debug noReasoning mode");
 });
 
+test("deepseek-official forwards the reasoning effort untouched and pins coordinator calls off", async (t) => {
+  const received = [];
+  const upstream = createServer(async (req, res) => {
+    const body = await jsonBody(req);
+    received.push({ url: req.url, reasoning: body.reasoning, role: req.headers["x-modeldock-role"] || null });
+    res.setHeader("content-type", "application/json");
+    if (body.input && Array.isArray(body.input) && body.input.length > 0) {
+      res.end(JSON.stringify({ id: "resp_ds", output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "REASONING_OK" }] }], usage: {} }));
+      return;
+    }
+    res.end(JSON.stringify(okResponse));
+  });
+  const upstreamPort = await listen(upstream);
+  t.after(() => upstream.close());
+  const instance = await startApp({
+    profile: { ...DEEPSEEK_OFFICIAL_PROFILE, checkerEnabled: true },
+    profileId: "deepseek-official",
+    goBaseUrl: `http://127.0.0.1:${upstreamPort}`,
+    deepseekBaseUrl: `http://127.0.0.1:${upstreamPort}`,
+    mainModel: "deepseek-v4-flash",
+    visionModel: "mimo-v2.5",
+    visionFallbackModel: "mimo-v2.5",
+    tokens: { "opencode-go": "opencode-token", "deepseek-official": "deepseek-token" },
+  });
+  t.after(instance.stop);
+
+  const response = await fetch(`${instance.base}/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ input: "hello", stream: false, reasoning: { effort: "high" } }),
+  });
+  assert.equal(response.status, 200);
+  assert.equal(received[0].reasoning?.effort, "high", "deepseek-official must forward the reasoning effort to the Responses API");
+  const coordinator = received.find((entry) => entry.role === "coordinator");
+  assert.equal(coordinator.reasoning?.effort, "none", "coordinator/checker calls disable thinking on deepseek-official");
+});
+
 test("debug dump writes the transformed upstream payload to disk", async (t) => {
   const dumpDir = await mkdtemp(path.join(os.tmpdir(), "modeldock-dump-"));
   t.after(() => rm(dumpDir, { recursive: true, force: true }));
@@ -1276,4 +1353,74 @@ test("image requests route to the vision model and keep the image in the forward
   const forwardedText = JSON.stringify(receivedInput);
   assert.equal(forwardedText.includes("input_image"), true, "the real image is forwarded to the vision model on the direct route");
   assert.ok(forwardedText.includes(image), "the vision model receives the actual base64 image, not a reference");
+});
+
+test("main model on DeepSeek with vision + harness on OpenCode Go: per-provider endpoint and token routing", async (t) => {
+  const calls = [];
+  let actualRef = "";
+  const upstream = createServer(async (req, res) => {
+    const body = await jsonBody(req);
+    const auth = req.headers.authorization || "";
+    const camp = auth.includes("deepseek-token") ? "deepseek" : auth.includes("opencode-token") ? "opencode" : "unknown";
+    calls.push({ camp, model: body.model, url: req.url, auth, tools: (body.tools || []).map((tool) => tool.name || `:${tool.type}`), input: body.input });
+    res.setHeader("content-type", "application/json");
+    const deepseekCount = calls.filter((c) => c.camp === "deepseek").length;
+    if (camp === "deepseek" && deepseekCount === 1) {
+      res.end(JSON.stringify({ id: "resp_ds1", output: [{ type: "function_call", name: "harness_vision_inspect", call_id: "call_v", arguments: JSON.stringify({ image_ref: actualRef, question: "What does the chart show?" }) }], usage: {} }));
+      return;
+    }
+    if (camp === "opencode") {
+      res.end(JSON.stringify({ id: "resp_oc", output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "The chart shows revenue rising." }] }], usage: {} }));
+      return;
+    }
+    res.end(JSON.stringify({ id: "resp_ds2", output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "DONE_ON_DEEPSEEK" }] }], usage: { input_tokens: 10, output_tokens: 4 } }));
+  });
+  const port = await listen(upstream);
+  t.after(() => upstream.close());
+  const instance = await startApp({
+    profile: { ...DEEPSEEK_OFFICIAL_PROFILE, checkerEnabled: false },
+    profileId: "deepseek-official",
+    goBaseUrl: `http://127.0.0.1:${port}/go`,
+    deepseekBaseUrl: `http://127.0.0.1:${port}`,
+    mainModel: "deepseek-v4-flash",
+    visionModel: "mimo-v2.5",
+    visionFallbackModel: "mimo-v2.5",
+    tokens: { "opencode-go": "opencode-token", "deepseek-official": "deepseek-token" },
+  });
+  t.after(instance.stop);
+  actualRef = instance.services.mediaStore.put("data:image/png;base64,iVBORw0KGgo=");
+
+  const response = await fetch(`${instance.base}/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      input: [{ role: "user", content: [{ type: "input_text", text: "Look at the chart image and tell me what it shows." }] }],
+      tools: [
+        { type: "function", name: "shell_command", parameters: { type: "object", properties: {} } },
+        { type: "tool_search" },
+        { type: "web_search" },
+      ],
+      stream: false,
+    }),
+  });
+  const body = await response.json();
+  assert.equal(response.status, 200);
+  assert.match(JSON.stringify(body), /DONE_ON_DEEPSEEK/);
+
+  const deepseekCalls = calls.filter((c) => c.camp === "deepseek");
+  const opencodeCalls = calls.filter((c) => c.camp === "opencode");
+  assert.equal(deepseekCalls.length, 2, "two DeepSeek turns: harness call then final");
+  assert.equal(opencodeCalls.length, 1, "one OpenCode vision observation");
+  assert.equal(deepseekCalls[0].model, "deepseek-v4-flash");
+  assert.equal(opencodeCalls[0].model, "mimo-v2.5");
+  assert.match(deepseekCalls[0].auth, /Bearer deepseek-token/, "main-model requests carry the DeepSeek token");
+  assert.match(opencodeCalls[0].auth, /Bearer opencode-token/, "vision requests carry the OpenCode Go token");
+  assert.match(deepseekCalls[0].url, /\/responses$/, "DeepSeek camp uses the responses wire style");
+  assert.match(opencodeCalls[0].url, /\/go\/responses$/, "vision model routes to its own provider base");
+  assert.ok(deepseekCalls[0].tools.includes("harness_vision_inspect"), "harness vision tool is resident on the DeepSeek main-model path");
+  assert.ok(deepseekCalls[0].tools.includes(":tool_search"), "hosted tool_search is forwarded (DeepSeek ignores it silently)");
+  assert.ok(deepseekCalls[0].tools.includes(":web_search"), "hosted web_search is forwarded (DeepSeek supports it natively)");
+  assert.equal(deepseekCalls[0].tools.includes("harness_web_search"), false, "no Exa harness search is injected when hosted schemas pass through");
+  assert.equal(deepseekCalls[0].tools.includes("shell_command"), false, "Codex local tools other than apply_patch are filtered for DeepSeek");
+  assert.match(JSON.stringify(deepseekCalls[1].input ?? ""), /VISION_INSPECTION_COMPLETED/, "the Luna observation is fed back into the DeepSeek turn");
 });
