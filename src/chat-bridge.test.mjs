@@ -131,3 +131,22 @@ test("chatChunkToResponsesEvents: text, reasoning, tool_calls and finish map to 
   assert.equal(done[0].type, "response.completed");
   assert.deepEqual(done[0].response.usage, { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 });
 });
+
+test("responsesToChatRequest replays recorded reasoning via reasoningLookup", () => {
+  const payload = {
+    model: "m",
+    input: [
+      { type: "function_call", call_id: "call_r", name: "shell_command", arguments: "{}" },
+      { type: "function_call_output", call_id: "call_r", output: "ok" },
+      { role: "user", content: "continue" },
+    ],
+  };
+  const lookup = new Map([["call_r", "I checked the file list and will run the command."]]);
+  const chat = responsesToChatRequest(payload, { reasoningLookup: (id) => lookup.get(id) || null });
+  const tc = chat.messages.find((m) => m.tool_calls);
+  assert.equal(tc.reasoning_content, "I checked the file list and will run the command.");
+
+  const chatFallback = responsesToChatRequest(payload);
+  const tcFallback = chatFallback.messages.find((m) => m.tool_calls);
+  assert.match(tcFallback.reasoning_content, /Continuing the task/);
+});

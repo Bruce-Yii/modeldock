@@ -39,7 +39,10 @@ function chatBaseFor(goBaseUrl) {
 // Convert a native Responses input item (function_call / function_call_output /
 // message) into the Chat dialect the upstream accepts. Paired calls become
 // assistant.tool_calls + role:"tool" messages; orphans become user notes.
-function inputToChatMessages(input) {
+// reasoningLookup(callId) optionally returns the actual reasoning the model produced
+// for that call (recorded by the relay), so tool-loop turns carry real thought text
+// instead of a placeholder.
+function inputToChatMessages(input, reasoningLookup) {
   if (!Array.isArray(input)) return [];
   const out = [];
   let index = 0;
@@ -62,9 +65,10 @@ function inputToChatMessages(input) {
       if (paired.length > 0) {
         // Go's chat camp (thinking mode) demands reasoning_content on every
         // assistant.tool_calls turn. Codex does not store the reasoning we forward, so
-        // provide an honest continuation note (not a fabricated thought) to satisfy the
-        // requirement while keeping thinking enabled.
+        // use the reasoning the relay recorded for this call (real thought text), or an
+        // honest continuation note as a last resort.
         const reasoningText = batch.find((call) => typeof call.reasoning_content === "string" && call.reasoning_content)?.reasoning_content
+          || (reasoningLookup ? reasoningLookup(paired[0].call_id) : null)
           || "Continuing the task: a local tool was invoked and its result is provided below.";
         out.push({
           role: "assistant",
@@ -152,8 +156,8 @@ function toolsToChat(tools) {
 }
 
 // Build the Chat Completions request body from a Responses payload.
-export function responsesToChatRequest(payload) {
-  const messages = inputToChatMessages(payload.input);
+export function responsesToChatRequest(payload, { reasoningLookup = null } = {}) {
+  const messages = inputToChatMessages(payload.input, reasoningLookup);
   const body = {
     model: payload.model,
     messages,

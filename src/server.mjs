@@ -361,7 +361,9 @@ async function fetchGoResponses(payload, services, signal, accept = "application
   const endpoint = chatEndpointFor(requestModel, services.config);
   debugLog(services, `go request model=${requestModel} style=${endpoint.style} max_output_tokens=${payload.max_output_tokens ?? "unset"} inputItems=${Array.isArray(payload.input) ? payload.input.length : typeof payload.input} reasoning=${JSON.stringify(payload.reasoning ?? null)}`);
   if (endpoint.style === "chat") {
-    const chatBody = responsesToChatRequest({ ...payload, model: requestModel });
+    const chatBody = responsesToChatRequest({ ...payload, model: requestModel }, {
+      reasoningLookup: services.reasoningFor ? (callId) => services.reasoningFor(callId) : null,
+    });
     const chatPayload = { ...chatBody };
     return fetch(endpoint.url, {
       method: "POST",
@@ -456,6 +458,11 @@ async function relayLiveResponses(payload, res, services, signal) {
         if (ev.type === "response.output_item.added" && (ev.item?.type === "function_call" || ev.item?.type === "custom_tool_call")) {
           call = { ...ev.item };
           argumentsText = typeof call.arguments === "string" ? call.arguments : typeof call.input === "string" ? call.input : "";
+          // Record the reasoning the model produced before this tool call so the chat
+          // bridge can replay it on the next turn (Go demands reasoning_content back).
+          if (call.call_id && services.rememberReasoning && writer.reasoning?.text) {
+            services.rememberReasoning(call.call_id, writer.reasoning.text);
+          }
           const harnessNames = harnessToolNamesFor(services.config.profile);
           // DeepSeek emits custom tools (apply_patch) directly as custom_tool_call items;
           // any such item is by construction a custom tool for this profile.
@@ -1015,6 +1022,19 @@ export function createServices(config = loadConfig()) {
   });
   const routeAffinity = new RouteAffinity();
   const toolDisclosure = new Map();
+  // Reasoning cache: call_id -> the reasoning text the model produced before that tool
+  // call. Codex drops reasoning from its re-posted history, but Go's chat camp (thinking
+  // mode) demands reasoning_content on every assistant.tool_calls turn, so the relay
+  // records it here and the chat bridge replays it on the next turn. Bounded LRU.
+  const reasoningCache = new Map();
+  const MAX_REASONING_ENTRIES = 256;
+  const rememberReasoning = (callId, text) => {
+    if (!callId || typeof text !== "string" || !text.trim()) return;
+    reasoningCache.delete(callId);
+    reasoningCache.set(callId, text);
+    while (reasoningCache.size > MAX_REASONING_ENTRIES) reasoningCache.delete(reasoningCache.keys().next().value);
+  };
+  const reasoningFor = (callId) => reasoningCache.get(callId) || null;
   const runtime = { profile: mutableConfig.profile, profileId: mutableConfig.profileId };
   const refreshModelCatalog = () => refreshProfileModels(mutableConfig.profile, mutableConfig).then(
     () => console.log(`[gate] model refresh done, availableModels=${(mutableConfig.profile?.availableModels || []).length}`),
@@ -1026,7 +1046,7 @@ export function createServices(config = loadConfig()) {
     ? setInterval(refreshModelCatalog, refreshIntervalHours * 3_600_000)
     : null;
   if (modelRefreshTimer) modelRefreshTimer.unref();
-  return { config: mutableConfig, runtime, metrics, mediaStore, upstreams, configSwitcher, routeAffinity, modelSelection, toolDisclosure, refreshModelCatalog, modelRefreshTimer };
+  return { config: mutableConfig, runtime, metrics, mediaStore, upstreams, configSwitcher, routeAffinity, modelSelection, toolDisclosure, reasoningCache, rememberReasoning, reasoningFor, refreshModelCatalog, modelRefreshTimer };
 }
 
 function disclosureFor(services, payload) {
