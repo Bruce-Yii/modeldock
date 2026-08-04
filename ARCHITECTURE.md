@@ -5,7 +5,7 @@ ModelDock is, how a request flows through the system, what each module owns, and
 pieces are wired together the way they are. It complements the user-facing README, which
 exists only for installing and running ModelDock.
 
-> **Verified against:** commit `130eae5` (2026-08-03), `npm test` = 155 passing.
+> **Verified against:** commit `852d00a` (2026-08-03), `npm test` = 162 passing.
 > When you change routing, transform, profiles, or endpoints, re-verify the affected
 > section and bump this line. The codebase moves faster than prose — an unverified
 > architecture doc is worse than none.
@@ -17,11 +17,11 @@ the **Codex** coding agent and an **upstream LLM provider** (OpenCode Go serving
 DeepSeek V4 Flash by default). It speaks the OpenAI **Responses API** on both sides and
 does two headline jobs:
 
-1. **Vision for a text-only model.** DeepSeek V4 Flash cannot see images. ModelDock either
-   routes an image-bearing turn to a vision-capable model (Luna, Kimi as fallback), or it
-   rewrites the image into an opaque `img_...` reference and exposes a
-   `harness_vision_inspect` tool so the main model can request a vision observation on
-   demand.
+1. **Vision for a text-only model.** DeepSeek V4 Flash cannot see images. ModelDock
+   detects images in a turn and either (a) routes the whole turn to a vision-capable model
+   **with the real image attached** (direct vision, one round-trip), or (b) exposes a
+   **resident** `harness_vision_inspect` tool so the text-only main model can request a
+   Luna observation of a captured or historical image on demand.
 2. **API bridge for Codex.** Codex emits hosted tool schemas (`web_search`, `tool_search`)
    that the Go upstream rejects. `transform.mjs` strips them and substitutes locally
    orchestrated equivalents: an Exa web search and an LLM-driven `harness_tool_search`
@@ -29,6 +29,11 @@ does two headline jobs:
 
 Because Codex's local tools (`shell_command`, `apply_patch`, …) are safe to keep, they are
 forwarded; only the hosted schemas are replaced.
+
+The gateway also maintains a **live model catalog**: it fetches the upstream `/models`
+list at startup, merges it with a curated, ranked `availableModels` seed, probes and
+scores vision capability per model, and routes each request to the right upstream
+"camp" (`zen/go/v1` vs `zen/v1`) and the right wire style (responses vs chat).
 
 ## The high-level flow
 
@@ -38,12 +43,15 @@ Codex ──POST /v1/responses──> ModelDock gate (Express, loopback only)
                                   ├─ router.mjs        decide target model
                                   ├─ transform.mjs     normalize payload
                                   │
+                                  ├─ upstreamBaseForModel: pick camp by model id
+                                  │    paid / console-go  → …/zen/go/v1
+                                  │    free (*-free, big-pickle) → …/zen/v1
                                   ▼
-                          upstream responses API (opencode.go / DeepSeek)
+                          upstream responses / chat API
                                   │
                                   ├─ harness loop:      execute local tools between turns
                                   │   harness_web_search       → Exa MCP (upstreams)
-                                  │   harness_vision_inspect    → Luna/Kimi (upstreams)
+                                  │   harness_vision_inspect    → vision model (upstreams)
                                   │   harness_tool_search      → coordinator LLM, disclose
                                   │
                                   ▼
@@ -56,11 +64,11 @@ Codex ──POST /v1/responses──> ModelDock gate (Express, loopback only)
 
 | File | Role |
 | --- | --- |
-| `src/server.mjs` | Express app, entry point, request relay, harness tool loop, completion checker, coordinator calls, endpoint wiring |
+| `src/server.mjs` | Express app, entry point, request relay, harness tool loop, completion checker, coordinator calls, model catalog refresh + vision probing/evaluation, endpoint wiring |
 | `src/router.mjs` | Decide which model a request should hit; `RouteAffinity` pins follow-up tool turns to the model that started them |
-| `src/transform.mjs` | Normalize a Responses request: block hosted tools, rewrite images, inject harness tools, canonicalize tool history |
-| `src/profiles.mjs` | Provider profiles (opencode-go, deepseek-official); controls which tools are blocked/forwarded, model catalog, checker toggle |
-| `src/upstreams.mjs` | Outbound client helpers: Exa web search (MCP), vision inspect via the upstream responses endpoint |
+| `src/transform.mjs` | Normalize a Responses request: block hosted tools, rewrite images (keep them on the direct-vision route), inject harness tools, canonicalize tool history |
+| `src/profiles.mjs` | Provider profiles (opencode-go, deepseek-official); controls which tools are blocked/forwarded, the curated `availableModels` catalog, checker toggle |
+| `src/upstreams.mjs` | Outbound client helpers: Exa web search (MCP), vision inspect with per-model endpoint/style routing |
 | `src/live-responses.mjs` | Streaming relay path: `LiveResponsesWriter` + SSE parser |
 | `src/responses-sse.mjs` | Buffered relay path: adapt an upstream JSON response to a single SSE document |
 | `src/mcp.mjs` | MCP server exposing the same web-search and vision tools over the `/mcp` endpoint |
@@ -68,7 +76,9 @@ Codex ──POST /v1/responses──> ModelDock gate (Express, loopback only)
 | `src/config-switcher.mjs` | Back up / rewrite / restore Codex's `config.toml` to point at ModelDock, with drift detection |
 | `src/metrics.mjs` | Per-kind request metrics, usage extraction, event emitter feeding the dashboard |
 | `src/media-store.mjs` | In-memory cache mapping `img_<hash>` refs to image blobs (data-URL or HTTPS) for the vision harness |
-| `public/` | Static dashboard (SingleFile `index.html` + `app.js` + `styles.css`) consuming `/api/events` |
+| `src/loop-breaker.mjs` | Per-session circuit breaker for checker nag loops; trips after N nags in a window and disables the checker for that session |
+| `src/vision-eval.mjs` | Deterministic vision benchmark (7 tasks: color/shape/OCR/chart/arrow) used to score and tier vision-capable models |
+| `public/` | Static dashboard (`index.html` + `app.js` + `styles.css`) consuming `/api/events` |
 
 ## Request lifecycle (codex → upstream → codex)
 
@@ -85,15 +95,16 @@ arrives here.
    - Otherwise → `default_main` (the request's model or the configured main model).
 3. **Transform.** `transformResponsesRequest` (src/transform.mjs) returns the forwarded
    `payload` plus a `report`. Key steps (see below for details): block `tool_search` /
-   `web_search`; rewrite every `input_image` to an `img_...` media-store reference;
-   (profile allowlist) filter which tools go upstream; rewrite tool history; set
-   `parallel_tool_calls = false`; inject harness tools.
-4. **Forward.** `relayResponses` selects a relay based on `payload.stream` and the
-   dashboard messaging setting:
+   `web_search`; filter tools through the profile allowlist; rewrite image history —
+   **historical** `input_image`s become `img_...` media-store references, but on the
+   direct-vision route the **current-turn** image is kept as-is so Luna sees the real
+   pixels; inject the harness tools (`harness_web_search` on demand, `harness_vision_inspect`
+   resident on the main-model path); rewrite tool history; set
+   `parallel_tool_calls = false`.
+4. **Forward.** `relayResponses` selects a relay based on `payload.stream`:
    - `stream: false` → a plain JSON passthrough with the harness loop applied.
-   - `stream: true` + messaging `live-normalized` → `relayLiveResponses` (SSE passthrough
-     with inline harness execution and the completion checker).
-   - `stream: true` + messaging `buffered` → `relayBufferedResponses`.
+   - `stream: true` → `relayLiveResponses` (SSE passthrough with inline harness execution
+     and the completion checker).
 5. **Relay live.** `parseSse` reads the upstream stream; every
    `response.output_text.delta` is pushed straight to the client through
    `LiveResponsesWriter`. When a `function_call` for a harness tool appears, capture its
@@ -104,7 +115,9 @@ arrives here.
    if the profile enables `checkerEnabled`, call `checkCompletion` — a few-token coordinator
    call — to determine whether the agent actually finished. If not, inject a
    `[MODELDOCK CHECKER]` user message and re-call upstream. Hard caps both the harness
-   rounds and the checker retries, so a runaway turn cannot loop forever.
+   rounds and the checker retries, so a runaway turn cannot loop forever. A per-session
+   `LoopBreaker` additionally trips after 3 checker nags in 5s and disables the checker
+   for that session (see below), so a stuck agent can't spin across hundreds of requests.
 7. **Terminate.** `writer.finish(usage)` emits `response.completed` and `[DONE]`. Usage,
    latency, and transform statistics are recorded in `metrics`.
 
@@ -122,14 +135,17 @@ Codex sends `POST /v1/responses` with a current-turn user message containing an
    returns `{ model: "gpt-5.6-luna", reason: "current_turn_image", directVision: true }`.
    The response carries `x-modeldock-route: current_turn_image` and
    `x-modeldock-model: gpt-5.6-luna`.
-2. `transformResponsesRequest`:
-   - `mediaStore.put(image_url)` stores the blob and returns `img_<sha256-20>`.
-   - `rewriteImages` swaps the `input_image` part for an `input_text` placeholder:
-     `[Image attachment img_abc…. Use harness_vision_inspect with image_ref "img_abc" before making visual claims.]`
-     — **the base64 bytes never leave the gateway** (asserted in tests).
-   - Because the current turn introduced refs (`currentImageRefs.length > 0`), the
-     `harness_vision_inspect` tool definition is injected into `payload.tools`.
-   - The `directVision` route instruction is appended to `instructions`.
+2. `transformResponsesRequest` (direct vision route):
+   - `mediaStore.put(image_url)` records the blob and returns `img_<sha256-20>` (for the
+     dashboard and later reference).
+   - `rewriteImages` **keeps the current-turn `input_image` as-is** because
+     `keepCurrentImages: directVision` is set — Luna receives the real pixels in a single
+     pass, no tool round-trip (asserted in tests).
+   - The `harness_vision_inspect` tool is **not** injected on this route (Luna sees the
+     image directly); it is injected only on main-model turns.
+   - A route instruction is appended to `instructions`: the image is attached directly,
+     inspect it, and return conclusions in the assistant message so the next main-model
+     turn receives them in history.
 3. The upstream call goes out for `gpt-5.6-luna`. If Luna emits plain text (e.g.
    *"The chart shows Q3 revenue rising."*) it flows straight back as SSE and the turn
    ends; the text is now the assistant message in history.
@@ -152,8 +168,9 @@ and dropped.
 A fresh user message with no image → `currentTurnItems` has no `input_image` and no
 pinned call → `default_main` → `deepseek-v4-flash`. The main model reads Luna's
 turn-1 text from the conversation history (and the earlier image is now framed as
-`[Earlier image attachment img_abc…. do not re-inspect…]` by `rewriteImages`). Model
-selection returns to the text-only DeepSeek.
+`[Earlier image attachment img_abc…. do not re-inspect…]` by `rewriteImages`). Because
+`harness_vision_inspect` is **resident** on the main-model path, DeepSeek can also request
+a fresh Luna observation of that historical ref if the user asks a new visual question.
 
 Because the whole loop lives inside one `relayResponses` request/response for the
 visual turn, the codex-to-gate handshake is unchanged; only the *upstream* model
@@ -168,7 +185,7 @@ Tools:
 | Tool | Execution | Notes |
 | --- | --- | --- |
 | `harness_web_search` | `upstreams.searchWeb` → Exa MCP tool `web_search_exa` | Multiple queries supported; per-query site/after filtering |
-| `harness_vision_inspect` | `upstreams.inspectVision` → vision model | Reads image from `media-store`, calls Luna → Kimi fallback; recommended once per image (calls removed from the tools after use) |
+| `harness_vision_inspect` | `upstreams.inspectVision` → vision model | Reads image from `media-store`, calls the configured vision model with fallback; resident on the main-model path; calls removed from the tools after use |
 | `harness_tool_search` | `coordinatorFetch` → small model call, JSON that picks tool names | Feeds matches back as the tool definitions, so the model can now *see* previously hidden tools |
 
 Harness tool names are driven by `profile.harnessToolNames` (opencode-go additionally
@@ -193,7 +210,7 @@ Profiles encode provider-specific behavior; the active one is selected by
 
 | Setting | opencode-go | deepseek-official |
 | --- | --- | --- |
-| Provider endpoint | `https://opencode.ai/zen/go/v1` + `/responses` | `https://api.deepseek.com/responses` |
+| Provider endpoint | `https://opencode.ai/zen/go/v1` (+ `zen/v1` for free models) | `https://api.deepseek.com/responses` |
 | Blocked hosted tools | `tool_search`, `web_search` | none |
 | Tool allowlist (`coreTools`) | shell_command, apply_patch, update_plan, list_mcp_resources, list_mcp_resource_templates, read_mcp_resource, request_user_input, harness_web_search, harness_vision_inspect | (no allowlist → forward all) |
 | Harness tools | web_search, vision, tool_search | none |
@@ -201,26 +218,56 @@ Profiles encode provider-specific behavior; the active one is selected by
 | `checkerEnabled` | true | false |
 | Input modalities | text + image | text only |
 
-The `availableModels` list above is only the **seed**. For opencode-go it is overwritten at
-startup by a live catalog fetch (see next section), so the dashboard typically shows ~25
-models, not the 3 seeded here.
+The opencode-go profile also carries `availableModels`, a **curated seed catalog** (~27
+entries as of this writing) with per-model metadata: `endpoint` (responses|chat),
+`supportsVision`, `free`, `visionScore/visionMaxScore/visionTier` (from the eval bench),
+`quota5h` (rate limit), `speedTier`, and `status`. The dashboard model dropdowns are
+built from this list (main + vision, each with its own provider select).
 
-### Dynamic model catalog (startup refresh)
+### Dynamic model catalog (startup refresh + periodic)
 
-`refreshProfileModels(profile, config)` in `server.mjs` runs once from `createServices`
-(fire-and-forget, failures are logged and swallowed). It only acts when the profile is
-`opencode-go`, a `goToken` exists, and `goBaseUrl` is on `opencode.ai`. It then:
+`refreshProfileModels(profile, config)` in `server.mjs` runs from `createServices` at
+startup (fire-and-forget) and then on an interval (`MODELDOCK_MODEL_REFRESH_HOURS`,
+default 24h; 0 disables). It only acts when the profile is `opencode-go`, a `goToken`
+exists, and `goBaseUrl` is on `opencode.ai`; `MODELDOCK_MODEL_PROBE_ENABLED=0` skips it.
+It then:
 
-- fetches `{base}/models` (Go catalog) and `{base-without-/go/}/models` (Zen catalog) in
-  parallel, each with a 10s timeout;
-- keeps every Go id, plus only Zen ids ending in `-free`;
-- dedupes + sorts, then **mutates `profile.availableModels`** in place, labelling each id
-  via `labelForModelId` and guessing vision support via `guessSupportsVision`
-  (`VISION_MODEL_HINTS = luna, omni, vision, vl`), preserving any seeded vision flags.
+- fetches `{base}/models` (Go catalog) with a 10s timeout;
+- keeps the **curated order**: every curated model whose id is still in the fetched list
+  keeps its position and metadata, curated-only models (not in the fetched list) are
+  retained after them, and brand-new ids are appended with best-effort labels;
+- mutates `profile.availableModels` in place (runtime-mutable global state).
 
-Implications a contributor must know: the profile object is a shared singleton, so this is
-runtime-mutable global state; the refresh happens **once at startup only** (no periodic
-refresh, no per-request refetch); and there is currently **no test coverage** for this path.
+### Per-model upstream routing (two "camps")
+
+Free models live on a different upstream base than paid ones, so every outbound call
+consults the model id:
+
+- `upstreamBaseForModel(config, model)` (server.mjs): `*-free` or `big-pickle` →
+  `https://opencode.ai/zen/v1`; anything else → `config.goBaseUrl` (`zen/go/v1`).
+- `visionEndpointFor(model)` (upstreams.mjs) picks the wire style: `gpt-5.6-luna` and
+  `grok-4.5` → Responses style on the go base; `*-free`/`big-pickle` → chat/completions on
+  the zen base; every other model → chat/completions on the go base.
+
+This is why `deepseek-v4-flash-free` (main model) and `mimo-v2.5-free` (top vision model)
+work without a paid balance: their requests go to the zen free camp, while the harness
+coordinator and checker calls follow the main model's camp.
+
+### Vision capability ranking (probe + eval bench)
+
+Vision support is not assumed from the catalog. At startup, after the model refresh:
+
+1. **Probe.** Each candidate model receives a real dashboard screenshot
+   (`probeImageSupport`); a successful image-aware answer marks it vision-capable.
+2. **Evaluate.** `evaluateVision` runs the deterministic bench from `src/vision-eval.mjs`
+   (7 tasks: solid colors, count shapes, OCR, chart reading, arrow direction). Score ≥ 4
+   (of 9) qualifies; `tierForScore` maps the ratio to strong/medium/basic/poor.
+3. **Rank.** `balanceScoreFor` combines capability ratio + speed tier + quota band
+   (+ a small free-model boost) into a `balanceScore` used to sort the vision dropdown,
+   so the default vision model is picked for capability *and* practical usability
+   (currently `mimo-v2.5-free`, fallback `minimax-m3`).
+
+Eval assets live in `assets/vision/*.png`; `VISION_SCORE_THRESHOLD = 4` in server.mjs.
 
 ### Tool philosophy
 
@@ -235,17 +282,38 @@ keep that framing.
   (with optional `exaApiKey` query parameter), parses the JSON/SSE result, returns the
   concatenated text.
 - `inspectVision({ image_ref, compare_image_ref, question, mode })` resolves refs from
-  `media-store`, builds a prompt, and calls the vision model via the same upstream
-  responses endpoint, with fallback to the configured `visionFallbackModel` on error.
+  `media-store`, builds a prompt, and calls the vision model — routed through
+  `visionEndpointFor` so Responses-style (luna/grok), zen-free chat, and go chat models
+  each hit the right URL and body shape — with fallback to the configured
+  `visionFallbackModel` on error.
 - Both record metrics.
+
+## Loop breaker (loop-breaker.mjs)
+
+The completion checker's per-request `rounds < 3` cap does not stop a stuck agent from
+spinning across *hundreds* of Codex re-POSTs (checker nags → model says "let me check" →
+checker nags again). `LoopBreaker` closes that hole at the session level:
+
+- each checker "not done" verdict calls `recordNag(sessionKey)`; a sliding window (5s)
+  counts nags, and ≥ 3 trips the session;
+- once tripped, `relayLiveResponses` skips the checker entirely for that session
+  (`isTripped`), removing the reinforcement that keeps the loop alive;
+- a genuinely new user goal (`observeGoal` on every request) resets the session, so a
+  fresh task re-enables the checker;
+- the trip is surfaced as a `loop_breaker` entry in the metrics trace and in
+  `/api/status.loopBreaker`.
+
+Sessions are keyed by `client_metadata.session_id`/`thread_id` (same key as tool
+disclosure), capped at 64.
 
 ## Media store (media-store.mjs)
 
 `media-store` maps `img_<hash>` → `{ imageUrl, mime, size, timestamps }`. Images reach it
 in two ways:
 
-- `rewriteImages` in transform maps `input_image.image_url` (data URL or HTTPS) to a ref
-  and injects the placeholder text.
+- `rewriteImages` in transform stores every `input_image.image_url` (data URL or HTTPS)
+  as a ref; the part itself is replaced by placeholder text **except** on the
+  direct-vision route, where the current-turn image is kept and forwarded as-is.
 - Tool results containing `input_image` parts (`toolOutputText`) put the image in as well,
   replacing it with an instruction to use `harness_vision_inspect`.
 
@@ -283,7 +351,7 @@ the file drifted). Drifted === a hash+signature check that refuses ambiguous res
 | POST | `/api/config/restart-ack` | Clear "restart required" sticky state |
 | GET / POST | `/api/models` | Read / change selected main+vision model + provider |
 | GET | `/api/profiles` | List available provider profiles |
-| POST | `/api/messaging` | Toggle live-normalized vs buffered SSE |
+| POST | `/api/debug` | Toggle verbose gateway debug logging on/off |
 | GET | `/api/events` | SSE stream pushing a status snapshot |
 | POST | `/mcp` (Streamable HTTP) | MCP tools: `web_search_exa`, `vision_inspect` |
 | GET | `/` (+ `*.html`) | Static dashboard from `public/` (no cache) |
@@ -296,33 +364,33 @@ validated at load time.
 
 ## Streaming modes
 
-- **live-normalized** (`messagingMode=streaming`, default): the client gets a real
-  incremental SSE stream; text deltas pass through; harness tool results are injected,
-  and the completion checker runs inline only in this mode.
-- **buffered**: fetch the full upstream JSON, run the (non-streaming) harness loop, then
-  serialize one complete SSE document via `responses-sse.mjs`. Lower latency to first
-  byte, but less feedback to the user; no checker.
-
-Toggle at runtime under `/api/messaging`; affects the next request.
+Streaming requests (`stream: true`) always use the **live** relay: the client gets a real
+incremental SSE stream; text deltas pass through; harness tool results are injected, and
+the completion checker runs inline. Non-streaming requests (`stream: false`) use a plain
+JSON passthrough with the harness loop applied. There is no buffer toggle; the dashboard
+`DEBUG` switch toggles verbose gateway logging (`MODELDOCK_DEBUG` at startup, `/api/debug`
+at runtime).
 
 ## Config env vars (subset)
 
 | Var | Default | Purpose |
 | --- | --- | --- |
 | `MODELDOCK_PROFILE` | `opencode-go` | Which profile drives tool policy + catalog |
-| `MODELDOCK_UPSTREAM_BASE_URL` | profile default | Override upstream Responses base URL |
+| `MODELDOCK_UPSTREAM_BASE_URL` | profile default | Override upstream base URL (`zen/go/v1`); zen-free camp is fixed |
 | `OPENCODE_GO_TOKEN` / `DEEPSEEK_API_KEY` | — | Upstream token (env or read from Codex config backup) |
 | `MODELDOCK_MAIN_MODEL` | `deepseek-v4-flash` | Main model |
-| `MODELDOCK_VISION_MODEL` / `MODELDOCK_VISION_FALLBACK_MODEL` | `gpt-5.6-luna` / `kimi-k2.5` | Vision models (harness + router) |
+| `MODELDOCK_VISION_MODEL` / `MODELDOCK_VISION_FALLBACK_MODEL` | `mimo-v2.5-free` / `minimax-m3` | Vision models (harness + router); default picked by balance ranking |
+| `MODELDOCK_MODEL_REFRESH_HOURS` | `24` | Catalog refresh interval (0 disables) |
+| `MODELDOCK_MODEL_PROBE_ENABLED` | `1` | Set `0` to skip startup vision probe + eval + catalog refresh |
 | `MODELDOCK_*_MODEL` timeouts, media limits, `EXA_MCP_URL`, `EXA_API_KEY` | … | Harness and store knobs |
 | `MODELDOCK_DEBUG`, `MODELDOCK_NO_REASONING`, `MODELDOCK_DUMP_DIR` | — | Debug aids |
 
 ## Tests
 
-Tests live in `src/*.test.mjs` and `test/`; `npm test` runs the `src` suites (155 tests).
-Note that `src/profiles.test.mjs` is *not* referenced in the `npm test` script (dead),
-and `test/*.test.mjs` are older duplicates of some `src` suites — they still run and still
-pass, but when in doubt change the `src` version.
+Tests live in `src/*.test.mjs` and `test/`; `npm test` runs 162 tests, including the
+`loop-breaker` suite. Note that `src/profiles.test.mjs` is *not* referenced in the
+`npm test` script (dead), and `test/*.test.mjs` are older duplicates of some `src`
+suites — they still run and still pass, but when in doubt change the `src` version.
 
 ## Design notes
 
@@ -331,14 +399,20 @@ pass, but when in doubt change the `src` version.
   never prompt text or images.
 - **The coordinator** is a tiny model call (few tokens) used for `checkCompletion` and
   `searchToolRegistry` (`harness_tool_search`), both from the same
-  `coordinatorFetch` helper in `server.mjs`.
+  `coordinatorFetch` helper in `server.mjs`. It follows the main model's camp.
 - **Implicit contract with the client.** Codex emits a lot of Responses/custom history
   (view_image as a codex tool, tool_call blocks, etc.); the transform layer absorbs those —
   read `transform.mjs` tests for the exact edge cases.
+- **Free vs paid is a routing concern, not a label.** `*-free` (and `big-pickle`) model
+  ids switch the upstream base to the zen camp and chat wire style; the rest of the
+  pipeline is untouched. Verified empirically against the live endpoints: free models
+  answer on `zen/v1` (both chat and responses), and are rejected by the `go` camp.
 
 ## Where to start reading
 
-1. `src/server.mjs` — `relayResponses` is the single entry point; read top to bottom once.
+1. `src/server.mjs` — `relayResponses` is the single entry point; read top to bottom once,
+   then the model-catalog/vision-probe block near the bottom.
 2. `src/transform.mjs` — the normalization logic that makes everything else possible.
-3. `src/media-store.mjs` — to see what the model actually sees, trace `rewriteImages` → refs.
-4. `src/profiles.mjs` — to understand how the two provider modes diverge.
+3. `src/upstreams.mjs` + `src/profiles.mjs` — the per-model endpoint/style routing and the
+   curated catalog with vision metadata.
+4. `src/loop-breaker.mjs` — the session-level guard on the checker loop.

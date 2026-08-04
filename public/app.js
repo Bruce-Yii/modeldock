@@ -154,7 +154,7 @@ function render(data) {
   set("cfg-vision", data.config.visionModel);
   set("cfg-fallback", data.config.visionFallbackModel);
   set("cfg-exa", data.config.exaMcpUrl);
-  renderMessaging(data.messaging || { mode: "streaming" });
+  renderMessaging(data.config ? { config: data.config } : {});
   renderRecent(data.recent || []);
 }
 
@@ -214,7 +214,7 @@ function renderModelOptions(data) {
 
 let messagingBusy = false;
 let modelBusy = false;
-let messagingMode = "streaming";
+let debugEnabled = false;
 
 async function setModels() {
   modelBusy = true;
@@ -235,30 +235,29 @@ async function setModels() {
 }
 
 function renderMessaging(data) {
-  messagingMode = data.mode === "streaming" ? "streaming" : "buffered";
-  const streaming = messagingMode === "streaming";
+  debugEnabled = Boolean(data.config?.debug?.enabled);
   const toggle = $("messaging-toggle");
-  toggle.checked = streaming;
+  toggle.checked = debugEnabled;
   toggle.disabled = messagingBusy;
-  $("buffer-mode-label").classList.toggle("active", !streaming);
-  $("streaming-mode-label").classList.toggle("active", streaming);
-  toggle.title = streaming ? "Live normalized SSE" : "Wait for completion, then emit one complete SSE response";
+  $("buffer-mode-label").classList.toggle("active", !debugEnabled);
+  $("streaming-mode-label").classList.toggle("active", debugEnabled);
+  toggle.title = debugEnabled ? "Verbose gateway logging" : "Minimal gateway logging";
 }
 
-async function setMessagingMode(mode) {
+async function setDebugEnabled(enabled) {
   messagingBusy = true;
   $("messaging-toggle").disabled = true;
   try {
-    const response = await fetch("/api/messaging", {
+    const response = await fetch("/api/debug", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ mode }),
+      body: JSON.stringify({ enabled }),
     });
     const body = await response.json();
-    if (!response.ok) throw new Error(body.error?.message || `Messaging update ${response.status}`);
-    renderMessaging(body);
+    if (!response.ok) throw new Error(body.error?.message || `Debug update ${response.status}`);
+    renderMessaging({ config: { debug: { enabled: body.enabled } } });
   } catch (error) {
-    renderMessaging({ mode: messagingMode });
+    renderMessaging({ config: { debug: { enabled: debugEnabled } } });
     window.alert(error.message);
   } finally {
     messagingBusy = false;
@@ -360,7 +359,7 @@ $("proxy-toggle").addEventListener("change", async (event) => {
 });
 
 $("messaging-toggle").addEventListener("change", (event) => {
-  setMessagingMode(event.target.checked ? "streaming" : "buffered");
+  setDebugEnabled(event.target.checked);
 });
 
 $("main-provider-select").addEventListener("change", async (event) => {

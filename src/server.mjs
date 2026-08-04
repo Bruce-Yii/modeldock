@@ -106,7 +106,7 @@ function modelProviderOf(options, modelId) {
   return options.find((entry) => entry.id === modelId)?.provider || "other";
 }
 
-function statusPayload({ config, metrics, mediaStore, routeAffinity, messaging, modelSelection, loopBreaker }) {
+function statusPayload({ config, metrics, mediaStore, routeAffinity, modelSelection, loopBreaker }) {
   const selected = modelSelection || { mainModel: config.mainModel, visionModel: config.visionModel };
   const options = modelOptions(config);
   const visionOptions = options.filter((entry) => entry.supportsVision);
@@ -121,7 +121,6 @@ function statusPayload({ config, metrics, mediaStore, routeAffinity, messaging, 
       visionProviders: providerOptions(config).filter((provider) => visionOptions.some((model) => model.provider === provider.id)),
       selectedVisionProvider: selected.visionModel ? modelProviderOf(options, selected.visionModel) || config.profileId : config.profileId,
     },
-    messaging: { mode: messaging?.mode || "streaming" },
     media: mediaStore.snapshot(),
     routing: routeAffinity?.snapshot?.() || { activeCallIds: 0 },
     loopBreaker: loopBreaker?.snapshot?.() || { activeSessions: 0, trippedSessions: 0 },
@@ -755,47 +754,6 @@ async function relayLiveResponses(payload, res, services, signal) {
   }
 }
 
-async function relayBufferedResponses(payload, res, services, signal) {
-  const upstreamPayload = { ...payload, stream: false };
-  const initial = await fetchGoResponses(upstreamPayload, services, signal, "application/json");
-  const loop = await runHarnessToolLoop(initial, upstreamPayload, services, signal);
-  const upstream = loop.upstream;
-
-  if (!upstream.ok || !loop.response) {
-    const body = Buffer.from(await upstream.arrayBuffer());
-    const error = upstreamError(body, upstream.status);
-    console.log(`[gate] upstream ${upstream.status} error=${error} body=${body.toString("utf8").slice(0, 800)}`);
-    res.status(upstream.status);
-    copyUpstreamHeaders(upstream, res);
-    res.send(body);
-    return {
-      ok: false,
-      httpStatus: upstream.status,
-      bytesOut: body.byteLength,
-      usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
-      rounds: loop.rounds,
-      error,
-    };
-  }
-
-  const sse = responseToSse(loop.response, payload);
-  const bytesOut = Buffer.byteLength(sse);
-  res.status(200);
-  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
-  res.setHeader("Cache-Control", "no-cache, no-transform");
-  res.setHeader("X-Accel-Buffering", "no");
-  res.setHeader("X-ModelDock-Stream-Mode", "buffered");
-  res.send(sse);
-  return {
-    ok: true,
-    httpStatus: 200,
-    bytesOut,
-    usage: extractResponseUsage(loop.response) || { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
-    rounds: loop.rounds,
-    response: loop.response,
-  };
-}
-
 async function relayResponses(req, res, services) {
   const { config, metrics, mediaStore, routeAffinity, modelSelection } = services;
   const source = req.body;
@@ -862,11 +820,8 @@ async function relayResponses(req, res, services) {
   });
 
   if (streaming) {
-    const streamMode = services.messaging.mode === "streaming" ? "live-normalized" : "buffered";
     try {
-      const relay = streamMode === "live-normalized"
-        ? await relayLiveResponses(transformed.payload, res, services, controller.signal)
-        : await relayBufferedResponses(transformed.payload, res, services, controller.signal);
+      const relay = await relayLiveResponses(transformed.payload, res, services, controller.signal);
       if (relay.ok && route.directVision) routeAffinity.registerResponse(relay.response, route.model);
       metrics.recordResponseUsage({ bytesOut: relay.bytesOut, usage: relay.usage });
       finish({
@@ -881,7 +836,7 @@ async function relayResponses(req, res, services) {
         outputTokens: relay.usage?.output_tokens || 0,
         filteredTools: transformed.report.blocked.tool_search + transformed.report.blocked.web_search,
         imageRefs: transformed.report.imageRefs,
-        streamMode,
+        streamMode: "live-normalized",
         inputShape: transformed.report.inputShape,
         droppedAssistantMessages: transformed.report.droppedAssistantMessages,
         stringifiedAssistantMessages: transformed.report.stringifiedAssistantMessages,
@@ -897,7 +852,7 @@ async function relayResponses(req, res, services) {
       });
       return;
     } catch (error) {
-      finish({ ok: false, error: error.message, model: route.model, routeReason: route.reason, directVision: route.directVision, streamMode, inputShape: transformed.report.inputShape, droppedAssistantMessages: transformed.report.droppedAssistantMessages, stringifiedAssistantMessages: transformed.report.stringifiedAssistantMessages, nativeToolCalls: transformed.report.nativeToolCalls, nativeToolOutputs: transformed.report.nativeToolOutputs, canonicalizedToolCallIds: transformed.report.canonicalizedToolCallIds, fallbackToolResults: transformed.report.fallbackToolResults, compactedToolResults: transformed.report.compactedToolResults, compactedToolOutputBytes: transformed.report.compactedToolOutputBytes });
+      finish({ ok: false, error: error.message, model: route.model, routeReason: route.reason, directVision: route.directVision, inputShape: transformed.report.inputShape, droppedAssistantMessages: transformed.report.droppedAssistantMessages, stringifiedAssistantMessages: transformed.report.stringifiedAssistantMessages, nativeToolCalls: transformed.report.nativeToolCalls, nativeToolOutputs: transformed.report.nativeToolOutputs, canonicalizedToolCallIds: transformed.report.canonicalizedToolCallIds, fallbackToolResults: transformed.report.fallbackToolResults, compactedToolResults: transformed.report.compactedToolResults, compactedToolOutputBytes: transformed.report.compactedToolOutputBytes });
       if (!res.headersSent) return res.status(502).json({ error: { message: `OpenCode Go request failed: ${error.message}`, type: "upstream_error" } });
       return res.end();
     }
@@ -1291,7 +1246,7 @@ async function refreshProfileModels(profile, config) {
       })),
     ];
     profile.availableModels = models;
-    console.log(`[gate] refreshed opencode-go model catalog: ${models.length} models (${known.length} known, ${unknown.length} new)`);
+    console.log(`[gate] refreshed opencode-go model catalog: ${models.length} models (${existing.length} curated, ${unknown.length} new)`);
   } catch (error) {
     console.log(`[gate] model catalog refresh failed: ${error.message}`);
   }
@@ -1313,7 +1268,6 @@ export function createServices(config = loadConfig()) {
     model: mutableConfig.mainModel,
   });
   const routeAffinity = new RouteAffinity();
-  const messaging = { mode: mutableConfig.messagingMode === "buffered" ? "buffered" : "streaming" };
   const toolDisclosure = new Map();
   const loopBreaker = new LoopBreaker();
   const runtime = { profile: mutableConfig.profile, profileId: mutableConfig.profileId };
@@ -1327,7 +1281,7 @@ export function createServices(config = loadConfig()) {
     ? setInterval(refreshModelCatalog, refreshIntervalHours * 3_600_000)
     : null;
   if (modelRefreshTimer) modelRefreshTimer.unref();
-  return { config: mutableConfig, runtime, metrics, mediaStore, upstreams, configSwitcher, routeAffinity, messaging, modelSelection, toolDisclosure, loopBreaker, refreshModelCatalog, modelRefreshTimer };
+  return { config: mutableConfig, runtime, metrics, mediaStore, upstreams, configSwitcher, routeAffinity, modelSelection, toolDisclosure, loopBreaker, refreshModelCatalog, modelRefreshTimer };
 }
 
 function disclosureFor(services, payload) {
@@ -1421,14 +1375,11 @@ export function createApp(services = createServices()) {
     recordConfigAction(metrics, "models_update", { ok: true });
     return res.json(modelsPayload(services));
   });
-  app.post("/api/messaging", mutateConfig, (req, res) => {
-    const mode = req.body?.mode;
-    if (mode !== "buffered" && mode !== "streaming") {
-      return res.status(400).json({ error: { type: "invalid_messaging_mode", message: "Messaging mode must be buffered or streaming." } });
-    }
-    services.messaging.mode = mode;
-    recordConfigAction(metrics, `messaging_${mode}`, { ok: true });
-    return res.json({ mode });
+  app.post("/api/debug", mutateConfig, (req, res) => {
+    const enabled = Boolean(req.body?.enabled);
+    services.config.debug = { ...services.config.debug, enabled };
+    recordConfigAction(metrics, `debug_${enabled ? "on" : "off"}`, { ok: true });
+    return res.json({ enabled });
   });
 
   const eventClients = new Set();
