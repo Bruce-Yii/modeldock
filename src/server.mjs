@@ -1010,13 +1010,19 @@ async function refreshProfileModels(profile, config) {
   if (!profile || profile.id !== "opencode-go" || !config.goToken) return;
   if (!config.goBaseUrl.includes("opencode.ai")) return;
   try {
-    const response = await fetch(`${config.goBaseUrl.replace(/\/$/, "")}/models`, {
-      headers: { Authorization: `Bearer ${config.goToken}` },
-      signal: AbortSignal.timeout(10_000),
-    });
-    if (!response.ok) return;
-    const parsed = await response.json();
-    const ids = Array.isArray(parsed?.data) ? parsed.data.map((entry) => entry?.id).filter((id) => typeof id === "string" && id) : [];
+    const base = config.goBaseUrl.replace(/\/$/, "");
+    const headers = { Authorization: `Bearer ${config.goToken}` };
+    const [goRes, zenRes] = await Promise.all([
+      fetch(`${base}/models`, { headers, signal: AbortSignal.timeout(10_000) }),
+      fetch(`${base.replace(/\/go\//, "/")}/models`, { headers, signal: AbortSignal.timeout(10_000) }),
+    ]);
+    const goIds = goRes.ok ? ((await goRes.json())?.data || []).map((entry) => entry?.id).filter((id) => typeof id === "string" && id) : [];
+    let zenFreeIds = [];
+    if (zenRes.ok) {
+      const zenData = (await zenRes.json())?.data || [];
+      zenFreeIds = zenData.map((entry) => entry?.id).filter((id) => typeof id === "string" && id.endsWith("-free"));
+    }
+    const ids = [...new Set([...goIds, ...zenFreeIds])];
     if (!ids.length) return;
     const knownVision = new Set((profile.availableModels || []).filter((model) => model.supportsVision).map((model) => model.id));
     profile.availableModels = ids.map((id) => ({
@@ -1024,7 +1030,7 @@ async function refreshProfileModels(profile, config) {
       label: labelForModelId(id),
       supportsVision: knownVision.has(id) || guessSupportsVision(id),
     }));
-    console.log(`[gate] refreshed opencode-go model catalog: ${ids.length} models`);
+    console.log(`[gate] refreshed opencode-go model catalog: ${ids.length} models (go=${goIds.length}, zenFree=${zenFreeIds.length})`);
   } catch (error) {
     console.log(`[gate] model catalog refresh failed: ${error.message}`);
   }
