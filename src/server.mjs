@@ -1022,7 +1022,7 @@ async function refreshProfileModels(profile, config) {
       const zenData = (await zenRes.json())?.data || [];
       zenFreeIds = zenData.map((entry) => entry?.id).filter((id) => typeof id === "string" && id.endsWith("-free"));
     }
-    const ids = [...new Set([...goIds, ...zenFreeIds])];
+    const ids = [...new Set([...goIds, ...zenFreeIds])].sort((a, b) => a.localeCompare(b));
     if (!ids.length) return;
     const knownVision = new Set((profile.availableModels || []).filter((model) => model.supportsVision).map((model) => model.id));
     profile.availableModels = ids.map((id) => ({
