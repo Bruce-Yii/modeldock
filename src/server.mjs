@@ -241,6 +241,36 @@ function lastUserGoal(input) {
   return "";
 }
 
+export function parseCoordinatorVerdict(text) {
+  const fallback = { completed: true, neededTools: [], hint: "" };
+  if (typeof text !== "string" || !text.trim()) return fallback;
+  const jsonMatch = text.match(/\{[\s\S]*\}/);
+  if (jsonMatch) {
+    try {
+      const verdict = JSON.parse(jsonMatch[0]);
+      if (verdict && typeof verdict === "object") {
+        return {
+          completed: verdict.completed !== false,
+          neededTools: Array.isArray(verdict.needed_tools) ? verdict.needed_tools.filter((name) => typeof name === "string") : [],
+          hint: typeof verdict.reason === "string" ? verdict.reason : "",
+        };
+      }
+    } catch {
+      // Fall through to regex-based extraction.
+    }
+  }
+  const completedMatch = text.match(/"completed"\s*:\s*(true|false)/i);
+  const toolsMatch = text.match(/"needed_tools"\s*:\s*\[([^\]]*)\]/i);
+  const reasonMatch = text.match(/"reason"\s*:\s*"([^"]*)"/i);
+  return {
+    completed: completedMatch ? completedMatch[1].toLowerCase() === "true" : true,
+    neededTools: toolsMatch
+      ? [...toolsMatch[1].matchAll(/"([^"]+)"/g)].map((match) => match[1])
+      : [],
+    hint: reasonMatch ? reasonMatch[1] : "",
+  };
+}
+
 async function checkCompletion(lastText, payload, services) {
   const config = services.config;
   const goal = lastUserGoal(payload.input);
@@ -272,13 +302,7 @@ async function checkCompletion(lastText, payload, services) {
       .filter((item) => item?.type === "message")
       .map((item) => item.content?.map?.((part) => part?.text || "").join("") || "")
       .join("");
-    const match = text.match(/\{[\s\S]*\}/);
-    if (match) {
-      const verdict = JSON.parse(match[0]);
-      result.completed = verdict.completed !== false;
-      result.neededTools = Array.isArray(verdict.needed_tools) ? verdict.needed_tools.filter((name) => typeof name === "string") : [];
-      result.hint = typeof verdict.reason === "string" ? verdict.reason : "";
-    }
+    Object.assign(result, parseCoordinatorVerdict(text));
   } catch (error) {
     debugLog(services, `checker coordinator failed: ${error.message}`);
   }
@@ -558,6 +582,7 @@ async function relayLiveResponses(payload, res, services, signal) {
         const check = await checkCompletion(lastText, currentPayload, services);
         if (!check.completed) {
           const disclosureSet = services.activeDisclosureSet || new Set();
+          for (const name of check.neededTools) disclosureSet.add(name);
           const core = services.config.profile?.coreTools || new Set();
           const kept = mergeDisclosedTools(services.activeToolRegistry, currentPayload.tools, core, disclosureSet);
           const injected = [

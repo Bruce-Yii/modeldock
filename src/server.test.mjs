@@ -4,7 +4,7 @@ import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { createApp, createServices, codexModelCatalog } from "./server.mjs";
+import { createApp, createServices, codexModelCatalog, parseCoordinatorVerdict } from "./server.mjs";
 import { OPENCODE_GO_PROFILE } from "./profiles.mjs";
 
 const TEST_PROFILE = { ...OPENCODE_GO_PROFILE, checkerEnabled: false };
@@ -1036,7 +1036,7 @@ test("checker continuation resumes an incomplete reply on the same stream", asyn
     if (role === "coordinator") {
       coordinatorRequests += 1;
       res.setHeader("content-type", "application/json");
-      res.end(JSON.stringify({ id: "c1", status: "completed", output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: '{"completed": false, "needed_tools": ["spawn_agent"], "reason": "said it would check but did not"}' }] }], usage: { input_tokens: 2, output_tokens: 1 } }));
+      res.end(JSON.stringify({ id: "c1", status: "completed", output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: coordinatorRequests === 1 ? '{"completed": false, "needed_tools": ["spawn_agent"], "reason": "said it would check but did not"}' : '{"completed": true}' }] }], usage: { input_tokens: 2, output_tokens: 1 } }));
       return;
     }
     mainCalls += 1;
@@ -1076,4 +1076,254 @@ test("checker continuation resumes an incomplete reply on the same stream", asyn
   assert.match(sse, /Done\./);
   assert.match(sse, /spawn_agent/);
   assert.doesNotMatch(sse, /MODELDOCK CHECKER/, "checker marker must not leak into the Codex stream");
+});
+
+test("parseCoordinatorVerdict falls back to regex for malformed checker output", () => {
+  assert.deepEqual(parseCoordinatorVerdict('{"completed": true}'), { completed: true, neededTools: [], hint: "" });
+  assert.deepEqual(parseCoordinatorVerdict('{"completed": false, "needed_tools": ["spawn_agent"], "reason": "did not finish"}'), {
+    completed: false,
+    neededTools: ["spawn_agent"],
+    hint: "did not finish",
+  });
+  assert.deepEqual(parseCoordinatorVerdict('Here is my verdict: "completed": false, "reason": "said it would check but did not"'), {
+    completed: false,
+    neededTools: [],
+    hint: "said it would check but did not",
+  });
+  assert.deepEqual(parseCoordinatorVerdict('"completed": true'), { completed: true, neededTools: [], hint: "" });
+  assert.deepEqual(parseCoordinatorVerdict(""), { completed: true, neededTools: [], hint: "" }, "empty output defaults to completed");
+  assert.deepEqual(parseCoordinatorVerdict(null), { completed: true, neededTools: [], hint: "" }, "null defaults to completed");
+  assert.deepEqual(parseCoordinatorVerdict('"needed_tools": ["wait_agent", "send_message"]'), { completed: true, neededTools: ["wait_agent", "send_message"], hint: "" });
+});
+
+test("checker treats a complete reply as done and does not continue", async (t) => {
+  let mainCalls = 0;
+  let coordinatorCalls = 0;
+  const upstream = createServer(async (req, res) => {
+    const role = req.headers["x-modeldock-role"];
+    const body = await jsonBody(req);
+    if (role === "coordinator") {
+      coordinatorCalls += 1;
+      assert.equal(req.headers["x-modeldock-purpose"], "checker");
+      assert.equal(body.metadata.purpose, "checker");
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ id: "c1", status: "completed", output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: '{"completed": true}' }] }], usage: {} }));
+      return;
+    }
+    mainCalls += 1;
+    res.setHeader("content-type", "text/event-stream");
+    sendSse(res, "response.output_text.delta", { id: "r1", delta: "The task is complete. I refactored the module.", response: { id: "r1", model: body.model } });
+    sendSse(res, "response.completed", { id: "r1", response: { id: "r1", usage: { input_tokens: 5, output_tokens: 2 } } });
+    res.end("data: [DONE]\n\n");
+  });
+  const port = await listen(upstream);
+  t.after(() => upstream.close());
+  const instance = await startApp({ goBaseUrl: `http://127.0.0.1:${port}`, profile: { ...TEST_PROFILE, checkerEnabled: true } });
+  t.after(instance.stop);
+
+  const response = await fetch(`${instance.base}/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ input: "refactor the module", stream: true, tools: [{ type: "function", name: "shell_command", parameters: { type: "object", properties: {} } }] }),
+  });
+  const sse = await response.text();
+  assert.equal(response.status, 200);
+  assert.equal(mainCalls, 1, "complete reply must not trigger continuation");
+  assert.equal(coordinatorCalls, 1, "checker still consulted once");
+  assert.match(sse, /The task is complete/);
+});
+
+test("checker treats an incomplete reply as unfinished and continues with disclosed tools", async (t) => {
+  let mainCalls = 0;
+  let coordinatorCalls = 0;
+  const upstream = createServer(async (req, res) => {
+    const role = req.headers["x-modeldock-role"];
+    const body = await jsonBody(req);
+    if (role === "coordinator") {
+      coordinatorCalls += 1;
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ id: "c1", status: "completed", output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: coordinatorCalls === 1 ? '{"completed": false, "needed_tools": ["spawn_agent"], "reason": "stopped early"}' : '{"completed": true}' }] }], usage: {} }));
+      return;
+    }
+    mainCalls += 1;
+    const toolNames = (body.tools || []).map((tool) => tool.name);
+    res.setHeader("content-type", "text/event-stream");
+    if (mainCalls === 1) {
+      sendSse(res, "response.output_text.delta", { id: "r1", delta: "I will check it", response: { id: "r1", model: body.model } });
+    } else {
+      assert.ok(toolNames.includes("spawn_agent"), `spawn_agent must be disclosed on continuation, got ${JSON.stringify(toolNames)}`);
+      sendSse(res, "response.output_text.delta", { id: "r2", delta: "Done.", response: { id: "r2", model: body.model } });
+    }
+    sendSse(res, "response.completed", { id: `r${mainCalls}`, response: { id: `r${mainCalls}`, usage: { input_tokens: 5, output_tokens: 2 } } });
+    res.end("data: [DONE]\n\n");
+  });
+  const port = await listen(upstream);
+  t.after(() => upstream.close());
+  const instance = await startApp({ goBaseUrl: `http://127.0.0.1:${port}`, profile: { ...TEST_PROFILE, checkerEnabled: true } });
+  t.after(instance.stop);
+
+  const response = await fetch(`${instance.base}/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      input: "spawn an agent and wait",
+      stream: true,
+      tools: [
+        { type: "function", name: "shell_command", parameters: { type: "object", properties: {} } },
+        { type: "function", name: "spawn_agent", parameters: { type: "object", properties: {} } },
+      ],
+    }),
+  });
+  const sse = await response.text();
+  assert.equal(response.status, 200);
+  assert.equal(mainCalls, 2, "incomplete reply must continue once");
+  assert.equal(coordinatorCalls, 2, "checker consults once per text round (false then true)");
+  assert.match(sse, /I will check it/);
+  assert.match(sse, /Done\./);
+});
+
+test("harness_tool_search returns the matched tool set and discloses it for the next round", async (t) => {
+  let mainCalls = 0;
+  let coordinatorCalls = 0;
+  const upstream = createServer(async (req, res) => {
+    const role = req.headers["x-modeldock-role"];
+    const body = await jsonBody(req);
+    if (role === "coordinator") {
+      coordinatorCalls += 1;
+      assert.equal(req.headers["x-modeldock-purpose"], "tool_search");
+      assert.equal(body.metadata.purpose, "tool_search");
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ id: "ts1", status: "completed", output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: '["spawn_agent", "wait_agent"]' }] }], usage: {} }));
+      return;
+    }
+    mainCalls += 1;
+    const toolNames = (body.tools || []).map((tool) => tool.name);
+    res.setHeader("content-type", "text/event-stream");
+    if (mainCalls === 1) {
+      sendSse(res, "response.output_item.added", { output_index: 0, item: { id: "fc_ts", type: "function_call", name: "harness_tool_search", call_id: "call_ts", arguments: "" } });
+      sendSse(res, "response.function_call_arguments.delta", { output_index: 0, delta: '{"goal":"spawn agents"}' });
+    } else {
+      assert.ok(toolNames.includes("spawn_agent"), `spawn_agent must be disclosed, got ${JSON.stringify(toolNames)}`);
+      assert.ok(toolNames.includes("wait_agent"), `wait_agent must be disclosed, got ${JSON.stringify(toolNames)}`);
+      sendSse(res, "response.output_text.delta", { id: "r2", delta: "Agents spawned.", response: { id: "r2", model: body.model } });
+    }
+    sendSse(res, "response.completed", { id: `r${mainCalls}`, response: { id: `r${mainCalls}`, usage: { input_tokens: 5, output_tokens: 2 } } });
+    res.end("data: [DONE]\n\n");
+  });
+  const port = await listen(upstream);
+  t.after(() => upstream.close());
+  const instance = await startApp({ goBaseUrl: `http://127.0.0.1:${port}` });
+  t.after(instance.stop);
+
+  const response = await fetch(`${instance.base}/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      input: "I need to spawn agents",
+      stream: true,
+      tools: [
+        { type: "function", name: "shell_command", parameters: { type: "object", properties: {} } },
+        { type: "function", name: "spawn_agent", parameters: { type: "object", properties: {} } },
+        { type: "function", name: "wait_agent", parameters: { type: "object", properties: {} } },
+      ],
+    }),
+  });
+  const sse = await response.text();
+  assert.equal(response.status, 200);
+  assert.equal(mainCalls, 2, "tool search triggers a second round with disclosed tools");
+  assert.equal(coordinatorCalls, 1);
+  assert.match(sse, /Agents spawned\./);
+});
+
+test("web search harness works alongside disclosure filtering", async (t) => {
+  let mainCalls = 0;
+  const upstream = createServer(async (req, res) => {
+    const body = await jsonBody(req);
+    if (req.url === "/mcp") {
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { content: [{ type: "text", text: "Evidence https://example.test/source" }] } }));
+      return;
+    }
+    if (req.headers["x-modeldock-role"] === "coordinator") {
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ id: "c1", status: "completed", output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: '{"completed": true}' }] }], usage: {} }));
+      return;
+    }
+    mainCalls += 1;
+    const toolNames = (body.tools || []).map((tool) => tool.name);
+    res.setHeader("content-type", "text/event-stream");
+    if (mainCalls === 1) {
+      assert.ok(toolNames.includes("harness_web_search"), `harness_web_search must be present, got ${JSON.stringify(toolNames)}`);
+      assert.ok(!toolNames.includes("harness_vision_inspect"), `no image means no vision tool, got ${JSON.stringify(toolNames)}`);
+      sendSse(res, "response.output_item.added", { output_index: 0, item: { id: "fc_w", type: "function_call", name: "harness_web_search", call_id: "call_w", arguments: "" } });
+      sendSse(res, "response.function_call_arguments.delta", { output_index: 0, delta: '{"queries":["modeldock"]}' });
+    } else {
+      sendSse(res, "response.output_text.delta", { id: "r2", delta: "FINAL ANSWER", response: { id: "r2", model: body.model } });
+    }
+    sendSse(res, "response.completed", { id: `r${mainCalls}`, response: { id: `r${mainCalls}`, usage: { input_tokens: 5, output_tokens: 2 } } });
+    res.end("data: [DONE]\n\n");
+  });
+  const port = await listen(upstream);
+  t.after(() => upstream.close());
+  const instance = await startApp({ goBaseUrl: `http://127.0.0.1:${port}`, exaMcpUrl: `http://127.0.0.1:${port}/mcp`, profile: { ...TEST_PROFILE, checkerEnabled: true } });
+  t.after(instance.stop);
+
+  const response = await fetch(`${instance.base}/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      input: "search the web",
+      stream: true,
+      tools: [
+        { type: "function", name: "shell_command", parameters: { type: "object", properties: {} } },
+        { type: "tool_search" },
+        { type: "web_search" },
+      ],
+    }),
+  });
+  const sse = await response.text();
+  assert.equal(response.status, 200);
+  assert.equal(mainCalls, 2, "web harness round then final text");
+  assert.match(sse, /FINAL ANSWER/);
+  assert.doesNotMatch(sse, /harness_web_search/, "harness round must be hidden from Codex");
+});
+
+test("image requests route to the vision model and keep the image in the forwarded input", async (t) => {
+  let upstreamModel;
+  let receivedInput;
+  const upstream = createServer(async (req, res) => {
+    const body = await jsonBody(req);
+    if (req.headers["x-modeldock-role"] === "coordinator") {
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ id: "c1", status: "completed", output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: '{"completed": true}' }] }], usage: {} }));
+      return;
+    }
+    upstreamModel = body.model;
+    receivedInput = body.input;
+    res.setHeader("content-type", "text/event-stream");
+    sendSse(res, "response.output_text.delta", { id: "rv", delta: "I see a chart in the image.", response: { id: "rv", model: body.model } });
+    sendSse(res, "response.completed", { id: "rv", response: { id: "rv", usage: { input_tokens: 5, output_tokens: 2 } } });
+    res.end("data: [DONE]\n\n");
+  });
+  const port = await listen(upstream);
+  t.after(() => upstream.close());
+  const instance = await startApp({ goBaseUrl: `http://127.0.0.1:${port}` });
+  t.after(instance.stop);
+
+  const image = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZQmcAAAAASUVORK5CYII=";
+  const response = await fetch(`${instance.base}/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      input: [{ role: "user", content: [{ type: "input_text", text: "What is in this image?" }, { type: "input_image", image_url: image }] }],
+      stream: true,
+      tools: [{ type: "function", name: "shell_command", parameters: { type: "object", properties: {} } }],
+    }),
+  });
+  const sse = await response.text();
+  assert.equal(response.status, 200);
+  assert.equal(upstreamModel, "gpt-5.6-luna", "image routes to the vision model");
+  assert.match(sse, /I see a chart/);
+  const imagePart = JSON.stringify(receivedInput).includes("input_image");
+  assert.equal(imagePart, true, "image must remain in the forwarded input for the vision model");
 });
