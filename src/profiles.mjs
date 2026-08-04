@@ -139,6 +139,11 @@ const OPENCODE_GO_PROFILE = {
     "harness_vision_inspect",
   ]),
   checkerEnabled: true,
+  availableModels: [
+    { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash", supportsVision: false },
+    { id: "gpt-5.6-luna", label: "Luna", supportsVision: true },
+    { id: "kimi-k2.5", label: "Kimi K2.5", supportsVision: true },
+  ],
 
   modelCatalog({ mainModel, visionModel, baseInstructions }) {
     return modelCatalogDefaults({
@@ -168,6 +173,9 @@ const DEEPSEEK_OFFICIAL_PROFILE = {
     vision: null,
   },
   harnessToolNames: new Set([]),
+  availableModels: [
+    { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash (Official)", supportsVision: false },
+  ],
 
   modelCatalog({ mainModel, baseInstructions }) {
     return modelCatalogDefaults({

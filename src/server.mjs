@@ -12,7 +12,7 @@ import { LiveResponsesWriter, parseSse } from "./live-responses.mjs";
 import { responseToSse } from "./responses-sse.mjs";
 import { CodexConfigSwitcher } from "./config-switcher.mjs";
 import { RouteAffinity, routeResponsesRequest } from "./router.mjs";
-import { profileOptions } from "./profiles.mjs";
+import { profileOptions, profileById } from "./profiles.mjs";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.resolve(dirname, "../public");
@@ -26,26 +26,56 @@ function goUrl(config, resource) {
   return `${config.goBaseUrl.replace(/\/$/, "")}/${resource.replace(/^\//, "")}`;
 }
 
-const MODEL_CATALOG = [
-  { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash", supportsVision: false },
-  { id: "gpt-5.6-luna", label: "Luna", supportsVision: true },
-  { id: "kimi-k2.5", label: "Kimi K2.5", supportsVision: true },
-];
-
-function modelOptions(config) {
-  const entries = [...MODEL_CATALOG];
-  for (const id of [config.mainModel, config.visionModel, config.visionFallbackModel]) {
-    if (id && !entries.some((entry) => entry.id === id)) entries.push({ id, label: id, supportsVision: id === config.visionModel || id === config.visionFallbackModel });
+function modelOptions(config, profileId) {
+  const all = [];
+  for (const entry of profileOptions()) {
+    const profile = profileById(entry.id);
+    for (const model of profile?.availableModels || []) {
+      if (!all.some((existing) => existing.id === model.id && existing.provider === entry.id)) {
+        all.push({ ...model, provider: entry.id });
+      }
+    }
   }
-  return entries;
+  for (const id of [config.mainModel, config.visionModel, config.visionFallbackModel]) {
+    if (id && !all.some((existing) => existing.id === id)) {
+      all.push({ id, label: id, provider: config.profileId, supportsVision: id === config.visionModel || id === config.visionFallbackModel });
+    }
+  }
+  return all;
+}
+
+function modelCatalogModels(config, profileId) {
+  const active = profileId || config.profileId;
+  return modelOptions(config, active).filter((entry) => entry.provider === active);
+}
+
+function providerOptions(config) {
+  return profileOptions();
+}
+
+function modelsPayload(services) {
+  const options = modelOptions(services.config, services.config.profileId);
+  const selected = services.modelSelection;
+  return {
+    selected,
+    options,
+    providers: providerOptions(services.config),
+    selectedProvider: services.config.profileId || "opencode-go",
+  };
 }
 
 function statusPayload({ config, metrics, mediaStore, routeAffinity, messaging, modelSelection }) {
   const selected = modelSelection || { mainModel: config.mainModel, visionModel: config.visionModel };
+  const options = modelOptions(config);
   return metrics.snapshot({
     ready: Boolean(config.goToken),
     config: publicConfig({ ...config, mainModel: selected.mainModel, visionModel: selected.visionModel }),
-    models: { selected, options: modelOptions(config) },
+    models: {
+      selected,
+      options,
+      providers: providerOptions(config),
+      selectedProvider: config.profileId || "opencode-go",
+    },
     messaging: { mode: messaging?.mode || "streaming" },
     media: mediaStore.snapshot(),
     routing: routeAffinity?.snapshot?.() || { activeCallIds: 0 },
@@ -963,23 +993,25 @@ function serveModels(req, res, { config, modelSelection }) {
 }
 
 export function createServices(config = loadConfig()) {
-  const metrics = new Metrics({ recentLimit: config.recentLimit });
+  const mutableConfig = { ...config };
+  const metrics = new Metrics({ recentLimit: mutableConfig.recentLimit });
   const mediaStore = new MediaStore({
-    ttlMs: config.mediaTtlMs,
-    maxBytes: config.mediaMaxBytes,
-    maxEntries: config.mediaMaxEntries,
+    ttlMs: mutableConfig.mediaTtlMs,
+    maxBytes: mutableConfig.mediaMaxBytes,
+    maxEntries: mutableConfig.mediaMaxEntries,
   });
-  const modelSelection = { mainModel: config.mainModel, visionModel: config.visionModel };
-  const upstreams = createUpstreams({ config, metrics, mediaStore, getVisionModel: () => modelSelection.visionModel });
+  const modelSelection = { mainModel: mutableConfig.mainModel, visionModel: mutableConfig.visionModel };
+  const upstreams = createUpstreams({ config: mutableConfig, metrics, mediaStore, getVisionModel: () => modelSelection.visionModel });
   const configSwitcher = new CodexConfigSwitcher({
-    codexHome: config.codexHome,
-    baseUrl: `http://${urlHost(config.host)}:${config.port}/v1`,
-    model: config.mainModel,
+    codexHome: mutableConfig.codexHome,
+    baseUrl: `http://${urlHost(mutableConfig.host)}:${mutableConfig.port}/v1`,
+    model: mutableConfig.mainModel,
   });
   const routeAffinity = new RouteAffinity();
-  const messaging = { mode: config.messagingMode === "buffered" ? "buffered" : "streaming" };
+  const messaging = { mode: mutableConfig.messagingMode === "buffered" ? "buffered" : "streaming" };
   const toolDisclosure = new Map();
-  return { config, metrics, mediaStore, upstreams, configSwitcher, routeAffinity, messaging, modelSelection, toolDisclosure };
+  const runtime = { profile: mutableConfig.profile, profileId: mutableConfig.profileId };
+  return { config: mutableConfig, runtime, metrics, mediaStore, upstreams, configSwitcher, routeAffinity, messaging, modelSelection, toolDisclosure };
 }
 
 function disclosureFor(services, payload) {
@@ -1048,13 +1080,22 @@ export function createApp(services = createServices()) {
   app.post("/api/config/enable", mutateConfig, configAction("enable"));
   app.post("/api/config/disable", mutateConfig, configAction("disable"));
   app.post("/api/config/restart-ack", mutateConfig, configAction("acknowledgeRestart"));
-  app.get("/api/models", (req, res) => res.json({ selected: services.modelSelection, options: modelOptions(config) }));
+  app.get("/api/models", (req, res) => res.json(modelsPayload(services)));
   app.get("/api/profiles", (req, res) => res.json({ selected: config.profileId, options: profileOptions() }));
   app.post("/api/models", mutateConfig, (req, res) => {
     const current = services.modelSelection;
-    const nextMain = req.body?.mainModel === undefined ? current.mainModel : req.body.mainModel;
+    let nextMain = req.body?.mainModel === undefined ? current.mainModel : req.body.mainModel;
     const nextVision = req.body?.visionModel === undefined ? current.visionModel : req.body.visionModel;
-    const options = modelOptions(config);
+    const nextProvider = req.body?.provider;
+    if (nextProvider !== undefined && nextProvider !== config.profileId) {
+      const known = profileOptions().some((entry) => entry.id === nextProvider);
+      if (!known) return res.status(400).json({ error: { type: "invalid_provider", message: `Unknown provider: ${nextProvider}` } });
+      config.profile = profileById(nextProvider);
+      config.profileId = nextProvider;
+      const profileModels = modelCatalogModels(config, config.profileId);
+      if (!profileModels.some((entry) => entry.id === nextMain)) nextMain = profileModels[0]?.id || nextMain;
+    }
+    const options = modelOptions(config, config.profileId);
     const main = options.find((entry) => entry.id === nextMain);
     const vision = options.find((entry) => entry.id === nextVision);
     if (!main || !vision || !vision.supportsVision) return res.status(400).json({ error: { type: "invalid_model_selection", message: "Vision must be selected from a vision-capable model." } });
@@ -1062,7 +1103,7 @@ export function createApp(services = createServices()) {
     services.modelSelection.visionModel = nextVision;
     services.configSwitcher.model = nextMain;
     recordConfigAction(metrics, "models_update", { ok: true });
-    return res.json({ selected: services.modelSelection, options });
+    return res.json(modelsPayload(services));
   });
   app.post("/api/messaging", mutateConfig, (req, res) => {
     const mode = req.body?.mode;

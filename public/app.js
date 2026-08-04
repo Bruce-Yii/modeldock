@@ -162,18 +162,40 @@ function renderModelOptions(data) {
   const models = data.models;
   if (!models?.options) return;
   const selected = models.selected || {};
+  const providers = models.providers || [];
+  const selectedProvider = models.selectedProvider || "other";
+  const providerSelect = $("main-provider-select");
+  if (providerSelect && providers.length) {
+    providerSelect.replaceChildren();
+    for (const provider of providers) {
+      const option = document.createElement("option");
+      option.value = provider.id;
+      option.textContent = provider.label;
+      providerSelect.append(option);
+    }
+    providerSelect.value = selectedProvider;
+    providerSelect.disabled = modelBusy;
+  }
   for (const [id, filter, value] of [["main-model-select", () => true, selected.mainModel], ["vision-model-select", (model) => model.supportsVision, selected.visionModel]]) {
     const select = $(id);
     if (!select) continue;
     const previous = select.value;
     select.replaceChildren();
-    for (const model of models.options.filter(filter)) {
+    const filtered = id === "main-model-select"
+      ? models.options.filter((model) => model.provider === selectedProvider)
+      : models.options.filter(filter);
+    for (const model of filtered) {
       const option = document.createElement("option");
       option.value = model.id;
       option.textContent = model.label;
+      option.dataset.provider = model.provider || "";
       select.append(option);
     }
-    select.value = value || previous;
+    if (id === "main-model-select") {
+      select.value = filtered.some((model) => model.id === value) ? value : (filtered[0]?.id || previous);
+    } else {
+      select.value = value || previous;
+    }
     select.disabled = modelBusy;
   }
 }
@@ -185,9 +207,10 @@ let messagingMode = "streaming";
 async function setModels() {
   modelBusy = true;
   $("main-model-select").disabled = true;
+  $("main-provider-select").disabled = true;
   $("vision-model-select").disabled = true;
   try {
-    const response = await fetch("/api/models", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ mainModel: $("main-model-select").value, visionModel: $("vision-model-select").value }) });
+    const response = await fetch("/api/models", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ mainModel: $("main-model-select").value, visionModel: $("vision-model-select").value, provider: $("main-provider-select").value }) });
     const body = await response.json();
     if (!response.ok) throw new Error(body.error?.message || `Model update ${response.status}`);
   } catch (error) {
@@ -325,6 +348,14 @@ $("proxy-toggle").addEventListener("change", async (event) => {
 
 $("messaging-toggle").addEventListener("change", (event) => {
   setMessagingMode(event.target.checked ? "streaming" : "buffered");
+});
+
+$("main-provider-select").addEventListener("change", async (event) => {
+  const provider = event.target.value;
+  const modelSelect = $("main-model-select");
+  const options = Array.from(modelSelect.options).filter((option) => option.dataset.provider === provider);
+  if (options.length) modelSelect.value = options[0].value;
+  await setModels();
 });
 
 $("main-model-select").addEventListener("change", setModels);
