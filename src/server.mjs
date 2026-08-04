@@ -1095,8 +1095,10 @@ async function refreshProfileModels(profile, config) {
     profile.availableModels = models;
     console.log(`[gate] refreshed opencode-go model catalog: ${ids.length} models (go=${goIds.length}, zenFree=${zenFreeIds.length})`);
     const visionCandidates = models.filter((model) => model.supportsVision);
-    if (visionCandidates.length) {
-      probeVisionCandidates(profile, visionCandidates, config).catch(() => {});
+    const freeCandidates = models.filter((model) => model.id.endsWith("-free"));
+    const probeCandidates = [...new Map([...visionCandidates, ...freeCandidates].map((model) => [model.id, model])).values()];
+    if (probeCandidates.length) {
+      probeVisionCandidates(profile, probeCandidates, config).catch(() => {});
     }
   } catch (error) {
     console.log(`[gate] model catalog refresh failed: ${error.message}`);
