@@ -185,9 +185,9 @@ test("replaces image tool outputs with a cached reference instead of base64 text
   const result = transformResponsesRequest(
     {
       model: "deepseek-v4-flash",
-      tools: [{ type: "function", name: "view_image", parameters: { type: "object", properties: {} } }],
+      tools: [{ type: "function", name: "harness_vision_inspect", parameters: { type: "object", properties: {} } }],
       input: [
-        { type: "function_call", id: "call_1", call_id: "call_1", name: "view_image", arguments: "{}" },
+        { type: "function_call", id: "call_1", call_id: "call_1", name: "harness_vision_inspect", arguments: "{}" },
         { type: "function_call_output", call_id: "call_1", output: [{ type: "input_image", image_url: image }] },
       ],
     },

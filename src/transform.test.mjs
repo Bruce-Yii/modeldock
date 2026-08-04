@@ -518,3 +518,49 @@ test("drops assistant messages with string empty content", () => {
       mediaStore: fakeStore(), defaultModel: "d" });
   assert.deepEqual(payload.input.map((item) => item.role), ["user"]);
 });
+
+const VIEW_IMAGE_B64 = [{ type: "input_image", image_url: "data:image/png;base64,iVBORw0KGgo=" }];
+
+test("view_image output stays as base64 in the current turn and compresses in history", () => {
+  const source = {
+    tools: [
+      { type: "function", name: "view_image", parameters: { type: "object", properties: {} } },
+      { type: "function", name: "shell_command", parameters: { type: "object", properties: {} } },
+    ],
+    input: [
+      { role: "user", content: [{ type: "input_text", text: "look" }] },
+      { role: "assistant", content: [{ type: "output_text", text: "let me view it" }] },
+      { type: "function_call", id: "fc_v", call_id: "call_v", name: "view_image", arguments: '{"path":"D:/x/dashboard.png"}' },
+      { type: "function_call_output", id: "fco_v", call_id: "call_v", output: VIEW_IMAGE_B64 },
+      { role: "user", content: [{ type: "input_text", text: "now what?" }] },
+    ],
+  };
+  const { payload } = transformResponsesRequest(source, {
+    profile: NATIVE_PAIR_PROFILE,
+    mediaStore: fakeStore(), defaultModel: "d" });
+  const call = payload.input.find((item) => item.type === "function_call" && item.name === "view_image");
+  const output = payload.input.find((item) => item.type === "function_call_output" && item.call_id === "call_v");
+  assert.ok(call, "view_image call retained");
+  assert.equal(output.output, "[Viewed image: D:/x/dashboard.png]", "historical view_image output is compressed");
+  assert.ok(!output.output.includes("iVBORw0KGgo"), "base64 must not leak into history");
+});
+
+test("view_image output is passed through in the current turn so the model can see it", () => {
+  const source = {
+    tools: [
+      { type: "function", name: "view_image", parameters: { type: "object", properties: {} } },
+      { type: "function", name: "shell_command", parameters: { type: "object", properties: {} } },
+    ],
+    input: [
+      { role: "user", content: [{ type: "input_text", text: "look" }] },
+      { role: "assistant", content: [{ type: "output_text", text: "let me view it" }] },
+      { type: "function_call", id: "fc_v", call_id: "call_v", name: "view_image", arguments: '{"path":"D:/x/dashboard.png"}' },
+      { type: "function_call_output", id: "fco_v", call_id: "call_v", output: VIEW_IMAGE_B64 },
+    ],
+  };
+  const { payload } = transformResponsesRequest(source, {
+    profile: NATIVE_PAIR_PROFILE,
+    mediaStore: fakeStore(), defaultModel: "d" });
+  const output = payload.input.find((item) => item.type === "function_call_output" && item.call_id === "call_v");
+  assert.equal(output.output, JSON.stringify(VIEW_IMAGE_B64), "current-turn view_image output stays as base64");
+});

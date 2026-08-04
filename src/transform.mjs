@@ -142,6 +142,18 @@ function toolCallArguments(value, fallback = "{}") {
   return toolOutputText(value);
 }
 
+function imagePathFromArguments(argumentsText) {
+  if (typeof argumentsText !== "string") return "unknown";
+  try {
+    const parsed = JSON.parse(argumentsText);
+    if (typeof parsed?.path === "string" && parsed.path) return parsed.path;
+  } catch {
+    // Fall through to regex.
+  }
+  const match = argumentsText.match(/"path"\s*:\s*"([^"]+)"/);
+  return match ? match[1] : "unknown";
+}
+
 function removeSyntheticReasoningPlaceholder(input) {
   if (!Array.isArray(input)) return input;
   return input.map((item) => {
@@ -269,7 +281,8 @@ function normalizeToolHistory(input, tools, mediaStore, imageRefs, { canonicaliz
   let fallbackResults = 0;
   let fallbackOutputBytes = 0;
   let canonicalizedCallIds = 0;
-  const normalized = expanded.flatMap((item) => {
+  const latestUserIndex = expanded.reduce((acc, item, index) => (item?.role === "user" ? index : acc), -1);
+  const normalized = expanded.flatMap((item, index) => {
     if (!item || typeof item !== "object") return [item];
     if (item.type === "function_call" || item.type === "custom_tool_call") {
       if (!item.call_id || !outputCallIds.has(item.call_id) || !replayableCallIds.has(item.call_id)) return [];
@@ -286,6 +299,25 @@ function normalizeToolHistory(input, tools, mediaStore, imageRefs, { canonicaliz
       }];
     }
     if (item.type === "function_call_output" || item.type === "custom_tool_call_output") {
+      const call = calls.get(item.call_id);
+      if (call?.name === "view_image") {
+        const isCurrentTurn = index > latestUserIndex;
+        if (isCurrentTurn) {
+          return [{
+            type: "function_call_output",
+            ...(item.id ? { id: item.id } : {}),
+            call_id: item.call_id,
+            output: toolOutputText(item.output),
+          }];
+        }
+        const path = imagePathFromArguments(call.arguments);
+        return [{
+          type: "function_call_output",
+          ...(item.id ? { id: item.id } : {}),
+          call_id: item.call_id,
+          output: `[Viewed image: ${path}]`,
+        }];
+      }
       if (item.call_id && replayableCallIds.has(item.call_id)) {
         nativeOutputs += 1;
         return [{
@@ -295,7 +327,7 @@ function normalizeToolHistory(input, tools, mediaStore, imageRefs, { canonicaliz
           output: toolOutputText(item.output, mediaStore, imageRefs),
         }];
       }
-      const receipt = fallbackToolReceipt(calls.get(item.call_id), item.output, mediaStore, imageRefs);
+      const receipt = fallbackToolReceipt(call, item.output, mediaStore, imageRefs);
       fallbackResults += 1;
       fallbackOutputBytes += receipt.bytes;
       return [receipt.item];
