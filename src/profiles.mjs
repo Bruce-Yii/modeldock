@@ -119,6 +119,12 @@ const OPENCODE_GO_PROFILE = {
   tokenEnvName: "OPENCODE_GO_TOKEN",
 
   blockedToolTypes: new Set(["tool_search", "web_search"]),
+  // Role of flattened tool receipts in history. "user" is the battle-tested default
+  // (TOOL_EXECUTION_COMPLETED as a user message, accepted by Go in every tested shape).
+  // "assistant" frames the same text as the agent's own statement ("I executed a tool
+  // call...") which may reduce the model pausing to "await instructions" after tool
+  // results; verified by Go probing to be equally accepted (end=tool and end=user).
+  receiptRole: "assistant",
   compactCompletedToolHistory: true,
   canonicalizeCallIds: true,
   stripSyntheticReasoningPlaceholder: true,

@@ -222,16 +222,17 @@ function moveInterleavedAssistantBeforeToolCalls(input) {
   return reordered;
 }
 
-function fallbackToolReceipt(call, output, mediaStore, imageRefs) {
+function fallbackToolReceipt(call, output, mediaStore, imageRefs, role = "user") {
   const text = toolOutputText(output, mediaStore, imageRefs);
+  const isAssistant = role === "assistant";
   return {
     item: {
       type: "message",
-      role: "user",
+      role,
       content: [{
         type: "input_text",
         text: [
-          "TOOL_EXECUTION_COMPLETED",
+          isAssistant ? "I executed a tool call and received its output." : "TOOL_EXECUTION_COMPLETED",
           "status: completed",
           `tool_name: ${call?.name || "tool"}`,
           `call_id: ${call?.call_id || "unknown"}`,
@@ -248,7 +249,7 @@ function fallbackToolReceipt(call, output, mediaStore, imageRefs) {
   };
 }
 
-function normalizeToolHistory(input, tools, mediaStore, imageRefs, { canonicalizeCallIds = true } = {}) {
+function normalizeToolHistory(input, tools, mediaStore, imageRefs, { canonicalizeCallIds = true, receiptRole = "user" } = {}) {
   const expanded = moveInterleavedAssistantBeforeToolCalls(expandChatToolHistory(input));
   if (!Array.isArray(expanded)) {
     return { input: expanded, nativeCalls: 0, nativeOutputs: 0, fallbackResults: 0, fallbackOutputBytes: 0, canonicalizedCallIds: 0 };
@@ -327,7 +328,7 @@ function normalizeToolHistory(input, tools, mediaStore, imageRefs, { canonicaliz
           output: toolOutputText(item.output, mediaStore, imageRefs),
         }];
       }
-      const receipt = fallbackToolReceipt(call, item.output, mediaStore, imageRefs);
+      const receipt = fallbackToolReceipt(call, item.output, mediaStore, imageRefs, receiptRole);
       fallbackResults += 1;
       fallbackOutputBytes += receipt.bytes;
       return [receipt.item];
@@ -338,7 +339,7 @@ function normalizeToolHistory(input, tools, mediaStore, imageRefs, { canonicaliz
   return { input: normalized, nativeCalls, nativeOutputs, fallbackResults, fallbackOutputBytes, canonicalizedCallIds };
 }
 
-function compactCompletedToolHistory(input, mediaStore, imageRefs) {
+function compactCompletedToolHistory(input, mediaStore, imageRefs, receiptRole = "user") {
   if (!Array.isArray(input)) return { input, compacted: 0, outputBytes: 0 };
   const calls = new Map(input
     .filter((item) => (item?.type === "function_call" || item?.type === "custom_tool_call") && item.call_id)
@@ -350,7 +351,7 @@ function compactCompletedToolHistory(input, mediaStore, imageRefs) {
   const compacted = input.flatMap((item) => {
     if (item?.call_id && completed.has(item.call_id) && (item.type === "function_call" || item.type === "custom_tool_call")) return [];
     if (item?.call_id && completed.has(item.call_id) && (item.type === "function_call_output" || item.type === "custom_tool_call_output")) {
-      const receipt = fallbackToolReceipt(calls.get(item.call_id), item.output, mediaStore, imageRefs);
+      const receipt = fallbackToolReceipt(calls.get(item.call_id), item.output, mediaStore, imageRefs, receiptRole);
       outputBytes += receipt.bytes;
       return [receipt.item];
     }
@@ -420,6 +421,7 @@ export function transformResponsesRequest(source, { mediaStore, defaultModel, ta
   const shouldCompactCompletedToolHistory = Boolean(profile?.compactCompletedToolHistory);
   const shouldCanonicalizeCallIds = profile?.canonicalizeCallIds !== false;
   const shouldStripReasoningPlaceholder = profile?.stripSyntheticReasoningPlaceholder !== false;
+  const receiptRole = profile?.receiptRole === "assistant" ? "assistant" : "user";
 
   const payload = structuredClone(source);
   const originalTools = Array.isArray(payload.tools) ? payload.tools : [];
@@ -464,8 +466,8 @@ export function transformResponsesRequest(source, { mediaStore, defaultModel, ta
     payload.tools.push(structuredClone(visionTool));
     injectedHarnessTools.push(visionTool.name);
   }
-  const toolHistory = normalizeToolHistory(rewrittenInput, payload.tools, mediaStore, imageRefs, { canonicalizeCallIds: shouldCanonicalizeCallIds });
-  const compactedHistory = shouldCompactCompletedToolHistory ? compactCompletedToolHistory(toolHistory.input, mediaStore, imageRefs) : { input: toolHistory.input, compacted: 0, outputBytes: 0 };
+  const toolHistory = normalizeToolHistory(rewrittenInput, payload.tools, mediaStore, imageRefs, { canonicalizeCallIds: shouldCanonicalizeCallIds, receiptRole });
+  const compactedHistory = shouldCompactCompletedToolHistory ? compactCompletedToolHistory(toolHistory.input, mediaStore, imageRefs, receiptRole) : { input: toolHistory.input, compacted: 0, outputBytes: 0 };
   const stringifiedAssistantMessages = Array.isArray(compactedHistory.input)
     ? compactedHistory.input.filter((item) => item?.role === "assistant" && Array.isArray(item.content) && assistantMessageText(item).length > 0).length
     : 0;

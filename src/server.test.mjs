@@ -366,13 +366,11 @@ test("compresses completed Codex tool history to ordered receipts for Go", async
   assert.equal(response.status, 200);
   assert.match(sse, /HISTORY_OK/);
   assert.deepEqual(received.input.map((item) => item.role || item.type), [
-    "user", "user", "assistant", "user", "user",
+    "user", "assistant", "assistant", "assistant", "user",
   ]);
   assert.equal(received.input.some((item) => Array.isArray(item.tool_calls)), false);
-  assert.deepEqual(received.input.filter((item) => item.role === "user").map((item) => item.content?.[0]?.text).filter((text) => text?.includes("tool_output_begin")), [
-    received.input[1].content[0].text,
-    received.input[3].content[0].text,
-  ]);
+  const receipts = received.input.filter((item) => item.role === "assistant" && typeof item.content === "string" && item.content.includes("tool_output_begin")).map((item) => item.content);
+  assert.equal(receipts.length, 2, "two assistant receipts present");
   const trace = instance.services.metrics.recent.find((item) => item.kind === "responses");
   assert.equal(trace.nativeToolCalls, 0);
   assert.equal(trace.nativeToolOutputs, 0);
