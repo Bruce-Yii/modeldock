@@ -154,6 +154,7 @@ const OPENCODE_GO_PROFILE = {
     { id: "kimi-k2.7-code", label: "Kimi K2.7 Code", endpoint: "chat", supportsVision: true, visionScore: 9, visionMaxScore: 9, visionTier: "strong", quota5h: 1350, speedTier: "fast", status: "available" },
     { id: "kimi-k3", label: "Kimi K3", endpoint: "chat", supportsVision: false, status: "unavailable" },
     { id: "mimo-v2.5", label: "MiniMax M2.5", endpoint: "chat", supportsVision: true, visionScore: 6, visionMaxScore: 9, visionTier: "medium", quota5h: 30100, speedTier: "medium", status: "available" },
+    { id: "mimo-v2.5-free", label: "MiMo V2.5 Free", endpoint: "chat", supportsVision: true, visionScore: 6, visionMaxScore: 9, visionTier: "medium", quota5h: 100000, speedTier: "fast", free: true, status: "available" },
     { id: "mimo-v2.5-pro", label: "MiniMax M2.5 Pro", endpoint: "chat", supportsVision: false, status: "available" },
     { id: "mimo-v2-omni", label: "MiniMax M2 Omni", endpoint: "chat", supportsVision: false, status: "unavailable" },
     { id: "mimo-v2-pro", label: "MiniMax M2 Pro", endpoint: "chat", supportsVision: false, status: "unavailable" },

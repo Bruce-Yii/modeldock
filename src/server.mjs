@@ -45,7 +45,8 @@ function balanceScoreFor(model) {
   const capability = model.visionScore != null && model.visionMaxScore ? model.visionScore / model.visionMaxScore : 0;
   const speed = SPEED_SCORES[model.speedTier] ?? 0;
   const cheap = quotaScore(model.quota5h);
-  return Number(((capability + speed + cheap) / 3).toFixed(3));
+  const freeBoost = model.free ? 0.05 : 0;
+  return Number(((capability + speed + cheap) / 3 + freeBoost).toFixed(3));
 }
 
 function withTierLabel(model) {
@@ -1086,10 +1087,9 @@ function modelEndpoint(modelId) {
 let VISION_PROBE_IMAGE = null;
 
 function visionProbeUrlAndBody(modelId, config, imageUrl) {
-  const endpoint = modelEndpoint(modelId);
   const base = config.goBaseUrl.replace(/\/$/, "");
   const headers = { "Content-Type": "application/json", Authorization: `Bearer ${config.goToken}` };
-  if (endpoint === "responses") {
+  if (["gpt-5.6-luna", "grok-4.5"].includes(modelId)) {
     return {
       url: `${base}/responses`,
       headers,
@@ -1101,8 +1101,9 @@ function visionProbeUrlAndBody(modelId, config, imageUrl) {
       }),
     };
   }
+  const zenFree = modelId.endsWith("-free") || modelId === "big-pickle";
   return {
-    url: `${base.replace(/\/go$/, "")}/chat/completions`,
+    url: zenFree ? "https://opencode.ai/zen/v1/chat/completions" : `${base}/chat/completions`,
     headers,
     body: JSON.stringify({
       model: modelId,
@@ -1275,6 +1276,7 @@ async function refreshProfileModels(profile, config) {
     const unknown = fetchedIds.filter((id) => !existingById.has(id)).sort((a, b) => a.localeCompare(b));
     const models = [
       ...known.map((id) => existingById.get(id)),
+      ...existing.filter((model) => !fetchedIds.includes(model.id)),
       ...unknown.map((id) => ({
         id,
         label: labelForModelId(id),

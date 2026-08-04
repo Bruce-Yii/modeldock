@@ -81,19 +81,34 @@ export function createUpstreams({ config, metrics, mediaStore, getVisionModel = 
     }
   }
 
+  const RESPONSES_MODELS = new Set(["gpt-5.6-luna", "grok-4.5"]);
+  const ZEN_FREE_BASE = "https://opencode.ai/zen/v1/chat/completions";
+
+  function visionEndpointFor(model) {
+    if (RESPONSES_MODELS.has(model)) return { url: upstreamUrl(config.goBaseUrl, "responses"), style: "responses" };
+    if (model.endsWith("-free") || model === "big-pickle") return { url: ZEN_FREE_BASE, style: "chat" };
+    return { url: upstreamUrl(config.goBaseUrl, "chat/completions"), style: "chat" };
+  }
+
   async function callVisionModel(model, images, prompt) {
     if (!config.goToken) throw new Error("OPENCODE_GO_TOKEN is not configured");
-    const content = [{ type: "input_text", text: prompt }];
-    for (const image of images) content.push({ type: "input_image", image_url: image.imageUrl });
-    const response = await fetch(upstreamUrl(config.goBaseUrl, "responses"), {
+    const { url, style } = visionEndpointFor(model);
+    const common = { model, max_output_tokens: 4_096, stream: false };
+    if (style === "responses") {
+      const content = [{ type: "input_text", text: prompt }];
+      for (const image of images) content.push({ type: "input_image", image_url: image.imageUrl });
+      common.input = [{ role: "user", content }];
+    } else {
+      const content = [{ type: "text", text: prompt }];
+      for (const image of images) content.push({ type: "image_url", image_url: { url: image.imageUrl } });
+      common.messages = [{ role: "user", content }];
+      common.max_tokens = 4_096;
+      delete common.max_output_tokens;
+    }
+    const response = await fetch(url, {
       method: "POST",
       headers: { Authorization: `Bearer ${config.goToken}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model,
-        input: [{ role: "user", content }],
-        max_output_tokens: 4_096,
-        stream: false,
-      }),
+      body: JSON.stringify(common),
       signal: AbortSignal.timeout(config.visionTimeoutMs),
     });
     const raw = await response.text();
@@ -104,7 +119,9 @@ export function createUpstreams({ config, metrics, mediaStore, getVisionModel = 
     } catch {
       throw new Error(`${model} returned invalid JSON`);
     }
-    const answer = extractOutputText(parsed);
+    const answer = style === "responses"
+      ? extractOutputText(parsed)
+      : (parsed.choices?.[0]?.message?.content ?? "");
     if (!answer) throw new Error(`${model} returned no output text`);
     return { answer, responseId: parsed.id, usage: parsed.usage };
   }
