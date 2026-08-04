@@ -41,7 +41,12 @@ test("proxies Responses while filtering unsupported hosted tool schemas", async 
   t.after(() => upstream.close());
 
   const base = loadConfig();
-  const config = { ...base, goToken: "test-token", goBaseUrl: `http://127.0.0.1:${upstreamPort}` };
+  const config = {
+    ...base,
+    goToken: "test-token",
+    goBaseUrl: `http://127.0.0.1:${upstreamPort}`,
+    profile: { ...base.profile, checkerEnabled: false },
+  };
   const instance = createApp(createServices(config));
   const server = instance.app.listen(0, "127.0.0.1");
   await new Promise((resolve) => server.once("listening", resolve));

@@ -7,12 +7,14 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createApp, createServices, codexModelCatalog } from "./server.mjs";
 import { OPENCODE_GO_PROFILE } from "./profiles.mjs";
 
+const TEST_PROFILE = { ...OPENCODE_GO_PROFILE, checkerEnabled: false };
+
 function baseConfig() {
   return {
     host: "127.0.0.1",
     port: 0,
-    profile: OPENCODE_GO_PROFILE,
-    profileId: OPENCODE_GO_PROFILE.id,
+    profile: TEST_PROFILE,
+    profileId: TEST_PROFILE.id,
     goBaseUrl: "https://go.example.com/v1",
     goToken: "test-token",
     mainModel: "deepseek-v4-flash",
@@ -1023,4 +1025,55 @@ test("api/status exposes debug flags without dump path leaks", async (t) => {
   assert.equal(status.config.debug.enabled, true);
   assert.equal(status.config.debug.noReasoning, true);
   assert.equal(status.config.debug.dumpDir, "");
+});
+
+test("checker continuation resumes an incomplete reply on the same stream", async (t) => {
+  let mainCalls = 0;
+  let coordinatorRequests = 0;
+  const upstream = createServer(async (req, res) => {
+    const role = req.headers["x-modeldock-role"];
+    const body = await jsonBody(req);
+    if (role === "coordinator") {
+      coordinatorRequests += 1;
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ id: "c1", status: "completed", output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: '{"completed": false, "needed_tools": ["spawn_agent"], "reason": "said it would check but did not"}' }] }], usage: { input_tokens: 2, output_tokens: 1 } }));
+      return;
+    }
+    mainCalls += 1;
+    res.setHeader("content-type", "text/event-stream");
+    if (mainCalls === 1) {
+      sendSse(res, "response.output_text.delta", { id: "r1", delta: "Let me check the file first", response: { id: "r1", model: body.model } });
+    } else {
+      sendSse(res, "response.output_text.delta", { id: "r2", delta: "Done.", response: { id: "r2", model: body.model } });
+      sendSse(res, "response.output_item.added", { output_index: 1, item: { id: "fc_1", type: "function_call", name: "spawn_agent", call_id: "call_1", arguments: "" } });
+      sendSse(res, "response.function_call_arguments.delta", { output_index: 1, delta: '{"task_name":"t1","message":"work"}' });
+    }
+    sendSse(res, "response.completed", { id: `r${mainCalls}`, response: { id: `r${mainCalls}`, usage: { input_tokens: 10, output_tokens: 5 } } });
+    res.end("data: [DONE]\n\n");
+  });
+  const port = await listen(upstream);
+  t.after(() => upstream.close());
+  const instance = await startApp({ goBaseUrl: `http://127.0.0.1:${port}`, profile: { ...TEST_PROFILE, checkerEnabled: true } });
+  t.after(instance.stop);
+
+  const response = await fetch(`${instance.base}/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      input: "spawn an agent and wait",
+      stream: true,
+      tools: [
+        { type: "function", name: "shell_command", parameters: { type: "object", properties: {} } },
+        { type: "function", name: "spawn_agent", parameters: { type: "object", properties: {} } },
+      ],
+    }),
+  });
+  const sse = await response.text();
+  assert.equal(response.status, 200);
+  assert.equal(mainCalls, 2, "checker continuation triggered a second main call");
+  assert.equal(coordinatorRequests, 1, "one coordinator call for the checker verdict");
+  assert.match(sse, /Let me check the file first/);
+  assert.match(sse, /Done\./);
+  assert.match(sse, /spawn_agent/);
+  assert.doesNotMatch(sse, /MODELDOCK CHECKER/, "checker marker must not leak into the Codex stream");
 });

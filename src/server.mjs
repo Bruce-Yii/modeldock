@@ -151,6 +151,27 @@ function toolCatalogText(flat) {
     .join("\n");
 }
 
+function coordinatorFetch(config, purpose, input, maxTokens = 256) {
+  return fetch(goUrl(config, "responses"), {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${config.goToken}`,
+      "Content-Type": "application/json",
+      "User-Agent": "modeldock-opencode-go-gate/0.1.0",
+      "x-modeldock-role": "coordinator",
+      "x-modeldock-purpose": purpose,
+    },
+    body: JSON.stringify({
+      model: config.mainModel,
+      input,
+      stream: false,
+      max_output_tokens: maxTokens,
+      metadata: { modeldock_role: "coordinator", purpose },
+    }),
+    signal: AbortSignal.timeout(config.visionTimeoutMs),
+  });
+}
+
 async function searchToolRegistry(goal, toolRegistry, services) {
   const flat = flattenToolRegistry(toolRegistry);
   const candidates = flat.filter((tool) => !tool.name.startsWith("harness_") && tool.name !== "harness_web_search" && tool.name !== "harness_vision_inspect" && tool.name !== "harness_tool_search");
@@ -162,24 +183,14 @@ async function searchToolRegistry(goal, toolRegistry, services) {
   const prompt = `Goal: ${goal}\n\nCandidate tools:\n${toolCatalogText(candidates)}\n\nPick the most relevant tool names (1-3). Return only the JSON array.`;
   let names = [];
   try {
-    const res = await fetch(goUrl(config, "responses"), {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${config.goToken}`,
-        "Content-Type": "application/json",
-        "User-Agent": "modeldock-opencode-go-gate/0.1.0",
-      },
-      body: JSON.stringify({
-        model: config.mainModel,
-        input: [
-          { role: "developer", content: [{ type: "input_text", text: baseInstructions }] },
-          { role: "user", content: [{ type: "input_text", text: prompt }] },
-        ],
-        stream: false,
-        max_output_tokens: 256,
-      }),
-      signal: AbortSignal.timeout(config.visionTimeoutMs),
-    });
+    const res = await coordinatorFetch(
+      config,
+      "tool_search",
+      [
+        { role: "developer", content: [{ type: "input_text", text: baseInstructions }] },
+        { role: "user", content: [{ type: "input_text", text: prompt }] },
+      ],
+    );
     if (!res.ok) throw new Error(`coordinator call failed: ${res.status}`);
     const parsed = await res.json();
     const text = (parsed.output || [])
@@ -211,6 +222,87 @@ async function searchToolRegistry(goal, toolRegistry, services) {
     if (kept.length > 0) originalShape.push({ ...tool, tools: kept });
   }
   return { matchedNames: [...matched.keys()], matchedDefinitions: originalShape };
+}
+
+function lastUserGoal(input) {
+  if (!Array.isArray(input)) return "";
+  for (let index = input.length - 1; index >= 0; index -= 1) {
+    const item = input[index];
+    if (!item || typeof item !== "object") continue;
+    if (item.role === "user" && Array.isArray(item.content)) {
+      const text = item.content
+        .filter((part) => part?.type === "input_text" && typeof part.text === "string")
+        .map((part) => part.text)
+        .join(" ")
+        .trim();
+      if (text && !text.startsWith("TOOL_EXECUTION_COMPLETED") && !text.startsWith("[MODELDOCK")) return text.slice(0, 600);
+    }
+  }
+  return "";
+}
+
+async function checkCompletion(lastText, payload, services) {
+  const config = services.config;
+  const goal = lastUserGoal(payload.input);
+  const baseInstructions = [
+    "You are a completion checker for a coding agent. The agent was given a task and produced a reply.",
+    'Decide whether the agent has actually completed the task, or whether it stopped early without finishing (e.g. it said "let me check" or "I will now..." without doing the work).',
+    'Respond with ONLY a JSON object like: {"completed": true} or {"completed": false, "needed_tools": ["name1"], "reason": "short reason"}',
+    "Return needed_tools only when specific additional tools are missing; otherwise return an empty array.",
+    "If the reply is a normal, complete answer to the user's question, completed must be true.",
+  ].join(" ");
+  const prompt = [
+    `Task/goal: ${goal || "(none visible)"}`,
+    `Agent reply: ${lastText.slice(0, 1500)}`,
+    "Did the agent complete the task?",
+  ].join("\n");
+  const result = { completed: true, neededTools: [], hint: "" };
+  try {
+    const res = await coordinatorFetch(
+      config,
+      "checker",
+      [
+        { role: "developer", content: [{ type: "input_text", text: baseInstructions }] },
+        { role: "user", content: [{ type: "input_text", text: prompt }] },
+      ],
+    );
+    if (!res.ok) throw new Error(`checker call failed: ${res.status}`);
+    const parsed = await res.json();
+    const text = (parsed.output || [])
+      .filter((item) => item?.type === "message")
+      .map((item) => item.content?.map?.((part) => part?.text || "").join("") || "")
+      .join("");
+    const match = text.match(/\{[\s\S]*\}/);
+    if (match) {
+      const verdict = JSON.parse(match[0]);
+      result.completed = verdict.completed !== false;
+      result.neededTools = Array.isArray(verdict.needed_tools) ? verdict.needed_tools.filter((name) => typeof name === "string") : [];
+      result.hint = typeof verdict.reason === "string" ? verdict.reason : "";
+    }
+  } catch (error) {
+    debugLog(services, `checker coordinator failed: ${error.message}`);
+  }
+  return result;
+}
+
+function mergeDisclosedTools(registry, currentTools, core, disclosureSet) {
+  const kept = (Array.isArray(registry) ? registry : []).filter((tool) => {
+    if (!tool || typeof tool !== "object") return false;
+    if (tool.type === "namespace") {
+      const children = Array.isArray(tool.tools) ? tool.tools : [];
+      return children.some((child) => core.has(child?.name) || disclosureSet.has(child?.name));
+    }
+    return core.has(tool.name) || disclosureSet.has(tool.name);
+  });
+  const keptNames = new Set(kept.map((tool) => tool.name));
+  for (const tool of Array.isArray(currentTools) ? currentTools : []) {
+    if (!tool || typeof tool !== "object") continue;
+    if (tool.name?.startsWith("harness_") && !keptNames.has(tool.name)) {
+      kept.push(structuredClone(tool));
+      keptNames.add(tool.name);
+    }
+  }
+  return kept;
 }
 
 async function executeHarnessCall(call, upstreams, { services, toolRegistry = [], disclosureSet = null } = {}) {
@@ -340,6 +432,12 @@ async function runHarnessToolLoop(initialResponse, initialPayload, services, sig
       }
       resultMessages.push(harnessResultMessage(call, output));
       if (call.name === "harness_vision_inspect") payload = removeHarnessTool(payload, call.name);
+      if (call.name === "harness_tool_search") {
+        const disclosureSet = services.activeDisclosureSet || new Set();
+        const core = services.config.profile?.coreTools || new Set();
+        const kept = mergeDisclosedTools(services.activeToolRegistry, payload.tools, core, disclosureSet);
+        payload = { ...payload, tools: kept.length > 0 ? kept : payload.tools };
+      }
     }
     rounds += 1;
     payload = { ...payload, input: [...(payload.input || []), ...resultMessages], stream: false };
@@ -455,6 +553,25 @@ async function relayLiveResponses(payload, res, services, signal) {
       if (call?.call_id && payload.model === services.modelSelection.visionModel) {
         services.routeAffinity.register(call.call_id, payload.model);
       }
+      if (mode === "text" && rounds < 3 && services.config.profile?.checkerEnabled === true) {
+        const lastText = writer.message?.text || "";
+        const check = await checkCompletion(lastText, currentPayload, services);
+        if (!check.completed) {
+          const disclosureSet = services.activeDisclosureSet || new Set();
+          const core = services.config.profile?.coreTools || new Set();
+          const kept = mergeDisclosedTools(services.activeToolRegistry, currentPayload.tools, core, disclosureSet);
+          const injected = [
+            {
+              type: "message",
+              role: "user",
+              content: [{ type: "input_text", text: `[MODELDOCK CHECKER] The previous assistant reply appears incomplete: "${lastText.slice(0, 2000)}".\n${check.hint ? `Reason: ${check.hint}\n` : ""}${check.neededTools.length > 0 ? `The following tools are now available: ${check.neededTools.join(", ")}. Use them to finish the task.` : "Please continue and finish the task."}` }],
+            },
+          ];
+          rounds += 1;
+          currentPayload = { ...currentPayload, tools: kept.length > 0 ? kept : currentPayload.tools, input: [...(currentPayload.input || []), ...injected], stream: true };
+          continue;
+        }
+      }
       const response = writer.finish(usage);
       return { ok: true, httpStatus: 200, bytesOut: writer.bytes, usage, rounds, response };
     }
@@ -473,17 +590,9 @@ async function relayLiveResponses(payload, res, services, signal) {
     const resultMessage = harnessResultMessage(call, output);
     rounds += 1;
     if (call.name === "harness_tool_search") {
-      const disclosed = services.activeDisclosureSet || new Set();
-      const registry = services.activeToolRegistry || [];
+      const disclosureSet = services.activeDisclosureSet || new Set();
       const core = services.config.profile?.coreTools || new Set();
-      const kept = registry.filter((tool) => {
-        if (!tool || typeof tool !== "object") return false;
-        if (tool.type === "namespace") {
-          const children = Array.isArray(tool.tools) ? tool.tools : [];
-          return children.some((child) => core.has(child?.name) || disclosed.has(child?.name));
-        }
-        return core.has(tool.name) || disclosed.has(tool.name);
-      });
+      const kept = mergeDisclosedTools(services.activeToolRegistry, currentPayload.tools, core, disclosureSet);
       currentPayload = { ...currentPayload, tools: kept.length > 0 ? kept : currentPayload.tools, input: [...(currentPayload.input || []), resultMessage], stream: true };
       continue;
     }
