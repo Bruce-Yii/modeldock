@@ -278,6 +278,7 @@ async function checkCompletion(lastText, payload, services) {
     "You are a completion checker for a coding agent. The agent was given a task and produced a reply.",
     'Decide whether the agent has actually completed the task, or whether it stopped early without finishing (e.g. it said "let me check" or "I will now..." without doing the work).',
     "IMPORTANT: If the agent's reply merely restates or repeats the user's instruction (e.g. it says \"continue reading X\" or \"I will look at X\") without providing a concrete result, summary, or final answer, it is NOT complete: completed must be false.",
+    "IMPORTANT: If the agent only reports an intermediate state (e.g. \"the page is reachable\", \"the command failed\", \"I checked X\") and then says it will continue or retry (e.g. \"let me run it properly\", \"I will try again\"), it is NOT complete: completed must be false. The task is only complete when the agent delivers the actual requested output (a file, a screenshot, a report, a final answer).",
     'A reply that is a real answer (a summary, a finding, a report, an explanation of what was done) is complete: completed must be true.',
     'Respond with ONLY a JSON object like: {"completed": true} or {"completed": false, "needed_tools": ["name1"], "reason": "short reason"}',
     "Return needed_tools only when specific additional tools are missing; otherwise return an empty array.",
@@ -289,25 +290,29 @@ async function checkCompletion(lastText, payload, services) {
     "Did the agent complete the task?",
   ].join("\n");
   const result = { completed: true, neededTools: [], hint: "" };
-  try {
-    const res = await coordinatorFetch(
-      config,
-      "checker",
-      [
-        { role: "developer", content: [{ type: "input_text", text: baseInstructions }] },
-        { role: "user", content: [{ type: "input_text", text: prompt }] },
-      ],
-    );
-    if (!res.ok) throw new Error(`checker call failed: ${res.status}`);
-    const parsed = await res.json();
-    const text = (parsed.output || [])
-      .filter((item) => item?.type === "message")
-      .map((item) => item.content?.map?.((part) => part?.text || "").join("") || "")
-      .join("");
-    Object.assign(result, parseCoordinatorVerdict(text));
-  } catch (error) {
-    debugLog(services, `checker coordinator failed: ${error.message}`);
+  let text = "";
+  for (let attempt = 0; attempt < 2 && !text; attempt += 1) {
+    try {
+      const res = await coordinatorFetch(
+        config,
+        "checker",
+        [
+          { role: "developer", content: [{ type: "input_text", text: baseInstructions }] },
+          { role: "user", content: [{ type: "input_text", text: prompt }] },
+        ],
+      );
+      if (!res.ok) throw new Error(`checker call failed: ${res.status}`);
+      const parsed = await res.json();
+      text = (parsed.output || [])
+        .filter((item) => item?.type === "message")
+        .map((item) => item.content?.map?.((part) => part?.text || "").join("") || "")
+        .join("");
+      if (!text) debugLog(services, `checker returned empty output (attempt ${attempt + 1}), retrying`);
+    } catch (error) {
+      debugLog(services, `checker coordinator failed: ${error.message}`);
+    }
   }
+  if (text) Object.assign(result, parseCoordinatorVerdict(text));
   return result;
 }
 
