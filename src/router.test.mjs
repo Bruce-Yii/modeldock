@@ -11,12 +11,24 @@ test("routes a current-turn image directly to Luna", () => {
   assert.deepEqual(route, { model: "gpt-5.6-luna", reason: "current_turn_image", directVision: true });
 });
 
-test("routes English and Chinese visual intent to Luna", () => {
-  for (const input of ["Inspect this screenshot carefully", "看一下这个按钮为什么被遮挡"]) {
+test("text-only requests never route to Luna, even with visual wording", () => {
+  for (const input of ["Inspect this screenshot carefully", "看一下这个按钮为什么被遮挡", "这张截图里显示什么", "用浏览器截图看前端"]) {
     const route = routeResponsesRequest({ input }, models);
-    assert.equal(route.model, "gpt-5.6-luna");
-    assert.equal(route.reason, "visual_intent");
+    assert.equal(route.model, "deepseek-v4-flash", `"${input}" must stay on the main model`);
+    assert.equal(route.reason, "default_main");
   }
+});
+
+test("an image in a later message still routes the current turn to Luna", () => {
+  const route = routeResponsesRequest({
+    input: [
+      { role: "user", content: [{ type: "input_text", text: "first" }] },
+      { role: "assistant", content: [{ type: "output_text", text: "ok" }] },
+      { role: "user", content: [{ type: "input_text", text: "look at this" }, { type: "input_image", image_url: "data:image/png;base64,AA==" }] },
+    ],
+  }, models);
+  assert.equal(route.model, "gpt-5.6-luna");
+  assert.equal(route.reason, "current_turn_image");
 });
 
 test("returns to DeepSeek on the next independent nonvisual turn", () => {

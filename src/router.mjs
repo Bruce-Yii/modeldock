@@ -1,12 +1,3 @@
-const VISUAL_INTENT = [
-  /\b(?:look at|inspect|read|analy[sz]e|compare|describe|explain)\b[^\n]{0,48}\b(?:image|picture|photo|screenshot|screen|diagram|chart|graph|ui)\b/i,
-  /\b(?:screenshot|screen capture|ocr|visual inspection|pixel-level|button (?:is )?(?:hidden|covered|blocked)|ui (?:layout|screenshot))\b/i,
-  /\b(?:what|why|where)\b[^\n]{0,48}\b(?:image|picture|photo|screenshot|diagram|chart|graph)\b/i,
-  /(?:看图|看一下图|查看图片|截图|界面截图|屏幕截图|按钮.{0,8}(?:遮挡|盖住|隐藏)|识图|读图|对比图)/,
-  /(?:分析|查看|读取|比较|对比|描述).{0,12}(?:图片|图像|图表|截图|界面)/,
-  /(?:图片|图像|图表|截图).{0,12}(?:是什么|有什么|哪里|为什么|文字|内容)/,
-];
-
 function inputItems(input) {
   if (typeof input === "string") return [{ type: "message", role: "user", content: [{ type: "input_text", text: input }] }];
   return Array.isArray(input) ? input : [];
@@ -27,20 +18,6 @@ function parts(item) {
 
 function hasImage(items) {
   return items.some((item) => parts(item).some((part) => part?.type === "input_image" && typeof part.image_url === "string"));
-}
-
-function itemText(item) {
-  if (typeof item === "string") return item;
-  if (typeof item?.content === "string") return item.content;
-  return parts(item)
-    .filter((part) => part && (part.type === "input_text" || part.type === "text") && typeof part.text === "string")
-    .map((part) => part.text)
-    .join("\n");
-}
-
-function hasVisualIntent(items) {
-  const text = items.filter((item) => typeof item === "string" || item?.role === "user").map(itemText).join("\n");
-  return VISUAL_INTENT.some((pattern) => pattern.test(text));
 }
 
 function continuationCallIds(items) {
@@ -100,10 +77,7 @@ export function routeResponsesRequest(source, { mainModel, visionModel, affinity
   if (hasImage(current)) {
     return { model: visionModel, reason: "current_turn_image", directVision: true };
   }
-  if (hasVisualIntent(current)) {
-    return { model: visionModel, reason: "visual_intent", directVision: true };
-  }
   return { model: source?.model || mainModel, reason: "default_main", directVision: false };
 }
 
-export const routerInternals = { currentTurnItems, hasImage, hasVisualIntent, continuationCallIds };
+export const routerInternals = { currentTurnItems, hasImage, continuationCallIds };

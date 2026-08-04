@@ -534,6 +534,7 @@ async function relayLiveResponses(payload, res, services, signal) {
     if (!upstream.ok || !upstream.body || !upstream.headers.get("content-type")?.includes("text/event-stream")) {
       const body = Buffer.from(await upstream.arrayBuffer());
       const error = upstreamError(body, upstream.status);
+      console.log(`[gate] upstream ${upstream.status} error=${error} body=${body.toString("utf8").slice(0, 800)}`);
       if (!res.headersSent) {
         res.status(upstream.status);
         copyUpstreamHeaders(upstream, res);
@@ -650,6 +651,7 @@ async function relayBufferedResponses(payload, res, services, signal) {
   if (!upstream.ok || !loop.response) {
     const body = Buffer.from(await upstream.arrayBuffer());
     const error = upstreamError(body, upstream.status);
+    console.log(`[gate] upstream ${upstream.status} error=${error} body=${body.toString("utf8").slice(0, 800)}`);
     res.status(upstream.status);
     copyUpstreamHeaders(upstream, res);
     res.send(body);
