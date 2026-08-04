@@ -56,17 +56,26 @@ function providerOptions(config) {
 function modelsPayload(services) {
   const options = modelOptions(services.config, services.config.profileId);
   const selected = services.modelSelection;
+  const visionOptions = options.filter((entry) => entry.supportsVision);
+  const visionProviders = providerOptions(services.config).filter((provider) => visionOptions.some((model) => model.provider === provider.id));
   return {
     selected,
     options,
     providers: providerOptions(services.config),
     selectedProvider: services.config.profileId || "opencode-go",
+    visionProviders,
+    selectedVisionProvider: selected.visionModel ? modelProviderOf(options, selected.visionModel) || services.config.profileId : services.config.profileId,
   };
+}
+
+function modelProviderOf(options, modelId) {
+  return options.find((entry) => entry.id === modelId)?.provider || "other";
 }
 
 function statusPayload({ config, metrics, mediaStore, routeAffinity, messaging, modelSelection }) {
   const selected = modelSelection || { mainModel: config.mainModel, visionModel: config.visionModel };
   const options = modelOptions(config);
+  const visionOptions = options.filter((entry) => entry.supportsVision);
   return metrics.snapshot({
     ready: Boolean(config.goToken),
     config: publicConfig({ ...config, mainModel: selected.mainModel, visionModel: selected.visionModel }),
@@ -75,6 +84,8 @@ function statusPayload({ config, metrics, mediaStore, routeAffinity, messaging, 
       options,
       providers: providerOptions(config),
       selectedProvider: config.profileId || "opencode-go",
+      visionProviders: providerOptions(config).filter((provider) => visionOptions.some((model) => model.provider === provider.id)),
+      selectedVisionProvider: selected.visionModel ? modelProviderOf(options, selected.visionModel) || config.profileId : config.profileId,
     },
     messaging: { mode: messaging?.mode || "streaming" },
     media: mediaStore.snapshot(),
@@ -992,7 +1003,7 @@ function serveModels(req, res, { config, modelSelection }) {
   return res.json(codexModelCatalog(config));
 }
 
-const VISION_MODEL_HINTS = ["luna", "omni", "vision", "vl"];
+const VISION_MODEL_HINTS = ["luna", "omni", "vision", "vl", "mimi", "glm-5"];
 
 function labelForModelId(id) {
   return id
@@ -1004,6 +1015,57 @@ function labelForModelId(id) {
 function guessSupportsVision(id) {
   const lower = id.toLowerCase();
   return VISION_MODEL_HINTS.some((hint) => lower.includes(hint));
+}
+
+let VISION_PROBE_IMAGE = null;
+
+async function probeVisionCapability(modelId, config) {
+  try {
+    let imageUrl = VISION_PROBE_IMAGE;
+    if (!imageUrl) {
+      const { readFileSync, existsSync } = await import("node:fs");
+      const candidates = ["D:/projects/modeldock/assets/dashboard.png", "D:/projects/modeldock/dashboard.png"];
+      const found = candidates.find((p) => existsSync(p));
+      if (!found) return "unknown";
+      const b64 = readFileSync(found).toString("base64");
+      imageUrl = `data:image/png;base64,${b64}`;
+      VISION_PROBE_IMAGE = imageUrl;
+    }
+    const response = await fetch(`${config.goBaseUrl.replace(/\/$/, "")}/responses`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${config.goToken}` },
+      body: JSON.stringify({
+        model: modelId,
+        input: [{ role: "user", content: [{ type: "input_text", text: "What is this?" }, { type: "input_image", image_url: imageUrl }] }],
+        stream: false,
+        max_output_tokens: 8,
+      }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    return response.ok ? "vision" : response.status === 401 ? "unauthorized" : "text";
+  } catch {
+    return "unknown";
+  }
+}
+
+async function probeVisionCandidates(profile, candidates, config) {
+  const results = [];
+  for (const model of candidates) {
+    const capability = await probeVisionCapability(model.id, config);
+    results.push({ id: model.id, capability });
+  }
+  profile.availableModels = profile.availableModels.map((model) => {
+    const result = results.find((entry) => entry.id === model.id);
+    if (!result) return model;
+    return {
+      ...model,
+      supportsVision: result.capability === "vision",
+      visionStatus: result.capability,
+    };
+  });
+  const vision = results.filter((r) => r.capability === "vision").map((r) => r.id);
+  const unauthorized = results.filter((r) => r.capability === "unauthorized").map((r) => r.id);
+  console.log(`[gate] vision probe done: vision=[${vision.join(", ") || "none"}] unauthorized=[${unauthorized.join(", ") || "none"}]`);
 }
 
 async function refreshProfileModels(profile, config) {
@@ -1025,12 +1087,17 @@ async function refreshProfileModels(profile, config) {
     const ids = [...new Set([...goIds, ...zenFreeIds])].sort((a, b) => a.localeCompare(b));
     if (!ids.length) return;
     const knownVision = new Set((profile.availableModels || []).filter((model) => model.supportsVision).map((model) => model.id));
-    profile.availableModels = ids.map((id) => ({
+    const models = ids.map((id) => ({
       id,
       label: labelForModelId(id),
       supportsVision: knownVision.has(id) || guessSupportsVision(id),
     }));
+    profile.availableModels = models;
     console.log(`[gate] refreshed opencode-go model catalog: ${ids.length} models (go=${goIds.length}, zenFree=${zenFreeIds.length})`);
+    const visionCandidates = models.filter((model) => model.supportsVision);
+    if (visionCandidates.length) {
+      probeVisionCandidates(profile, visionCandidates, config).catch(() => {});
+    }
   } catch (error) {
     console.log(`[gate] model catalog refresh failed: ${error.message}`);
   }
@@ -1055,7 +1122,10 @@ export function createServices(config = loadConfig()) {
   const messaging = { mode: mutableConfig.messagingMode === "buffered" ? "buffered" : "streaming" };
   const toolDisclosure = new Map();
   const runtime = { profile: mutableConfig.profile, profileId: mutableConfig.profileId };
-  refreshProfileModels(mutableConfig.profile, mutableConfig).catch(() => {});
+  refreshProfileModels(mutableConfig.profile, mutableConfig).then(
+    () => console.log(`[gate] model refresh done, availableModels=${(mutableConfig.profile?.availableModels || []).length}`),
+    (error) => console.log(`[gate] model refresh error: ${error.message}`),
+  );
   return { config: mutableConfig, runtime, metrics, mediaStore, upstreams, configSwitcher, routeAffinity, messaging, modelSelection, toolDisclosure };
 }
 

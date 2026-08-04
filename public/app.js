@@ -164,6 +164,8 @@ function renderModelOptions(data) {
   const selected = models.selected || {};
   const providers = models.providers || [];
   const selectedProvider = models.selectedProvider || "other";
+  const visionProviders = models.visionProviders || providers;
+  const selectedVisionProvider = models.selectedVisionProvider || selectedProvider;
   const providerSelect = $("main-provider-select");
   if (providerSelect && providers.length) {
     providerSelect.replaceChildren();
@@ -176,14 +178,26 @@ function renderModelOptions(data) {
     providerSelect.value = selectedProvider;
     providerSelect.disabled = modelBusy;
   }
-  for (const [id, filter, value] of [["main-model-select", () => true, selected.mainModel], ["vision-model-select", (model) => model.supportsVision, selected.visionModel]]) {
+  const visionProviderSelect = $("vision-provider-select");
+  if (visionProviderSelect && visionProviders.length) {
+    visionProviderSelect.replaceChildren();
+    for (const provider of visionProviders) {
+      const option = document.createElement("option");
+      option.value = provider.id;
+      option.textContent = provider.label;
+      visionProviderSelect.append(option);
+    }
+    visionProviderSelect.value = selectedVisionProvider;
+    visionProviderSelect.disabled = modelBusy;
+  }
+  const mainFilter = (model) => model.provider === selectedProvider;
+  const visionFilter = (model) => model.supportsVision && model.provider === (visionProviderSelect?.value || selectedVisionProvider);
+  for (const [id, filter, value] of [["main-model-select", mainFilter, selected.mainModel], ["vision-model-select", visionFilter, selected.visionModel]]) {
     const select = $(id);
     if (!select) continue;
     const previous = select.value;
     select.replaceChildren();
-    const filtered = id === "main-model-select"
-      ? models.options.filter((model) => model.provider === selectedProvider)
-      : models.options.filter(filter);
+    const filtered = models.options.filter(filter);
     for (const model of filtered) {
       const option = document.createElement("option");
       option.value = model.id;
@@ -191,11 +205,7 @@ function renderModelOptions(data) {
       option.dataset.provider = model.provider || "";
       select.append(option);
     }
-    if (id === "main-model-select") {
-      select.value = filtered.some((model) => model.id === value) ? value : (filtered[0]?.id || previous);
-    } else {
-      select.value = value || previous;
-    }
+    select.value = filtered.some((model) => model.id === value) ? value : (filtered[0]?.id || previous);
     select.disabled = modelBusy;
   }
 }
@@ -209,6 +219,7 @@ async function setModels() {
   $("main-model-select").disabled = true;
   $("main-provider-select").disabled = true;
   $("vision-model-select").disabled = true;
+  $("vision-provider-select").disabled = true;
   try {
     const response = await fetch("/api/models", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ mainModel: $("main-model-select").value, visionModel: $("vision-model-select").value, provider: $("main-provider-select").value }) });
     const body = await response.json();
@@ -360,6 +371,12 @@ $("main-provider-select").addEventListener("change", async (event) => {
 
 $("main-model-select").addEventListener("change", setModels);
 $("vision-model-select").addEventListener("change", setModels);
+$("vision-provider-select").addEventListener("change", () => {
+  const provider = $("vision-provider-select").value;
+  const modelSelect = $("vision-model-select");
+  const options = Array.from(modelSelect.options).filter((option) => option.dataset.provider === provider);
+  if (options.length) modelSelect.value = options[0].value;
+});
 
 $("restart-ack").addEventListener("click", () => configAction("restart-ack"));
 $("trace-detail-close").addEventListener("click", () => { $("trace-detail").hidden = true; });
