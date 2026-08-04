@@ -1074,17 +1074,9 @@ async function refreshProfileModels(profile, config) {
   try {
     const base = config.goBaseUrl.replace(/\/$/, "");
     const headers = { Authorization: `Bearer ${config.goToken}` };
-    const [goRes, zenRes] = await Promise.all([
-      fetch(`${base}/models`, { headers, signal: AbortSignal.timeout(10_000) }),
-      fetch(`${base.replace(/\/go\//, "/")}/models`, { headers, signal: AbortSignal.timeout(10_000) }),
-    ]);
+    const goRes = await fetch(`${base}/models`, { headers, signal: AbortSignal.timeout(10_000) });
     const goIds = goRes.ok ? ((await goRes.json())?.data || []).map((entry) => entry?.id).filter((id) => typeof id === "string" && id) : [];
-    let zenFreeIds = [];
-    if (zenRes.ok) {
-      const zenData = (await zenRes.json())?.data || [];
-      zenFreeIds = zenData.map((entry) => entry?.id).filter((id) => typeof id === "string" && id.endsWith("-free"));
-    }
-    const ids = [...new Set([...goIds, ...zenFreeIds])].sort((a, b) => a.localeCompare(b));
+    const ids = [...new Set(goIds)].sort((a, b) => a.localeCompare(b));
     if (!ids.length) return;
     const knownVision = new Set((profile.availableModels || []).filter((model) => model.supportsVision).map((model) => model.id));
     const models = ids.map((id) => ({
@@ -1093,7 +1085,7 @@ async function refreshProfileModels(profile, config) {
       supportsVision: knownVision.has(id) || guessSupportsVision(id),
     }));
     profile.availableModels = models;
-    console.log(`[gate] refreshed opencode-go model catalog: ${ids.length} models (go=${goIds.length}, zenFree=${zenFreeIds.length})`);
+    console.log(`[gate] refreshed opencode-go model catalog: ${ids.length} models`);
     const visionCandidates = models.filter((model) => model.supportsVision);
     const freeCandidates = models.filter((model) => model.id.endsWith("-free"));
     const probeCandidates = [...new Map([...visionCandidates, ...freeCandidates].map((model) => [model.id, model])).values()];
