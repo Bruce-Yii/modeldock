@@ -148,6 +148,7 @@ const OPENCODE_GO_PROFILE = {
     "list_mcp_resource_templates",
     "read_mcp_resource",
     "request_user_input",
+    "view_image",
     "harness_web_search",
     "harness_vision_inspect",
   ]),
@@ -214,13 +215,23 @@ const DEEPSEEK_OFFICIAL_PROFILE = {
     toolSearch: HARNESS_TOOL_SEARCH,
   },
   harnessToolNames: new Set(["harness_web_search", "harness_vision_inspect", "harness_tool_search"]),
-  // Verified live (2026-08-04): the DeepSeek Responses API rejects every custom tool
-  // except apply_patch ("Unsupported custom tool: 'shell_command'. Only 'apply_patch' is
-  // supported."), and natively supports the hosted web_search schema (echoed in the
-  // response tools list). tool_search is silently ignored. So: no hosted schemas are
-  // blocked, and the allowlist only constrains named Codex tools.
+  // Verified live (2026-08-04) against the real Codex tool set: the official Responses
+  // API accepts every Codex local tool as long as it is declared type "function"
+  // (shell_command, update_plan, mcp resources, request_user_input, view_image) and
+  // namespaces natively — only the "custom" tool type is restricted to apply_patch
+  // ("Unsupported custom tool: 'shell_command'. Only 'apply_patch' is supported.").
+  // Hosted web_search is native too (echoed in the response tools list); tool_search is
+  // silently ignored. So the same allowlist as opencode-go works, and nothing is blocked.
   coreTools: new Set([
+    "shell_command",
     "apply_patch",
+    "update_plan",
+    "list_mcp_resources",
+    "list_mcp_resource_templates",
+    "read_mcp_resource",
+    "request_user_input",
+    "view_image",
+    "harness_web_search",
     "harness_vision_inspect",
   ]),
   checkerEnabled: true,
