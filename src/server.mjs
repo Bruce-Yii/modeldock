@@ -571,17 +571,7 @@ async function runHarnessToolLoop(initialResponse, initialPayload, services, sig
     }
     rounds += 1;
     payload = { ...payload, input: [...(payload.input || []), ...resultMessages], stream: false };
-    upstream = await fetch(`${upstreamBaseForModel(services.config, payload.model || services.config.mainModel)}/responses`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${services.config.goToken}`,
-        Accept: "application/json",
-        "Content-Type": "application/json",
-        "User-Agent": "modeldock-opencode-go-gate/0.1.0",
-      },
-      body: JSON.stringify(payload),
-      signal,
-    });
+    upstream = await fetchGoResponses(payload, services, signal, "application/json");
   }
   return { upstream, rounds, upstreamBytes };
 }
@@ -597,8 +587,14 @@ function debugLog(services, message) {
 }
 
 async function fetchGoResponses(payload, services, signal, accept = "application/json") {
-  debugLog(services, `go request max_output_tokens=${payload.max_output_tokens ?? "unset"} inputItems=${Array.isArray(payload.input) ? payload.input.length : typeof payload.input} reasoning=${JSON.stringify(payload.reasoning ?? null)}`);
-  return fetch(`${upstreamBaseForModel(services.config, payload.model || services.config.mainModel)}/responses`, {
+  // Go strips reasoning from its own responses, so thinking mode can never satisfy its
+  // "reasoning_content must be passed back" requirement on tool-loop turns (400). Drop the
+  // reasoning field on every upstream call; A/B testing showed the model reasons correctly
+  // without it.
+  const forwarded = { ...payload };
+  delete forwarded.reasoning;
+  debugLog(services, `go request max_output_tokens=${forwarded.max_output_tokens ?? "unset"} inputItems=${Array.isArray(forwarded.input) ? forwarded.input.length : typeof forwarded.input} reasoning=${JSON.stringify(forwarded.reasoning ?? null)}`);
+  return fetch(`${upstreamBaseForModel(services.config, forwarded.model || services.config.mainModel)}/responses`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${services.config.goToken}`,
@@ -606,7 +602,7 @@ async function fetchGoResponses(payload, services, signal, accept = "application
       "Content-Type": "application/json",
       "User-Agent": "modeldock-opencode-go-gate/0.1.0",
     },
-    body: JSON.stringify(payload),
+    body: JSON.stringify(forwarded),
     signal,
   });
 }
@@ -861,17 +857,7 @@ async function relayResponses(req, res, services) {
   let upstream;
   const upstreamPayload = transformed.payload;
   try {
-    upstream = await fetch(`${upstreamBaseForModel(config, upstreamPayload.model || config.mainModel)}/responses`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${config.goToken}`,
-        Accept: streaming ? "application/json" : req.get("accept") || "application/json",
-        "Content-Type": "application/json",
-        "User-Agent": "modeldock-opencode-go-gate/0.1.0",
-      },
-      body: JSON.stringify(upstreamPayload),
-      signal: controller.signal,
-    });
+    upstream = await fetchGoResponses(upstreamPayload, services, controller.signal, streaming ? "application/json" : req.get("accept") || "application/json");
     const loop = await runHarnessToolLoop(upstream, upstreamPayload, services, controller.signal);
     upstream = loop.upstream;
     if (upstream.ok && route.directVision) routeAffinity.registerResponse(loop.response, route.model);
