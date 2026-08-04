@@ -35,6 +35,16 @@ list at startup, merges it with a curated, ranked `availableModels` seed, probes
 scores vision capability per model, and routes each request to the right upstream
 "camp" (`zen/go/v1` vs `zen/v1`) and the right wire style (responses vs chat).
 
+For the OpenCode Go camp (DeepSeek paid + free), the gateway speaks **Chat Completions
+natively** via `src/chat-bridge.mjs`: the `/responses` endpoint is a lossy translation
+shim that rejects native tool pairs, strips reasoning, and demands `reasoning_content`
+it never returns. The bridge converts Responses payloads to the chat dialect
+(`assistant.tool_calls` + `role:"tool"` history, nested `{type, function}` tool
+schemas), streams chat SSE, and adapts each chunk back into Responses-shaped events
+(`output_text.delta`, `function_call_arguments.delta`, `reasoning_text.delta`) so the
+relay loop is protocol-agnostic. Verified live: content/reasoning/tool-call deltas all
+stream, and chat-dialect tool history is accepted on round 2 with no 400s.
+
 ## The high-level flow
 
 ```text
@@ -42,14 +52,18 @@ Codex ──POST /v1/responses──> ModelDock gate (Express, loopback only)
                                   │
                                   ├─ router.mjs        decide target model
                                   ├─ transform.mjs     normalize payload
+                                  │    (chat camp: keep native tool pairs, no flattening)
                                   │
-                                  ├─ upstreamBaseForModel: pick camp by model id
+                                  ├─ chatEndpointFor: pick camp + wire style by model
                                   │    deepseek-official → api.deepseek.com (responses)
-                                  │    paid / console-go  → …/zen/go/v1
-                                  │    free (*-free, big-pickle) → …/zen/v1
+                                  │    luna / grok-4.5   → …/zen/go/v1/responses
+                                  │    opencode-go others → …/zen/go/v1/chat/completions
+                                  │    free (*-free, big-pickle) → …/zen/v1/chat/completions
                                   ▼
                           upstream responses / chat API
                                   │
+                                  ├─ chat-bridge.mjs: responses⇄chat conversion
+                                  │    (chat camp only; responses camp passes through)
                                   ├─ harness loop:      execute local tools between turns
                                   │   harness_web_search       → Exa MCP (upstreams)
                                   │   harness_vision_inspect    → vision model (upstreams)
@@ -57,7 +71,6 @@ Codex ──POST /v1/responses──> ModelDock gate (Express, loopback only)
                                   │
                                   ▼
         stream: live-normalized relay (live-responses.mjs)
-        OR      buffered relay      (responses-sse.mjs)
         → clean OpenAI Responses SSE back to Codex
 ```
 
@@ -71,7 +84,7 @@ Codex ──POST /v1/responses──> ModelDock gate (Express, loopback only)
 | `src/profiles.mjs` | Provider profiles (opencode-go, deepseek-official); controls which tools are blocked/forwarded, the curated `availableModels` catalog, checker toggle; `providerForModel`/`tokenFor` resolve per-model provider and token |
 | `src/upstreams.mjs` | Outbound client helpers: Exa web search (MCP), vision inspect with per-model endpoint/style routing |
 | `src/live-responses.mjs` | Streaming relay path: `LiveResponsesWriter` + SSE parser |
-| `src/responses-sse.mjs` | Buffered relay path: adapt an upstream JSON response to a single SSE document |
+| `src/chat-bridge.mjs` | Chat Completions bridge for the OpenCode camp: Responses⇄chat payload conversion and chat SSE→Responses event adaptation |
 | `src/mcp.mjs` | MCP server exposing the same web-search and vision tools over the `/mcp` endpoint |
 | `src/config.mjs` | Load environment configuration and (for the Codex bridge) the OpenCode Go API token |
 | `src/config-switcher.mjs` | Back up / rewrite / restore Codex's `config.toml` to point at ModelDock, with drift detection |
@@ -94,30 +107,34 @@ arrives here.
    - The current turn contains an `input_image` → `current_turn_image`, full turn routed
      to the vision model.
    - Otherwise → `default_main` (the request's model or the configured main model).
-3. **Transform.** `transformResponsesRequest` (src/transform.mjs) returns the forwarded
-   `payload` plus a `report`. Key steps (see below for details): block `tool_search` /
-   `web_search`; filter tools through the profile allowlist; rewrite image history —
-   **historical** `input_image`s become `img_...` media-store references, but on the
-   direct-vision route the **current-turn** image is kept as-is so Luna sees the real
-   pixels; inject the harness tools (`harness_web_search` on demand, `harness_vision_inspect`
-   resident on the main-model path); rewrite tool history; set
-   `parallel_tool_calls = false`.
-4. **Forward.** `relayResponses` selects a relay based on `payload.stream`:
-   - `stream: false` → a plain JSON passthrough with the harness loop applied.
-   - `stream: true` → `relayLiveResponses` (SSE passthrough with inline harness execution
-     and the completion checker).
-5. **Relay live.** `parseSse` reads the upstream stream; every
-   `response.output_text.delta` is pushed straight to the client through
-   `LiveResponsesWriter`. When a `function_call` for a harness tool appears, capture its
-   full arguments (via `response.function_call_arguments.delta`), execute locally, then
-   append the result as a user message and make a fresh upstream call — this is the
-   "harness loop".
-6. **Checker (live mode only, opt-in per profile).** On a *text* turn (no function call),
-   if the profile enables `checkerEnabled`, call `checkCompletion` — a few-token coordinator
-   call — to determine whether the agent actually finished. If not, inject a
-   `[MODELDOCK CHECKER]` user message and re-call upstream. Hard caps both the harness
-   rounds and the checker retries, so a runaway turn cannot loop forever. A per-session
-   `LoopBreaker` additionally trips after 3 checker nags in 5s and disables the checker
+ 3. **Transform.** `transformResponsesRequest` (src/transform.mjs) returns the forwarded
+    `payload` plus a `report`. Key steps (see below for details): block `tool_search` /
+    `web_search`; filter tools through the profile allowlist; rewrite image history —
+    **historical** `input_image`s become `img_...` media-store references, but on the
+    direct-vision route the **current-turn** image is kept as-is so Luna sees the real
+    pixels; inject the harness tools (`harness_web_search` on demand, `harness_vision_inspect`
+    resident on the main-model path); set `parallel_tool_calls = false`. On the chat
+    camp, **native tool pairs are kept** (no receipt flattening) so `chat-bridge.mjs`
+    can rebuild `assistant.tool_calls` history.
+ 4. **Forward.** `relayResponses` selects a relay based on `payload.stream`:
+    - `stream: false` → a plain JSON passthrough with the harness loop applied.
+    - `stream: true` → `relayLiveResponses` (SSE passthrough with inline harness execution
+      and the completion checker).
+ 5. **Relay live.** `parseSse` reads the upstream stream. On the chat camp, each chunk is
+    first adapted by `chat-bridge.mjs` (`chatChunkToResponsesEvents`: reasoning_content →
+    reasoning delta, content → `output_text.delta`, tool_calls → function_call events);
+    then every `response.output_text.delta` is pushed straight to the client through
+    `LiveResponsesWriter`. When a `function_call` for a harness tool appears, capture its
+    full arguments (via `response.function_call_arguments.delta`), execute locally, then
+    append the result and make a fresh upstream call — this is the "harness loop". The
+    harness result is appended as a native `function_call_output` pair, which the bridge
+    converts back to chat-dialect tool history on the next round.
+ 6. **Checker (live mode only, opt-in per profile).** On a *text* turn (no function call),
+    if the profile enables `checkerEnabled`, call `checkCompletion` — a few-token coordinator
+    call — to determine whether the agent actually finished. If not, inject a
+    `[MODELDOCK CHECKER]` user message and re-call upstream. Hard caps both the harness
+    rounds and the checker retries, so a runaway turn cannot loop forever. A per-session
+    `LoopBreaker` additionally trips after 3 checker nags in 5s and disables the checker
    for that session (see below), so a stuck agent can't spin across hundreds of requests.
 7. **Terminate.** `writer.finish(usage)` emits `response.completed` and `[DONE]`. Usage,
    latency, and transform statistics are recorded in `metrics`.
@@ -213,21 +230,22 @@ Profiles encode provider-specific behavior; the active one is selected by
 | --- | --- | --- |
 | Provider endpoint | `https://opencode.ai/zen/go/v1` (+ `zen/v1` for free models) | `https://api.deepseek.com` (Responses wire) |
 | Blocked hosted tools | `tool_search`, `web_search` | none (web_search native, tool_search ignored) |
-| Tool allowlist (`coreTools`) | shell_command, apply_patch, update_plan, list_mcp_resources, list_mcp_resource_templates, read_mcp_resource, request_user_input, harness_web_search, harness_vision_inspect | apply_patch, harness_vision_inspect |
+| Tool allowlist (`coreTools`) | shell_command, apply_patch, update_plan, list_mcp_resources, list_mcp_resource_templates, read_mcp_resource, request_user_input, harness_web_search, harness_vision_inspect | same as opencode-go (all function-type tools are native; only `custom` is restricted to apply_patch) |
 | Harness tools | web_search, vision, tool_search | vision, tool_search (web_search native on the provider) |
 | Reasoning (catalog) | default `high`; `low/high/max` | default `medium`; `none/minimal/low/medium/high/xhigh/max`, forwarded untouched |
 | Compaction / normalization | compact completed history; canonicalize call IDs; strip synthetic reasoning placeholder | compact completed history; canonicalize call IDs; strip synthetic reasoning placeholder |
 | `checkerEnabled` | true | true |
 | Input modalities | text + image | text only |
 
-> **Why DeepSeek's allowlist is narrower:** verified live (2026-08-04), the DeepSeek
-> Responses API rejects every custom tool except `apply_patch` (`Unsupported custom tool:
-> 'shell_command'. Only 'apply_patch' is supported.`), so the deepseek profile filters
-> Codex's other local tools out of the payload — nameless hosted schemas (web_search,
-> tool_search) pass through untouched. `web_search` is natively supported (echoed in the
-> response tools list); `tool_search` is silently ignored. Vision and tool-search harness
-> tools stay resident and execute through the OpenCode Go camp, so a DeepSeek main model
-> keeps the same dashboard experience — only shell/MCP execution moves to the Go profile.
+> **DeepSeek tool acceptance (verified live 2026-08-04):** the official Responses API
+> accepts every Codex local tool declared `type: "function"` (shell_command, update_plan,
+> mcp resources, request_user_input, view_image) plus namespaces natively — the real
+> Codex traffic is all function-typed, so the deepseek profile uses the same allowlist as
+> opencode-go. Only the `custom` tool type is restricted to `apply_patch` (`Unsupported
+> custom tool: 'shell_command'. Only 'apply_patch' is supported.`). Hosted `web_search`
+> is native (echoed in the response tools list); `tool_search` is silently ignored. Vision
+> and tool-search harness tools stay resident and execute through the OpenCode Go camp,
+> so a DeepSeek main model keeps the same dashboard experience.
 > Reasoning effort is forwarded verbatim to the official API (thinking defaults on;
 > `none` disables it), while coordinator/checker calls pin `effort: "none"` so tiny
 > judgment calls do not burn their token budget on reasoning.
@@ -262,20 +280,50 @@ consults the model id:
   This lets the **main model run on DeepSeek while vision runs on OpenCode Go**.
 - `tokenFor(config, model)` returns that provider's token from the `tokens` map
   (`OPENCODE_GO_TOKEN` / `DEEPSEEK_API_KEY`, both loaded at startup).
-- `upstreamBaseForModel(config, model)` (server.mjs) picks the base URL:
-  `deepseek-official` → `config.deepseekBaseUrl` (default `https://api.deepseek.com`),
-  `*-free`/`big-pickle` → `https://opencode.ai/zen/v1`, everything else →
-  `config.goBaseUrl` (`zen/go/v1`).
-- `visionEndpointFor(model)` (upstreams.mjs) picks the wire style: DeepSeek models →
-  Responses style on the deepseek base; `gpt-5.6-luna`/`grok-4.5`/kimi/minimax → Responses
-  style on the go base; `*-free`/`big-pickle` → chat/completions on the zen base; every
-  other model → chat/completions on the go base.
+- `chatEndpointFor(model, config)` (chat-bridge.mjs) picks the base URL **and wire
+  style** for the main relay: `deepseek-official` → Responses on `config.deepseekBaseUrl`;
+  `gpt-5.6-luna`/`grok-4.5` → Responses on `zen/go/v1`; `*-free`/`big-pickle` →
+  chat/completions on `zen/v1`; every other opencode-go model → **chat/completions on
+  `zen/go/v1`** (the chat bridge). `chatCampForRequest` honours a profile
+  `chatCampOverride` (used by tests to pin the responses wire).
+- `visionEndpointFor(model)` (upstreams.mjs) picks the wire style for vision inspect:
+  DeepSeek models → Responses style on the deepseek base; `gpt-5.6-luna`/`grok-4.5`/kimi/
+  minimax → Responses style on the go base; `*-free`/`big-pickle` → chat/completions on
+  the zen base; every other model → chat/completions on the go base.
 
 Every outbound request (relay, harness loop, coordinator/checker, vision inspect,
 vision probe) routes through these helpers, so each model hits its own provider's
 endpoint **with that provider's token**. This is why `deepseek-v4-flash` (main) can run
 on the DeepSeek API while `harness_vision_inspect` still observes images through
 OpenCode Go's free camp without a paid balance.
+
+### Chat bridge wire details (chat-bridge.mjs)
+
+> **Scope: the OpenCode Go DeepSeek models only** (`deepseek-v4-flash`,
+> `deepseek-v4-flash-free`, `deepseek-v4-pro` — paid `go` camp and free `zen` camp).
+> These models speak Chat Completions natively. Everything else (Luna/Grok, the
+> deepseek-official profile) stays on the Responses wire and never passes through this
+> bridge. The default profile (`opencode-go`) + default main model
+> (`deepseek-v4-flash`) therefore go through the bridge on every request — it is the
+> main road, not a side path. Unit coverage lives in `src/chat-bridge.test.mjs`.
+
+For chat-camp models the relay never speaks Responses upstream:
+
+- **Downlink** `responsesToChatRequest(payload)`: maps the Responses `input` array to
+  chat `messages` — native `function_call`/`function_call_output` pairs become
+  `assistant.tool_calls` + `role:"tool"` messages (orphan outputs become user notes);
+  tools are re-wrapped into the nested `{type, function}` schema the upstream requires
+  (a flat tool array is rejected with `missing field 'function'`); `max_output_tokens`
+  maps to `max_tokens`.
+- **Uplink** `chatChunkToResponsesEvents(chunk)`: adapts each chat SSE chunk into
+  Responses-shaped events — `reasoning_content` → `response.reasoning_text.delta`,
+  `content` → `response.output_text.delta`, `tool_calls` → `response.output_item.added`
+  (function_call) + `function_call_arguments.delta`, `finish_reason` →
+  `response.completed`. The relay loop consumes these identically to native events.
+- **Tool history survives**: because transform skips receipt flattening on the chat camp,
+  native pairs flow through to the bridge and become real `tool_calls` history — the
+  model sees its own tool use and keeps emitting calls (flattened history made it
+  "forget" tools and answer in text only).
 
 ### Vision capability ranking (probe + eval bench)
 

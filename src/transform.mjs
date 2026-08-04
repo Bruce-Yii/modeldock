@@ -420,7 +420,11 @@ export function transformResponsesRequest(source, { mediaStore, defaultModel, ta
   }
 
   const { blockedToolTypes, webSearchTool, visionTool, toolSearchTool, coreTools } = resolveProfileOptions(profile);
-  const shouldCompactCompletedToolHistory = Boolean(profile?.compactCompletedToolHistory);
+  // Chat bridge consumes native function_call/function_call_output pairs and converts
+  // them to chat-dialect tool_calls itself. Flattening to receipts would erase the tool
+  // structure, so skip compaction for the chat camp (opencode-go, unless overridden).
+  const chatBridgeActive = profile?.chatCampOverride === "chat" || (profile?.chatCampOverride !== "responses" && profile?.id === "opencode-go");
+  const shouldCompactCompletedToolHistory = Boolean(profile?.compactCompletedToolHistory) && !chatBridgeActive;
   const shouldCanonicalizeCallIds = profile?.canonicalizeCallIds !== false;
   const shouldStripReasoningPlaceholder = profile?.stripSyntheticReasoningPlaceholder !== false;
   const receiptRole = profile?.receiptRole === "assistant" ? "assistant" : "user";
