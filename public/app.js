@@ -192,7 +192,7 @@ function renderModelOptions(data) {
   }
   const mainFilter = (model) => model.provider === selectedProvider;
   const visionFilter = (model) => model.supportsVision && model.provider === (visionProviderSelect?.value || selectedVisionProvider);
-  for (const [id, filter, value, sortBy] of [["main-model-select", mainFilter, selected.mainModel, null], ["vision-model-select", visionFilter, selected.visionModel, "visionScore"]]) {
+  for (const [id, filter, value, sortBy] of [["main-model-select", mainFilter, selected.mainModel, null], ["vision-model-select", visionFilter, selected.visionModel, "balanceScore"]]) {
     const select = $(id);
     if (!select) continue;
     const previous = select.value;

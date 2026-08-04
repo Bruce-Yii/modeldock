@@ -28,10 +28,35 @@ function goUrl(config, resource) {
 }
 
 const VISION_TIER_LABELS = { strong: "High", medium: "Mid", basic: "Low", poor: "Weak" };
+const SPEED_SCORES = { fast: 1.0, medium: 0.6, slow: 0.2 };
+const QUOTA_SCORES = [
+  { min: 10000, score: 1.0 },
+  { min: 2000, score: 0.8 },
+  { min: 500, score: 0.5 },
+  { min: 0, score: 0.15 },
+];
+
+function quotaScore(quota5h) {
+  if (typeof quota5h !== "number") return 0;
+  return QUOTA_SCORES.find((band) => quota5h >= band.min)?.score || 0.15;
+}
+
+function balanceScoreFor(model) {
+  const capability = model.visionScore != null && model.visionMaxScore ? model.visionScore / model.visionMaxScore : 0;
+  const speed = SPEED_SCORES[model.speedTier] ?? 0;
+  const cheap = quotaScore(model.quota5h);
+  return Number(((capability + speed + cheap) / 3).toFixed(3));
+}
 
 function withTierLabel(model) {
-  if (!model.visionTier) return model;
-  return { ...model, tierLabel: VISION_TIER_LABELS[model.visionTier] || model.visionTier };
+  const decorated = { ...model };
+  if (decorated.visionTier) {
+    decorated.tierLabel = VISION_TIER_LABELS[decorated.visionTier] || decorated.visionTier;
+  }
+  if (decorated.supportsVision) {
+    decorated.balanceScore = balanceScoreFor(decorated);
+  }
+  return decorated;
 }
 
 function modelOptions(config, profileId) {

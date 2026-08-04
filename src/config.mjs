@@ -115,7 +115,7 @@ export function loadConfig() {
     goToken: discovered.token,
     goTokenSource: discovered.source,
     mainModel: process.env.MODELDOCK_MAIN_MODEL || "deepseek-v4-flash",
-    visionModel: process.env.MODELDOCK_VISION_MODEL || "gpt-5.6-luna",
+    visionModel: process.env.MODELDOCK_VISION_MODEL || "minimax-m3",
     visionFallbackModel: process.env.MODELDOCK_VISION_FALLBACK_MODEL || "kimi-k2.5",
     visionTimeoutMs: integer("MODELDOCK_VISION_TIMEOUT_MS", 90_000, { min: 1_000, max: 300_000 }),
     mediaTtlMs: integer("MODELDOCK_MEDIA_TTL_MS", 3_600_000, { min: 60_000 }),
