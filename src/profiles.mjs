@@ -139,9 +139,10 @@ const OPENCODE_GO_PROFILE = {
     "harness_web_search",
     "harness_vision_inspect",
   ]),
-  // Disabled: with receipt-flattened tool history the model occasionally drops a tool call.
-  // We accept that over the completion checker, whose nudge loop could spin (see loop-breaker).
-  checkerEnabled: false,
+  // Enabled with an outer-side nudge throttle: the loop-breaker allows at most one
+  // [MODELDOCK CHECKER] nudge per session per 5s window (across requests), so text/tool
+  // alternation cannot spin the nudge loop; repeated incomplete replies still trip it.
+  checkerEnabled: true,
   availableModels: [
     { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash", endpoint: "responses", supportsVision: false, status: "available" },
     { id: "deepseek-v4-flash-free", label: "DeepSeek V4 Flash Free", endpoint: "responses", free: true, supportsVision: false, quota5h: 100000, status: "available" },

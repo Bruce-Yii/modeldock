@@ -68,3 +68,23 @@ test("evicts the oldest session past maxSessions", () => {
   breaker.recordNag("s3", { goal: "g", now: 0 });
   assert.equal(breaker.snapshot().activeSessions, 2);
 });
+
+test("nudgeAllowed allows one nudge per window, then throttles until the window passes", () => {
+  const breaker = new LoopBreaker({ windowMs: 5_000 });
+  const key = "session-n";
+  let now = 1_000;
+  assert.equal(breaker.nudgeAllowed(key, { now }), true, "first nudge allowed");
+  assert.equal(breaker.nudgeAllowed(key, { now: now + 1 }), false, "second nudge inside window throttled");
+  assert.equal(breaker.nudgeAllowed(key, { now: now + 4_000 }), false, "still inside window");
+  assert.equal(breaker.nudgeAllowed(key, { now: now + 5_000 }), true, "window passed, allowed again");
+});
+
+test("nudgeAllowed is independent of recordNag tripping", () => {
+  const breaker = new LoopBreaker({ windowMs: 5_000, maxNags: 1 });
+  const key = "session-m";
+  breaker.nudgeAllowed(key, { now: 0 });
+  breaker.recordNag(key, { goal: "g", now: 10 });
+  assert.equal(breaker.isTripped(key), true, "recordNag still trips after one nag");
+  assert.equal(breaker.nudgeAllowed(key, { now: 11 }), false, "nudge throttle still applies while tripped");
+});
+

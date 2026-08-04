@@ -695,29 +695,34 @@ async function relayLiveResponses(payload, res, services, signal) {
         const check = await checkCompletion(lastText, currentPayload, services);
         debugLog(services, `checker verdict: completed=${check.completed} needed=${check.neededTools.join(",")} hint="${check.hint}" lastText="${lastText.slice(0, 100)}"`);
         if (!check.completed) {
-          const trip = services.loopBreaker?.recordNag(sessionKey, { goal: lastUserGoal(currentPayload.input) }) || { tripped: false, justTripped: false, nags: 0 };
-          if (trip.justTripped) {
-            console.log(`[gate] loop breaker tripped session=${sessionKey} nags=${trip.nags}; disabling checker for this session`);
-            recordLoopBreak(services.metrics, sessionKey, trip.nags);
-          }
-          if (trip.tripped) {
-            debugLog(services, `checker halted by loop breaker; returning reply as-is rounds=${rounds}`);
+          const nudgeOk = services.loopBreaker?.nudgeAllowed(sessionKey) ?? true;
+          if (!nudgeOk) {
+            debugLog(services, `checker nudge throttled (5s window) session=${sessionKey}; returning reply as-is rounds=${rounds}`);
           } else {
-            debugLog(services, `checker continuing turn rounds=${rounds} mode=${mode}`);
-            const disclosureSet = services.activeDisclosureSet || new Set();
-            for (const name of check.neededTools) disclosureSet.add(name);
-            const core = services.config.profile?.coreTools || new Set();
-            const kept = mergeDisclosedTools(services.activeToolRegistry, currentPayload.tools, core, disclosureSet);
-            const injected = [
-              {
-                type: "message",
-                role: "user",
-                content: [{ type: "input_text", text: `[MODELDOCK CHECKER] The previous assistant reply appears incomplete: "${lastText.slice(0, 2000)}".\n${check.hint ? `Reason: ${check.hint}\n` : ""}${check.neededTools.length > 0 ? `The following tools are now available: ${check.neededTools.join(", ")}. Use them to finish the task.` : "Please continue and finish the task."}` }],
-              },
-            ];
-            rounds += 1;
-            currentPayload = { ...currentPayload, tools: kept.length > 0 ? kept : currentPayload.tools, input: [...(currentPayload.input || []), ...injected], stream: true };
-            continue;
+            const trip = services.loopBreaker?.recordNag(sessionKey, { goal: lastUserGoal(currentPayload.input) }) || { tripped: false, justTripped: false, nags: 0 };
+            if (trip.justTripped) {
+              console.log(`[gate] loop breaker tripped session=${sessionKey} nags=${trip.nags}; disabling checker for this session`);
+              recordLoopBreak(services.metrics, sessionKey, trip.nags);
+            }
+            if (trip.tripped) {
+              debugLog(services, `checker halted by loop breaker; returning reply as-is rounds=${rounds}`);
+            } else {
+              debugLog(services, `checker continuing turn rounds=${rounds} mode=${mode}`);
+              const disclosureSet = services.activeDisclosureSet || new Set();
+              for (const name of check.neededTools) disclosureSet.add(name);
+              const core = services.config.profile?.coreTools || new Set();
+              const kept = mergeDisclosedTools(services.activeToolRegistry, currentPayload.tools, core, disclosureSet);
+              const injected = [
+                {
+                  type: "message",
+                  role: "user",
+                  content: [{ type: "input_text", text: `[MODELDOCK CHECKER] The previous assistant reply appears incomplete: "${lastText.slice(0, 2000)}".\n${check.hint ? `Reason: ${check.hint}\n` : ""}${check.neededTools.length > 0 ? `The following tools are now available: ${check.neededTools.join(", ")}. Use them to finish the task.` : "Please continue and finish the task."}` }],
+                },
+              ];
+              rounds += 1;
+              currentPayload = { ...currentPayload, tools: kept.length > 0 ? kept : currentPayload.tools, input: [...(currentPayload.input || []), ...injected], stream: true };
+              continue;
+            }
           }
         }
       }

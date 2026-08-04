@@ -72,6 +72,20 @@ export class LoopBreaker {
     return { tripped: state.tripped, justTripped: state.tripped && !wasTripped, nags: state.nags.length };
   }
 
+  // Outer-side throttle for checker nudges: allow at most one nudge per windowMs per
+  // session, regardless of how many text turns arrive (text/tool alternation would
+  // otherwise let several nudges through the same window). Returns true when a nudge
+  // is allowed, false when the last nudge is still inside the window.
+  nudgeAllowed(key, { now = Date.now() } = {}) {
+    if (!key) return true;
+    const state = this.#state(key);
+    state.nudgeTimes = state.nudgeTimes || [];
+    state.nudgeTimes = state.nudgeTimes.filter((timestamp) => now - timestamp < this.windowMs);
+    if (state.nudgeTimes.length > 0) return false;
+    state.nudgeTimes.push(now);
+    return true;
+  }
+
   reset(key) {
     if (key) this.sessions.delete(key);
   }
