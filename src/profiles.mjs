@@ -127,7 +127,18 @@ const OPENCODE_GO_PROFILE = {
     toolSearch: HARNESS_TOOL_SEARCH,
   },
   harnessToolNames: new Set(["harness_web_search", "harness_vision_inspect", "harness_tool_search"]),
-  coreTools: new Set(["shell_command", "apply_patch", "update_plan", "list_mcp_resources", "read_mcp_resource", "harness_web_search", "harness_vision_inspect"]),
+  coreTools: new Set([
+    "shell_command",
+    "apply_patch",
+    "update_plan",
+    "list_mcp_resources",
+    "list_mcp_resource_templates",
+    "read_mcp_resource",
+    "request_user_input",
+    "view_image",
+    "harness_web_search",
+    "harness_vision_inspect",
+  ]),
   checkerEnabled: true,
 
   modelCatalog({ mainModel, visionModel, baseInstructions }) {
