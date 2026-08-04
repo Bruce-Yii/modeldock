@@ -35,16 +35,16 @@ function resolveProfileOptions(profile) {
   const blockedToolTypes = profile?.blockedToolTypes || DEFAULT_BLOCKED_TOOL_TYPES;
   const webSearchTool = profile?.harnessTools?.webSearch || null;
   const visionTool = profile?.harnessTools?.vision || null;
-  const toolSearchTool = profile?.harnessTools?.toolSearch || null;
-  const coreTools = profile?.coreTools || null;
-  return { blockedToolTypes, webSearchTool, visionTool, toolSearchTool, coreTools };
+  // showAllTools: forward every named tool (the chat bridge accepts all schemas, so the
+  // allowlist exists only to save tokens; full disclosure keeps every Codex tool visible).
+  const coreTools = profile?.showAllTools ? null : (profile?.coreTools || null);
+  return { blockedToolTypes, webSearchTool, visionTool, coreTools };
 }
 
 function disclosedToolNamesFromHistory(input) {
   if (!Array.isArray(input)) return new Set();
   const disclosed = new Set();
   for (const item of input) {
-    if (item?.type === "function_call" && item.name === "harness_tool_search") continue;
     if (item?.type === "function_call_output" && item.call_id) {
       const text = typeof item.output === "string" ? item.output : "";
       for (const match of text.matchAll(/"name"\s*:\s*"([^"]+)"/g)) {
@@ -55,7 +55,7 @@ function disclosedToolNamesFromHistory(input) {
   return disclosed;
 }
 
-function selectForwardedTools(tools, { coreTools, toolSearchTool, disclosed }) {
+function selectForwardedTools(tools, { coreTools, disclosed }) {
   if (!Array.isArray(tools) || tools.length === 0) return tools;
   if (!coreTools) return tools;
   const forwarded = [];
@@ -72,7 +72,6 @@ function selectForwardedTools(tools, { coreTools, toolSearchTool, disclosed }) {
     // never constrained by the named-tool allowlist; they pass through untouched.
     if (!tool.name || coreTools.has(tool.name) || disclosed.has(tool.name)) forwarded.push(structuredClone(tool));
   }
-  if (toolSearchTool) forwarded.push(structuredClone(toolSearchTool));
   return forwarded;
 }
 
@@ -419,7 +418,7 @@ export function transformResponsesRequest(source, { mediaStore, defaultModel, ta
     throw new Error("Responses request body must be a JSON object");
   }
 
-  const { blockedToolTypes, webSearchTool, visionTool, toolSearchTool, coreTools } = resolveProfileOptions(profile);
+  const { blockedToolTypes, webSearchTool, visionTool, coreTools } = resolveProfileOptions(profile);
   // Chat bridge consumes native function_call/function_call_output pairs and converts
   // them to chat-dialect tool_calls itself. Flattening to receipts would erase the tool
   // structure, so skip compaction for the chat camp (opencode-go, unless overridden).
@@ -443,7 +442,7 @@ export function transformResponsesRequest(source, { mediaStore, defaultModel, ta
   const historyDisclosed = disclosedToolNamesFromHistory(rawInput);
   const disclosed = disclosedTools ? new Set([...historyDisclosed, ...disclosedTools]) : historyDisclosed;
   if (coreTools) {
-    payload.tools = selectForwardedTools(payload.tools, { coreTools, toolSearchTool, disclosed });
+    payload.tools = selectForwardedTools(payload.tools, { coreTools, disclosed });
   }
 
   let toolChoiceRewritten = false;

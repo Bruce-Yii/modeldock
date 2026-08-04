@@ -25,12 +25,12 @@ test("filters Codex hosted tools and normalizes required tool choice", () => {
   assert.equal(result.payload.model, "deepseek-v4-flash");
   assert.equal(result.payload.tool_choice, "auto");
   assert.equal(result.payload.parallel_tool_calls, false);
-  assert.deepEqual(result.payload.tools.map((tool) => tool.name), ["shell_command", "harness_tool_search", "harness_web_search", "harness_vision_inspect"]);
+  assert.deepEqual(result.payload.tools.map((tool) => tool.name), ["shell_command", "harness_web_search", "harness_vision_inspect"]);
   assert.equal(result.payload.input[0].content[0].text, "hello");
   assert.deepEqual(result.report.blocked, { tool_search: 1, web_search: 1 });
 });
 
-test("opencode-go profile hides non-core tools and exposes harness_tool_search", () => {
+test("opencode-go profile shows all tools (no allowlist, no harness_tool_search)", () => {
   const result = transformResponsesRequest(
     {
       input: "hello",
@@ -47,12 +47,12 @@ test("opencode-go profile hides non-core tools and exposes harness_tool_search",
   );
   const names = result.payload.tools.map((tool) => tool.name);
   assert.ok(names.includes("shell_command"), "core tool stays visible");
-  assert.ok(!names.includes("spawn_agent"), "non-core function is hidden");
-  assert.ok(!names.includes("collaboration"), "namespace with no core children is hidden");
-  assert.ok(names.includes("harness_tool_search"), "search tool injected");
+  assert.ok(names.includes("spawn_agent"), "non-core function is shown with showAllTools");
+  assert.ok(names.includes("collaboration"), "namespace is shown with showAllTools");
+  assert.ok(!names.includes("harness_tool_search"), "harness_tool_search is removed");
 });
 
-test("disclosed tools from history are forwarded alongside core tools", () => {
+test("all tools are forwarded with showAllTools even with tool history", () => {
   const result = transformResponsesRequest(
     {
       input: [
@@ -68,8 +68,8 @@ test("disclosed tools from history are forwarded alongside core tools", () => {
     { mediaStore: store(), defaultModel: "deepseek-v4-flash", profile: OPENCODE_GO_PROFILE },
   );
   const names = result.payload.tools.map((tool) => tool.name);
-  assert.ok(names.includes("spawn_agent"), "disclosed tool is forwarded");
-  assert.ok(names.includes("harness_tool_search"), "search tool stays injected");
+  assert.ok(names.includes("spawn_agent"), "spawn_agent is forwarded with showAllTools");
+  assert.ok(!names.includes("harness_tool_search"), "search tool is removed");
 });
 
 test("replaces image data with a stable opaque reference", () => {

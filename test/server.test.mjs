@@ -46,7 +46,7 @@ test("proxies Responses while filtering unsupported hosted tool schemas", async 
     goToken: "test-token",
     goBaseUrl: `http://127.0.0.1:${upstreamPort}`,
     opencodeBaseUrl: `http://127.0.0.1:${upstreamPort}`,
-    profile: { ...base.profile, checkerEnabled: false, chatCampOverride: "responses" },
+    profile: { ...base.profile, chatCampOverride: "responses" },
   };
   const instance = createApp(createServices(config));
   const server = instance.app.listen(0, "127.0.0.1");
@@ -69,7 +69,7 @@ test("proxies Responses while filtering unsupported hosted tool schemas", async 
   assert.equal(response.status, 200);
   assert.equal(received.model, "deepseek-v4-flash");
   assert.equal(received.tool_choice, "auto");
-  assert.deepEqual(received.tools.map((tool) => tool.name), ["shell_command", "harness_tool_search", "harness_web_search", "harness_vision_inspect"]);
+  assert.deepEqual(received.tools.map((tool) => tool.name), ["shell_command", "harness_web_search", "harness_vision_inspect"]);
 
   const status = await (await fetch(`http://127.0.0.1:${port}/api/status`)).json();
   assert.equal(status.responses.filteredToolSearch, 1);

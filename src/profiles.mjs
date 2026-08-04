@@ -101,23 +101,6 @@ function modelCatalogDefaults({ mainModel, displayName, description, compHash, i
   };
 }
 
-const HARNESS_TOOL_SEARCH = {
-  type: "function",
-  name: "harness_tool_search",
-  description: "Search for additional tools that are not currently loaded. Use this when the task requires a capability you do not see in your available tools, such as sub-agents, goals, MCP resources, or app features. Describe the goal plainly in any language; the search matches semantically.",
-  parameters: {
-    type: "object",
-    properties: {
-      goal: {
-        type: "string",
-        description: "Plain-language description of what you are trying to accomplish and what capability you need.",
-      },
-    },
-    required: ["goal"],
-    additionalProperties: false,
-  },
-};
-
 const OPENCODE_GO_PROFILE = {
   id: "opencode-go",
   label: "OpenCode Go",
@@ -125,6 +108,9 @@ const OPENCODE_GO_PROFILE = {
   tokenEnvName: "OPENCODE_GO_TOKEN",
 
   blockedToolTypes: new Set(["tool_search", "web_search"]),
+  // Show every Codex tool to the model: the chat bridge accepts all tool schemas, so
+  // the allowlist (coreTools) is bypassed entirely.
+  showAllTools: true,
   // Role of flattened tool receipts in history. "user" is the battle-tested default
   // (TOOL_EXECUTION_COMPLETED as a user message, accepted by Go in every tested shape).
   // "assistant" frames the same text as the agent's own statement ("I executed a tool
@@ -137,9 +123,8 @@ const OPENCODE_GO_PROFILE = {
   harnessTools: {
     webSearch: HARNESS_WEB_SEARCH_TOOL,
     vision: HARNESS_VISION_TOOL,
-    toolSearch: HARNESS_TOOL_SEARCH,
   },
-  harnessToolNames: new Set(["harness_web_search", "harness_vision_inspect", "harness_tool_search"]),
+  harnessToolNames: new Set(["harness_web_search", "harness_vision_inspect"]),
   coreTools: new Set([
     "shell_command",
     "apply_patch",
@@ -152,10 +137,6 @@ const OPENCODE_GO_PROFILE = {
     "harness_web_search",
     "harness_vision_inspect",
   ]),
-  // Disabled: the completion checker's nudge loop interfered with live sessions (injected
-  // [MODELDOCK CHECKER] text polluted Codex thread state and drove reply degeneration).
-  // Re-enable only after the intermediate-state exemption and session-history marking land.
-  checkerEnabled: false,
   availableModels: [
     { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash", endpoint: "responses", supportsVision: false, status: "available" },
     { id: "deepseek-v4-flash-free", label: "DeepSeek V4 Flash Free", endpoint: "responses", free: true, supportsVision: false, quota5h: 100000, status: "available" },
@@ -206,15 +187,16 @@ const DEEPSEEK_OFFICIAL_PROFILE = {
   tokenEnvName: "DEEPSEEK_API_KEY",
 
   blockedToolTypes: new Set([]),
+  // The official API accepts every Codex local tool as type "function", so show all.
+  showAllTools: true,
   compactCompletedToolHistory: true,
   canonicalizeCallIds: true,
   stripSyntheticReasoningPlaceholder: true,
   harnessTools: {
     webSearch: HARNESS_WEB_SEARCH_TOOL,
     vision: HARNESS_VISION_TOOL,
-    toolSearch: HARNESS_TOOL_SEARCH,
   },
-  harnessToolNames: new Set(["harness_web_search", "harness_vision_inspect", "harness_tool_search"]),
+  harnessToolNames: new Set(["harness_web_search", "harness_vision_inspect"]),
   // Verified live (2026-08-04) against the real Codex tool set: the official Responses
   // API accepts every Codex local tool as long as it is declared type "function"
   // (shell_command, update_plan, mcp resources, request_user_input, view_image) and
@@ -234,7 +216,6 @@ const DEEPSEEK_OFFICIAL_PROFILE = {
     "harness_web_search",
     "harness_vision_inspect",
   ]),
-  checkerEnabled: true,
   availableModels: [
     { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash", endpoint: "responses", supportsVision: false, status: "available" },
     { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro", endpoint: "responses", supportsVision: false, status: "available" },
@@ -290,4 +271,4 @@ export function tokenFor(config, model) {
   return config?.tokens?.[provider] || config?.goToken || "";
 }
 
-export { OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE, HARNESS_WEB_SEARCH_TOOL, HARNESS_VISION_TOOL, HARNESS_TOOL_SEARCH };
+export { OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE, HARNESS_WEB_SEARCH_TOOL, HARNESS_VISION_TOOL };
