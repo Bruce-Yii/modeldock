@@ -135,7 +135,6 @@ const OPENCODE_GO_PROFILE = {
     "list_mcp_resource_templates",
     "read_mcp_resource",
     "request_user_input",
-    "view_image",
     "harness_web_search",
     "harness_vision_inspect",
   ]),
