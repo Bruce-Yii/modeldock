@@ -992,6 +992,44 @@ function serveModels(req, res, { config, modelSelection }) {
   return res.json(codexModelCatalog(config));
 }
 
+const VISION_MODEL_HINTS = ["luna", "omni", "vision", "vl"];
+
+function labelForModelId(id) {
+  return id
+    .split(/[-_]/)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function guessSupportsVision(id) {
+  const lower = id.toLowerCase();
+  return VISION_MODEL_HINTS.some((hint) => lower.includes(hint));
+}
+
+async function refreshProfileModels(profile, config) {
+  if (!profile || profile.id !== "opencode-go" || !config.goToken) return;
+  if (!config.goBaseUrl.includes("opencode.ai")) return;
+  try {
+    const response = await fetch(`${config.goBaseUrl.replace(/\/$/, "")}/models`, {
+      headers: { Authorization: `Bearer ${config.goToken}` },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!response.ok) return;
+    const parsed = await response.json();
+    const ids = Array.isArray(parsed?.data) ? parsed.data.map((entry) => entry?.id).filter((id) => typeof id === "string" && id) : [];
+    if (!ids.length) return;
+    const knownVision = new Set((profile.availableModels || []).filter((model) => model.supportsVision).map((model) => model.id));
+    profile.availableModels = ids.map((id) => ({
+      id,
+      label: labelForModelId(id),
+      supportsVision: knownVision.has(id) || guessSupportsVision(id),
+    }));
+    console.log(`[gate] refreshed opencode-go model catalog: ${ids.length} models`);
+  } catch (error) {
+    console.log(`[gate] model catalog refresh failed: ${error.message}`);
+  }
+}
+
 export function createServices(config = loadConfig()) {
   const mutableConfig = { ...config };
   const metrics = new Metrics({ recentLimit: mutableConfig.recentLimit });
@@ -1011,6 +1049,7 @@ export function createServices(config = loadConfig()) {
   const messaging = { mode: mutableConfig.messagingMode === "buffered" ? "buffered" : "streaming" };
   const toolDisclosure = new Map();
   const runtime = { profile: mutableConfig.profile, profileId: mutableConfig.profileId };
+  refreshProfileModels(mutableConfig.profile, mutableConfig).catch(() => {});
   return { config: mutableConfig, runtime, metrics, mediaStore, upstreams, configSwitcher, routeAffinity, messaging, modelSelection, toolDisclosure };
 }
 
