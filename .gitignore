@@ -6,3 +6,6 @@ coverage/
 
 # Generated shortcut (machine-local, absolute path)
 ModelDock.lnk
+
+# Dashboard screenshots (generated, not source)
+test/dashboard*.png

@@ -25,7 +25,7 @@ test("filters Codex hosted tools and normalizes required tool choice", () => {
   assert.equal(result.payload.model, "deepseek-v4-flash");
   assert.equal(result.payload.tool_choice, "auto");
   assert.equal(result.payload.parallel_tool_calls, false);
-  assert.deepEqual(result.payload.tools.map((tool) => tool.name), ["shell_command", "harness_tool_search", "harness_web_search"]);
+  assert.deepEqual(result.payload.tools.map((tool) => tool.name), ["shell_command", "harness_tool_search", "harness_web_search", "harness_vision_inspect"]);
   assert.equal(result.payload.input[0].content[0].text, "hello");
   assert.deepEqual(result.report.blocked, { tool_search: 1, web_search: 1 });
 });

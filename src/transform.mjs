@@ -387,7 +387,7 @@ function currentTurnStart(input) {
   return lastAssistant + 1;
 }
 
-function rewriteImages(input, mediaStore, imageRefs, currentImageRefs) {
+function rewriteImages(input, mediaStore, imageRefs, currentImageRefs, { keepCurrentImages = false } = {}) {
   if (!Array.isArray(input)) return input;
   const turnStart = currentTurnStart(input);
   return input.map((item, index) => {
@@ -399,6 +399,7 @@ function rewriteImages(input, mediaStore, imageRefs, currentImageRefs) {
       imageRefs.push(ref);
       const current = index >= turnStart;
       if (current) currentImageRefs.push(ref);
+      if (current && keepCurrentImages) return part;
       return {
         type: "input_text",
         text: current
@@ -448,14 +449,17 @@ export function transformResponsesRequest(source, { mediaStore, defaultModel, ta
 
   const imageRefs = [];
   const currentImageRefs = [];
-  const rewrittenInput = rewriteImages(normalizeInput(payload.input), mediaStore, imageRefs, currentImageRefs);
+  const rewrittenInput = rewriteImages(normalizeInput(payload.input), mediaStore, imageRefs, currentImageRefs, { keepCurrentImages: directVision });
   const injectedHarnessTools = [];
   if (webSearchTool && (blocked.tool_search > 0 || blocked.web_search > 0)) {
     if (!Array.isArray(payload.tools)) payload.tools = [];
     payload.tools.push(structuredClone(webSearchTool));
     injectedHarnessTools.push(webSearchTool.name);
   }
-  if (visionTool && currentImageRefs.length > 0) {
+  // Resident on the main-model (DeepSeek) path so it can always request a Luna observation
+  // (of a captured screenshot or a historical image). On the direct-vision route Luna sees
+  // the real image itself (see rewriteImages keepCurrentImages), so it needs no such tool.
+  if (visionTool && !directVision && !payload.tools?.some((tool) => tool?.name === visionTool.name)) {
     if (!Array.isArray(payload.tools)) payload.tools = [];
     payload.tools.push(structuredClone(visionTool));
     injectedHarnessTools.push(visionTool.name);
@@ -479,9 +483,8 @@ export function transformResponsesRequest(source, { mediaStore, defaultModel, ta
   if (directVision) {
     const routeInstruction = [
       "ModelDock visual route: you are the active vision-capable model for this complete turn.",
-      "Inspect attached images directly and use the normal Codex tools when useful.",
-      "Do not call harness_vision_inspect; it is reserved for the text-only main model.",
-      "Return visual conclusions in your assistant response so the next main-model turn receives them in conversation history.",
+      "The user's image is attached directly to this turn; inspect it and use the normal Codex tools when useful.",
+      "Return your visual conclusions in your assistant response so the next main-model turn receives them in conversation history.",
     ].join(" ");
     payload.instructions = [payload.instructions, routeInstruction].filter((value) => typeof value === "string" && value.trim()).join("\n\n");
   }
