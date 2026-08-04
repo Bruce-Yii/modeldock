@@ -48,8 +48,9 @@ export function createMcpNodeHandler({ upstreams, onError = () => {} }) {
           description:
             "Inspect an image attachment referenced by image_ref. Use this before making claims about screenshots, OCR, UI layout, charts, or image comparisons.",
           inputSchema: z.object({
-            image_ref: z.string().startsWith("img_").describe("Image reference inserted into the conversation by the Responses gate"),
+            image_ref: z.string().startsWith("img_").optional().describe("Image reference inserted into the conversation by the Responses gate"),
             compare_image_ref: z.string().startsWith("img_").optional().describe("Optional second image for compare mode"),
+            path: z.string().min(1).optional().describe("Absolute local file path of a screenshot to inspect"),
             question: z.string().min(1).describe("What to inspect or extract"),
             mode: z.enum(["general", "ocr", "ui", "chart", "compare"]).optional(),
           }),

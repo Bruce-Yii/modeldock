@@ -1042,7 +1042,7 @@ function labelForModelId(id) {
 }
 
 function modelEndpoint(modelId) {
-  if (["gpt-5.6-luna", "grok-4.5"].includes(modelId)) return "responses";
+  if (["gpt-5.6-luna", "grok-4.5", "deepseek-v4-flash", "deepseek-v4-pro", "deepseek-v4-flash-free"].includes(modelId)) return "responses";
   return "chat";
 }
 

@@ -126,13 +126,46 @@ export function createUpstreams({ config, metrics, mediaStore, getVisionModel = 
     return { answer, responseId: parsed.id, usage: parsed.usage };
   }
 
-  async function inspectVision({ image_ref, compare_image_ref, question, mode = "general" }) {
-    const refs = [image_ref, compare_image_ref].filter(Boolean);
-    const images = refs.map((ref) => {
-      const item = mediaStore.get(ref);
-      if (!item) throw new Error(`Unknown or expired image_ref: ${ref}`);
-      return item;
-    });
+  async function inspectVision({ image_ref, compare_image_ref, path, question, mode = "general" }) {
+    const { readFileSync, existsSync, statSync } = await import("node:fs");
+    const { extname, resolve, isAbsolute } = await import("node:path");
+
+    const loaded = [];
+    const refs = [];
+    const pushRef = (ref) => { if (ref) { refs.push(ref); return ref; } return null; };
+    const loadPath = (filePath, label) => {
+      if (!filePath) return null;
+      const absolute = isAbsolute(filePath) ? filePath : resolve(filePath);
+      if (!existsSync(absolute)) throw new Error(`Image path not found: ${absolute}`);
+      const stat = statSync(absolute);
+      if (!stat.isFile()) throw new Error(`Image path is not a file: ${absolute}`);
+      const ext = extname(absolute).toLowerCase();
+      const mime = ext === ".jpg" || ext === ".jpeg" ? "image/jpeg" : ext === ".png" ? "image/png" : ext === ".gif" ? "image/gif" : ext === ".webp" ? "image/webp" : ext === ".bmp" ? "image/bmp" : "image/png";
+      const bytes = readFileSync(absolute);
+      if (bytes.byteLength > mediaStore.maxBytes) throw new Error(`Image exceeds the ${mediaStore.maxBytes}-byte limit: ${absolute}`);
+      return `data:${mime};base64,${bytes.toString("base64")}`;
+    };
+
+    if (path) {
+      const dataUrl = loadPath(path, "path");
+      const ref = pushRef(mediaStore.put(dataUrl));
+      loaded.push({ ref, imageUrl: dataUrl });
+    }
+    if (image_ref) {
+      pushRef(image_ref);
+      const item = mediaStore.get(image_ref);
+      if (!item) throw new Error(`Unknown or expired image_ref: ${image_ref}`);
+      loaded.push(item);
+    }
+    if (compare_image_ref) {
+      pushRef(compare_image_ref);
+      const item = mediaStore.get(compare_image_ref);
+      if (!item) throw new Error(`Unknown or expired image_ref: ${compare_image_ref}`);
+      loaded.push(item);
+    }
+    if (!loaded.length) throw new Error("harness_vision_inspect requires path, image_ref, or compare_image_ref");
+
+    const images = loaded;
     const finish = metrics.begin("vision", { operation: "vision_inspect", mode, imageRefs: refs });
     const prompt = [
       `Vision task mode: ${mode}.`,

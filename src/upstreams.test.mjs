@@ -152,3 +152,75 @@ test("searchWeb surfaces upstream errors and redacts bearer tokens", async () =>
     globalThis.fetch = originalFetch;
   }
 });
+
+test("inspectVision reads a local path, registers it, and calls the vision model", async (t) => {
+  const { writeFileSync, mkdtempSync, rmSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { tmpdir } = await import("node:os");
+  const dir = mkdtempSync(join(tmpdir(), "modeldock-vision-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const pngPath = join(dir, "shot.png");
+  const pngBytes = Buffer.from("89504e470d0a1a0a", "hex");
+  writeFileSync(pngPath, pngBytes);
+
+  let sentBody = null;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    assert.match(String(url), /\/chat\/completions$/);
+    sentBody = JSON.parse(options.body);
+    return new Response(JSON.stringify({ id: "resp_v", choices: [{ message: { role: "assistant", content: "It shows a red chart." } }] }), { status: 200 });
+  };
+
+  const MediaStore = (await import("./media-store.mjs")).MediaStore;
+  const store = new MediaStore({ ttlMs: 60_000, maxBytes: 10 * 1024 * 1024, maxEntries: 8 });
+  const upstreams = createUpstreams({
+    config: {
+      exaMcpUrl: "https://mcp.exa.ai/mcp",
+      exaApiKey: "",
+      goToken: "t",
+      goBaseUrl: "https://go.example.com/v1",
+      visionTimeoutMs: 90_000,
+      visionModel: "mimo-v2.5-free",
+      visionFallbackModel: "minimax-m3",
+    },
+    metrics: new (await import("./metrics.mjs")).Metrics({ recentLimit: 10 }),
+    mediaStore: store,
+  });
+  try {
+    const result = await upstreams.inspectVision({ path: pngPath, question: "What does it show?", mode: "chart" });
+    assert.equal(result.answer, "It shows a red chart.");
+    assert.equal(result.imageRefs.length, 1);
+    assert.match(result.imageRefs[0], /^img_/);
+    assert.equal(store.get(result.imageRefs[0]).mime, "image/png");
+    assert.equal(sentBody.model, "mimo-v2.5-free");
+    assert.match(sentBody.messages[0].content[1].image_url.url, /^data:image\/png;base64,/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("inspectVision rejects a missing path and a missing ref", async (t) => {
+  const { mkdtempSync, rmSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { tmpdir } = await import("node:os");
+  const dir = mkdtempSync(join(tmpdir(), "modeldock-vision-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const MediaStore = (await import("./media-store.mjs")).MediaStore;
+  const store = new MediaStore({ ttlMs: 60_000, maxBytes: 10 * 1024 * 1024, maxEntries: 8 });
+  const upstreams = createUpstreams({
+    config: {
+      exaMcpUrl: "https://mcp.exa.ai/mcp",
+      exaApiKey: "",
+      goToken: "t",
+      goBaseUrl: "https://go.example.com/v1",
+      visionTimeoutMs: 90_000,
+      visionModel: "mimo-v2.5-free",
+      visionFallbackModel: "minimax-m3",
+    },
+    metrics: new (await import("./metrics.mjs")).Metrics({ recentLimit: 10 }),
+    mediaStore: store,
+  });
+  await assert.rejects(() => upstreams.inspectVision({ path: join(dir, "nope.png"), question: "q" }), /Image path not found/);
+  await assert.rejects(() => upstreams.inspectVision({ question: "q" }), /requires path, image_ref, or compare_image_ref/);
+  await assert.rejects(() => upstreams.inspectVision({ image_ref: "img_missing", question: "q" }), /Unknown or expired image_ref/);
+});
