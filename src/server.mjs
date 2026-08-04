@@ -1041,9 +1041,12 @@ function labelForModelId(id) {
     .join(" ");
 }
 
+// Endpoint capability from live probing (2026-08-04): most models accept BOTH responses and
+// chat/completions; minimax-m2.5/m3 and qwen* only accept chat (responses returns 401);
+// grok-4.5 only accepts responses (chat returns 500). Prefer responses (native Codex dialect).
 function modelEndpoint(modelId) {
-  if (["gpt-5.6-luna", "grok-4.5", "deepseek-v4-flash", "deepseek-v4-pro", "deepseek-v4-flash-free"].includes(modelId)) return "responses";
-  return "chat";
+  if (/^(minimax-m2\.5|minimax-m3|qwen)/.test(modelId)) return "chat";
+  return "responses";
 }
 
 let VISION_PROBE_IMAGE = null;

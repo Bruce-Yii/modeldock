@@ -81,12 +81,12 @@ export function createUpstreams({ config, metrics, mediaStore, getVisionModel = 
     }
   }
 
-  const RESPONSES_MODELS = new Set(["gpt-5.6-luna", "grok-4.5"]);
+  const RESPONSES_MODELS = new Set(["gpt-5.6-luna", "grok-4.5", "mimo-v2.5", "kimi-k2.5", "kimi-k2.6", "kimi-k2.7-code"]);
   const ZEN_FREE_BASE = "https://opencode.ai/zen/v1/chat/completions";
 
   function visionEndpointFor(model) {
-    if (RESPONSES_MODELS.has(model)) return { url: upstreamUrl(config.goBaseUrl, "responses"), style: "responses" };
     if (model.endsWith("-free") || model === "big-pickle") return { url: ZEN_FREE_BASE, style: "chat" };
+    if (RESPONSES_MODELS.has(model)) return { url: upstreamUrl(config.goBaseUrl, "responses"), style: "responses" };
     return { url: upstreamUrl(config.goBaseUrl, "chat/completions"), style: "chat" };
   }
 
