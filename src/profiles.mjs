@@ -141,6 +141,7 @@ const OPENCODE_GO_PROFILE = {
   checkerEnabled: true,
   availableModels: [
     { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash", endpoint: "chat", supportsVision: false, status: "available" },
+    { id: "deepseek-v4-flash-free", label: "DeepSeek V4 Flash Free", endpoint: "responses", free: true, supportsVision: false, quota5h: 100000, status: "available" },
     { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro", endpoint: "chat", supportsVision: false, status: "available" },
     { id: "glm-5", label: "GLM 5", endpoint: "chat", supportsVision: false, status: "available" },
     { id: "glm-5.1", label: "GLM 5.1", endpoint: "chat", supportsVision: false, status: "available" },

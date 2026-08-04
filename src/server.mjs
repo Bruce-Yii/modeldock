@@ -244,8 +244,15 @@ function toolCatalogText(flat) {
     .join("\n");
 }
 
+const ZEN_FREE_BASE = "https://opencode.ai/zen/v1";
+
+function upstreamBaseForModel(config, model) {
+  if (model && (model.endsWith("-free") || model === "big-pickle")) return ZEN_FREE_BASE;
+  return config.goBaseUrl.replace(/\/$/, "");
+}
+
 function coordinatorFetch(config, purpose, input, maxTokens = 256) {
-  return fetch(goUrl(config, "responses"), {
+  return fetch(`${upstreamBaseForModel(config, config.mainModel)}/responses`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${config.goToken}`,
@@ -565,7 +572,7 @@ async function runHarnessToolLoop(initialResponse, initialPayload, services, sig
     }
     rounds += 1;
     payload = { ...payload, input: [...(payload.input || []), ...resultMessages], stream: false };
-    upstream = await fetch(goUrl(services.config, "responses"), {
+    upstream = await fetch(`${upstreamBaseForModel(services.config, payload.model || services.config.mainModel)}/responses`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${services.config.goToken}`,
@@ -592,7 +599,7 @@ function debugLog(services, message) {
 
 async function fetchGoResponses(payload, services, signal, accept = "application/json") {
   debugLog(services, `go request max_output_tokens=${payload.max_output_tokens ?? "unset"} inputItems=${Array.isArray(payload.input) ? payload.input.length : typeof payload.input} reasoning=${JSON.stringify(payload.reasoning ?? null)}`);
-  return fetch(goUrl(services.config, "responses"), {
+  return fetch(`${upstreamBaseForModel(services.config, payload.model || services.config.mainModel)}/responses`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${services.config.goToken}`,
@@ -899,7 +906,7 @@ async function relayResponses(req, res, services) {
   let upstream;
   const upstreamPayload = transformed.payload;
   try {
-    upstream = await fetch(goUrl(config, "responses"), {
+    upstream = await fetch(`${upstreamBaseForModel(config, upstreamPayload.model || config.mainModel)}/responses`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${config.goToken}`,
@@ -1271,12 +1278,9 @@ async function refreshProfileModels(profile, config) {
     if (!fetchedIds.length) return;
     const existing = profile.availableModels || [];
     const existingById = new Map(existing.map((model) => [model.id, model]));
-    const existingOrder = new Map(existing.map((model, index) => [model.id, index]));
-    const known = fetchedIds.filter((id) => existingById.has(id)).sort((a, b) => existingOrder.get(a) - existingOrder.get(b));
     const unknown = fetchedIds.filter((id) => !existingById.has(id)).sort((a, b) => a.localeCompare(b));
     const models = [
-      ...known.map((id) => existingById.get(id)),
-      ...existing.filter((model) => !fetchedIds.includes(model.id)),
+      ...existing,
       ...unknown.map((id) => ({
         id,
         label: labelForModelId(id),
