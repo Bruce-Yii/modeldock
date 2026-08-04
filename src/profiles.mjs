@@ -119,10 +119,6 @@ const OPENCODE_GO_PROFILE = {
   tokenEnvName: "OPENCODE_GO_TOKEN",
 
   blockedToolTypes: new Set(["tool_search", "web_search"]),
-  // Preserve tool history as Chat-dialect assistant.tool_calls + role:tool messages (which the
-  // Go upstream accepts) instead of flattening to user receipts, which made the model drop tool
-  // calls. compactCompletedToolHistory is ignored while toolHistoryDialect is "chat".
-  toolHistoryDialect: "chat",
   compactCompletedToolHistory: true,
   canonicalizeCallIds: true,
   stripSyntheticReasoningPlaceholder: true,
@@ -143,11 +139,8 @@ const OPENCODE_GO_PROFILE = {
     "harness_web_search",
     "harness_vision_inspect",
   ]),
-  // Temporarily disabled: the completion checker (and its loop-breaker safety net) was a
-  // band-aid for the model dropping tool calls, which was really caused by flattening tool
-  // history to user receipts. Now that toolHistoryDialect:"chat" preserves the native tool
-  // structure, the checker should be unnecessary. Leave it off through validation; if the
-  // drop-tool-call loops stay gone, remove the checker + loop-breaker entirely.
+  // Disabled: with receipt-flattened tool history the model occasionally drops a tool call.
+  // We accept that over the completion checker, whose nudge loop could spin (see loop-breaker).
   checkerEnabled: false,
   availableModels: [
     { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash", endpoint: "responses", supportsVision: false, status: "available" },

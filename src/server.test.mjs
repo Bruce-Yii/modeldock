@@ -330,7 +330,7 @@ test("second-turn Codex assistant arrays are stringified for strict Console Go",
   assert.equal(trace.inputShape.find((item) => item.role === "assistant").contentKind, "string");
 });
 
-test("renders completed Codex tool history as Chat-dialect tool calls for Go", async (t) => {
+test("compresses completed Codex tool history to ordered receipts for Go", async (t) => {
   let received;
   const upstream = createServer(async (req, res) => {
     received = await jsonBody(req);
@@ -365,24 +365,20 @@ test("renders completed Codex tool history as Chat-dialect tool calls for Go", a
   const sse = await response.text();
   assert.equal(response.status, 200);
   assert.match(sse, /HISTORY_OK/);
-  // No native Responses tool items and no user "receipt" text — the Go upstream rejects the
-  // former and the latter is what made the model drop tool calls.
-  assert.equal(received.input.some((item) => item.type === "function_call" || item.type === "function_call_output"), false);
-  assert.equal(received.input.some((item) => item.role === "user" && JSON.stringify(item.content || "").includes("tool_output_begin")), false);
-  // Each call becomes an assistant.tool_calls carrier immediately followed by its role:tool response.
-  const toolCallMsgs = received.input.filter((item) => Array.isArray(item.tool_calls));
-  assert.deepEqual(toolCallMsgs.flatMap((m) => m.tool_calls.map((t) => t.id)), ["call_1", "call_2"]);
-  for (const m of toolCallMsgs) {
-    const idx = received.input.indexOf(m);
-    assert.equal(received.input[idx + 1].role, "tool", "assistant.tool_calls must be immediately followed by a tool response");
-  }
-  const toolMsgs = received.input.filter((item) => item.role === "tool");
-  assert.deepEqual(toolMsgs.map((t) => t.tool_call_id), ["call_1", "call_2"]);
-  assert.deepEqual(toolMsgs.map((t) => t.content), ["first result", "second result"]);
+  assert.deepEqual(received.input.map((item) => item.role || item.type), [
+    "user", "user", "assistant", "user", "user",
+  ]);
+  assert.equal(received.input.some((item) => Array.isArray(item.tool_calls)), false);
+  assert.deepEqual(received.input.filter((item) => item.role === "user").map((item) => item.content?.[0]?.text).filter((text) => text?.includes("tool_output_begin")), [
+    received.input[1].content[0].text,
+    received.input[3].content[0].text,
+  ]);
   const trace = instance.services.metrics.recent.find((item) => item.kind === "responses");
   assert.equal(trace.nativeToolCalls, 0);
   assert.equal(trace.nativeToolOutputs, 0);
   assert.equal(trace.compactedToolResults, 2);
+  assert.equal(trace.fallbackToolResults, 0);
+  assert.equal(trace.droppedAssistantMessages, 1);
 });
 
 test("streaming relay emits the first delta before upstream completion", async (t) => {
