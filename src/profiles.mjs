@@ -36,7 +36,17 @@ const AUTO_COMPACT_TOKEN_LIMIT = Math.floor(CONTEXT_WINDOW * AUTO_COMPACT_PERCEN
 
 export { CONTEXT_WINDOW, AUTO_COMPACT_PERCENT, AUTO_COMPACT_TOKEN_LIMIT };
 
-function modelCatalogDefaults({ mainModel, displayName, description, compHash, inputModalities, supportsSearchTool, baseInstructions }) {
+const DEEPSEEK_REASONING_LEVELS = [
+  { effort: "none", description: "No reasoning; direct responses only" },
+  { effort: "minimal", description: "Barely any reasoning; fastest replies" },
+  { effort: "low", description: "Fast responses with lighter reasoning" },
+  { effort: "medium", description: "Balanced reasoning for typical work" },
+  { effort: "high", description: "Deeper reasoning for complex work" },
+  { effort: "xhigh", description: "Extra-deep reasoning for hard problems" },
+  { effort: "max", description: "Maximum reasoning depth" },
+];
+
+function modelCatalogDefaults({ mainModel, displayName, description, compHash, inputModalities, supportsSearchTool, baseInstructions, defaultReasoningLevel = "high", supportedReasoningLevels = [ { effort: "low", description: "Fast responses with lighter reasoning" }, { effort: "high", description: "Deeper reasoning for complex work" }, { effort: "max", description: "Maximum reasoning depth" } ] }) {
   return {
     models: [
       {
@@ -64,12 +74,8 @@ function modelCatalogDefaults({ mainModel, displayName, description, compHash, i
         comp_hash: compHash,
         reasoning_summary_format: "experimental",
         default_reasoning_summary: "none",
-        default_reasoning_level: "high",
-        supported_reasoning_levels: [
-          { effort: "low", description: "Fast responses with lighter reasoning" },
-          { effort: "high", description: "Deeper reasoning for complex work" },
-          { effort: "max", description: "Maximum reasoning depth" },
-        ],
+        default_reasoning_level: defaultReasoningLevel,
+        supported_reasoning_levels: supportedReasoningLevels,
         shell_type: "shell_command",
         visibility: "list",
         minimal_client_version: "0.144.0",
@@ -198,7 +204,7 @@ const DEEPSEEK_OFFICIAL_PROFILE = {
   baseUrl: "https://api.deepseek.com",
   tokenEnvName: "DEEPSEEK_API_KEY",
 
-  blockedToolTypes: new Set(["tool_search", "web_search"]),
+  blockedToolTypes: new Set([]),
   compactCompletedToolHistory: true,
   canonicalizeCallIds: true,
   stripSyntheticReasoningPlaceholder: true,
@@ -208,20 +214,19 @@ const DEEPSEEK_OFFICIAL_PROFILE = {
     toolSearch: HARNESS_TOOL_SEARCH,
   },
   harnessToolNames: new Set(["harness_web_search", "harness_vision_inspect", "harness_tool_search"]),
+  // Verified live (2026-08-04): the DeepSeek Responses API rejects every custom tool
+  // except apply_patch ("Unsupported custom tool: 'shell_command'. Only 'apply_patch' is
+  // supported."), and natively supports the hosted web_search schema (echoed in the
+  // response tools list). tool_search is silently ignored. So: no hosted schemas are
+  // blocked, and the allowlist only constrains named Codex tools.
   coreTools: new Set([
-    "shell_command",
     "apply_patch",
-    "update_plan",
-    "list_mcp_resources",
-    "list_mcp_resource_templates",
-    "read_mcp_resource",
-    "request_user_input",
-    "harness_web_search",
     "harness_vision_inspect",
   ]),
   checkerEnabled: true,
   availableModels: [
-    { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash (Official)", supportsVision: false },
+    { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash", endpoint: "responses", supportsVision: false, status: "available" },
+    { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro", endpoint: "responses", supportsVision: false, status: "available" },
   ],
 
   modelCatalog({ mainModel, baseInstructions }) {
@@ -232,6 +237,11 @@ const DEEPSEEK_OFFICIAL_PROFILE = {
       compHash: "modeldock-deepseek-official-v1",
       inputModalities: ["text"],
       supportsSearchTool: false,
+      // Verified live (2026-08-04): the official API accepts reasoning effort in
+      // { none, minimal, low, medium, high, xhigh, max } with thinking on by default
+      // (effort null). The Go camp's low/high/max triple does not fit it.
+      defaultReasoningLevel: "medium",
+      supportedReasoningLevels: DEEPSEEK_REASONING_LEVELS,
       baseInstructions,
     });
   },

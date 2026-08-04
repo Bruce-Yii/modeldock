@@ -5,7 +5,7 @@ ModelDock is, how a request flows through the system, what each module owns, and
 pieces are wired together the way they are. It complements the user-facing README, which
 exists only for installing and running ModelDock.
 
-> **Verified against:** commit `852d00a` (2026-08-03), `npm test` = 162 passing.
+> **Verified against:** commit `852d00a` + uncommitted cross-provider routing work, `npm test` = 166 passing.
 > When you change routing, transform, profiles, or endpoints, re-verify the affected
 > section and bump this line. The codebase moves faster than prose — an unverified
 > architecture doc is worse than none.
@@ -44,6 +44,7 @@ Codex ──POST /v1/responses──> ModelDock gate (Express, loopback only)
                                   ├─ transform.mjs     normalize payload
                                   │
                                   ├─ upstreamBaseForModel: pick camp by model id
+                                  │    deepseek-official → api.deepseek.com (responses)
                                   │    paid / console-go  → …/zen/go/v1
                                   │    free (*-free, big-pickle) → …/zen/v1
                                   ▼
@@ -67,7 +68,7 @@ Codex ──POST /v1/responses──> ModelDock gate (Express, loopback only)
 | `src/server.mjs` | Express app, entry point, request relay, harness tool loop, completion checker, coordinator calls, model catalog refresh + vision probing/evaluation, endpoint wiring |
 | `src/router.mjs` | Decide which model a request should hit; `RouteAffinity` pins follow-up tool turns to the model that started them |
 | `src/transform.mjs` | Normalize a Responses request: block hosted tools, rewrite images (keep them on the direct-vision route), inject harness tools, canonicalize tool history |
-| `src/profiles.mjs` | Provider profiles (opencode-go, deepseek-official); controls which tools are blocked/forwarded, the curated `availableModels` catalog, checker toggle |
+| `src/profiles.mjs` | Provider profiles (opencode-go, deepseek-official); controls which tools are blocked/forwarded, the curated `availableModels` catalog, checker toggle; `providerForModel`/`tokenFor` resolve per-model provider and token |
 | `src/upstreams.mjs` | Outbound client helpers: Exa web search (MCP), vision inspect with per-model endpoint/style routing |
 | `src/live-responses.mjs` | Streaming relay path: `LiveResponsesWriter` + SSE parser |
 | `src/responses-sse.mjs` | Buffered relay path: adapt an upstream JSON response to a single SSE document |
@@ -210,13 +211,26 @@ Profiles encode provider-specific behavior; the active one is selected by
 
 | Setting | opencode-go | deepseek-official |
 | --- | --- | --- |
-| Provider endpoint | `https://opencode.ai/zen/go/v1` (+ `zen/v1` for free models) | `https://api.deepseek.com/responses` |
-| Blocked hosted tools | `tool_search`, `web_search` | none |
-| Tool allowlist (`coreTools`) | shell_command, apply_patch, update_plan, list_mcp_resources, list_mcp_resource_templates, read_mcp_resource, request_user_input, harness_web_search, harness_vision_inspect | (no allowlist → forward all) |
-| Harness tools | web_search, vision, tool_search | none |
-| Compaction / normalization | compact completed history; canonicalize call IDs; strip synthetic reasoning placeholder | disabled |
-| `checkerEnabled` | true | false |
+| Provider endpoint | `https://opencode.ai/zen/go/v1` (+ `zen/v1` for free models) | `https://api.deepseek.com` (Responses wire) |
+| Blocked hosted tools | `tool_search`, `web_search` | none (web_search native, tool_search ignored) |
+| Tool allowlist (`coreTools`) | shell_command, apply_patch, update_plan, list_mcp_resources, list_mcp_resource_templates, read_mcp_resource, request_user_input, harness_web_search, harness_vision_inspect | apply_patch, harness_vision_inspect |
+| Harness tools | web_search, vision, tool_search | vision, tool_search (web_search native on the provider) |
+| Reasoning (catalog) | default `high`; `low/high/max` | default `medium`; `none/minimal/low/medium/high/xhigh/max`, forwarded untouched |
+| Compaction / normalization | compact completed history; canonicalize call IDs; strip synthetic reasoning placeholder | compact completed history; canonicalize call IDs; strip synthetic reasoning placeholder |
+| `checkerEnabled` | true | true |
 | Input modalities | text + image | text only |
+
+> **Why DeepSeek's allowlist is narrower:** verified live (2026-08-04), the DeepSeek
+> Responses API rejects every custom tool except `apply_patch` (`Unsupported custom tool:
+> 'shell_command'. Only 'apply_patch' is supported.`), so the deepseek profile filters
+> Codex's other local tools out of the payload — nameless hosted schemas (web_search,
+> tool_search) pass through untouched. `web_search` is natively supported (echoed in the
+> response tools list); `tool_search` is silently ignored. Vision and tool-search harness
+> tools stay resident and execute through the OpenCode Go camp, so a DeepSeek main model
+> keeps the same dashboard experience — only shell/MCP execution moves to the Go profile.
+> Reasoning effort is forwarded verbatim to the official API (thinking defaults on;
+> `none` disables it), while coordinator/checker calls pin `effort: "none"` so tiny
+> judgment calls do not burn their token budget on reasoning.
 
 The opencode-go profile also carries `availableModels`, a **curated seed catalog** (~27
 entries as of this writing) with per-model metadata: `endpoint` (responses|chat),
@@ -243,15 +257,25 @@ It then:
 Free models live on a different upstream base than paid ones, so every outbound call
 consults the model id:
 
-- `upstreamBaseForModel(config, model)` (server.mjs): `*-free` or `big-pickle` →
-  `https://opencode.ai/zen/v1`; anything else → `config.goBaseUrl` (`zen/go/v1`).
-- `visionEndpointFor(model)` (upstreams.mjs) picks the wire style: `gpt-5.6-luna` and
-  `grok-4.5` → Responses style on the go base; `*-free`/`big-pickle` → chat/completions on
-  the zen base; every other model → chat/completions on the go base.
+- `providerForModel(config, model)` (profiles.mjs) resolves which provider owns a model
+  id: the active profile's `availableModels` wins, then any profile's curated catalog.
+  This lets the **main model run on DeepSeek while vision runs on OpenCode Go**.
+- `tokenFor(config, model)` returns that provider's token from the `tokens` map
+  (`OPENCODE_GO_TOKEN` / `DEEPSEEK_API_KEY`, both loaded at startup).
+- `upstreamBaseForModel(config, model)` (server.mjs) picks the base URL:
+  `deepseek-official` → `config.deepseekBaseUrl` (default `https://api.deepseek.com`),
+  `*-free`/`big-pickle` → `https://opencode.ai/zen/v1`, everything else →
+  `config.goBaseUrl` (`zen/go/v1`).
+- `visionEndpointFor(model)` (upstreams.mjs) picks the wire style: DeepSeek models →
+  Responses style on the deepseek base; `gpt-5.6-luna`/`grok-4.5`/kimi/minimax → Responses
+  style on the go base; `*-free`/`big-pickle` → chat/completions on the zen base; every
+  other model → chat/completions on the go base.
 
-This is why `deepseek-v4-flash-free` (main model) and `mimo-v2.5-free` (top vision model)
-work without a paid balance: their requests go to the zen free camp, while the harness
-coordinator and checker calls follow the main model's camp.
+Every outbound request (relay, harness loop, coordinator/checker, vision inspect,
+vision probe) routes through these helpers, so each model hits its own provider's
+endpoint **with that provider's token**. This is why `deepseek-v4-flash` (main) can run
+on the DeepSeek API while `harness_vision_inspect` still observes images through
+OpenCode Go's free camp without a paid balance.
 
 ### Vision capability ranking (probe + eval bench)
 
@@ -376,8 +400,9 @@ at runtime).
 | Var | Default | Purpose |
 | --- | --- | --- |
 | `MODELDOCK_PROFILE` | `opencode-go` | Which profile drives tool policy + catalog |
-| `MODELDOCK_UPSTREAM_BASE_URL` | profile default | Override upstream base URL (`zen/go/v1`); zen-free camp is fixed |
-| `OPENCODE_GO_TOKEN` / `DEEPSEEK_API_KEY` | — | Upstream token (env or read from Codex config backup) |
+| `MODELDOCK_UPSTREAM_BASE_URL` | `https://opencode.ai/zen/go/v1` | Override the OpenCode Go camp base URL; zen-free camp is fixed |
+| `MODELDOCK_DEEPSEEK_BASE_URL` | `https://api.deepseek.com` | Override the DeepSeek camp base URL |
+| `OPENCODE_GO_TOKEN` / `DEEPSEEK_API_KEY` | — | Per-camp upstream tokens (env; the OpenCode Go token may also come from a Codex config backup) |
 | `MODELDOCK_MAIN_MODEL` | `deepseek-v4-flash` | Main model |
 | `MODELDOCK_VISION_MODEL` / `MODELDOCK_VISION_FALLBACK_MODEL` | `mimo-v2.5-free` / `minimax-m3` | Vision models (harness + router); default picked by balance ranking |
 | `MODELDOCK_MODEL_REFRESH_HOURS` | `24` | Catalog refresh interval (0 disables) |
@@ -387,8 +412,9 @@ at runtime).
 
 ## Tests
 
-Tests live in `src/*.test.mjs` and `test/`; `npm test` runs 162 tests, including the
-`loop-breaker` suite. Note that `src/profiles.test.mjs` is *not* referenced in the
+Tests live in `src/*.test.mjs` and `test/`; `npm test` runs 167 tests, including the
+`loop-breaker` suite and the cross-provider DeepSeek routing suite. Note that
+`src/profiles.test.mjs` is *not* referenced in the
 `npm test` script (dead), and `test/*.test.mjs` are older duplicates of some `src`
 suites — they still run and still pass, but when in doubt change the `src` version.
 

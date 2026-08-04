@@ -87,9 +87,18 @@ export function loadConfig() {
   const codexHome = path.resolve(process.env.MODELDOCK_CODEX_HOME || process.env.CODEX_HOME || path.join(os.homedir(), ".codex"));
   const profileId = (process.env.MODELDOCK_PROFILE || "opencode-go").trim().toLowerCase();
   const profile = profileById(profileId);
+  // Codex config backups only ever hold OpenCode Go bearer tokens; never reuse them for
+  // another provider (an opencode token sent to api.deepseek.com would be a leak).
   const discovered = process.env[profile.tokenEnvName]
     ? { token: process.env[profile.tokenEnvName], source: "environment" }
-    : discoverCodexGoToken(codexHome);
+    : (profileId === "opencode-go" ? discoverCodexGoToken(codexHome) : { token: "", source: "missing" });
+
+  const opencodeGoToken = process.env.OPENCODE_GO_TOKEN || discoverCodexGoToken(codexHome).token;
+  const deepseekToken = process.env.DEEPSEEK_API_KEY || "";
+  const tokens = {
+    "opencode-go": opencodeGoToken,
+    "deepseek-official": deepseekToken,
+  };
 
   const debug = {
     enabled: process.env.MODELDOCK_DEBUG === "1" || process.env.MODELDOCK_DEBUG === "true",
@@ -103,9 +112,14 @@ export function loadConfig() {
     profile,
     profileId: profile.id,
     debug,
-    goBaseUrl: normalizedBaseUrl(process.env.MODELDOCK_UPSTREAM_BASE_URL || profile.baseUrl),
+    // Per-camp base URLs: the OpenCode Go camp is profile-independent so a DeepSeek main
+    // model can still route its vision/web harness to the Go camp, and vice versa.
+    opencodeBaseUrl: normalizedBaseUrl(process.env.MODELDOCK_UPSTREAM_BASE_URL || "https://opencode.ai/zen/go/v1"),
+    goBaseUrl: normalizedBaseUrl(process.env.MODELDOCK_UPSTREAM_BASE_URL || "https://opencode.ai/zen/go/v1"),
+    deepseekBaseUrl: normalizedBaseUrl(process.env.MODELDOCK_DEEPSEEK_BASE_URL || "https://api.deepseek.com"),
     goToken: discovered.token,
     goTokenSource: discovered.source,
+    tokens,
     mainModel: process.env.MODELDOCK_MAIN_MODEL || "deepseek-v4-flash",
     visionModel: process.env.MODELDOCK_VISION_MODEL || "mimo-v2.5-free",
     visionFallbackModel: process.env.MODELDOCK_VISION_FALLBACK_MODEL || "minimax-m3",
@@ -127,6 +141,8 @@ export function publicConfig(config) {
     bind: `${config.host}:${config.port}`,
     profile: config.profileId,
     goBaseUrl: config.goBaseUrl,
+    opencodeBaseUrl: config.opencodeBaseUrl,
+    deepseekBaseUrl: config.deepseekBaseUrl,
     mainModel: config.mainModel,
     visionModel: config.visionModel,
     visionFallbackModel: config.visionFallbackModel,

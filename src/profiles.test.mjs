@@ -36,15 +36,21 @@ test("opencode-go profile keeps the Go-specific hardening flags", () => {
   assert.ok(OPENCODE_GO_PROFILE.harnessTools.vision, "vision harness tool defined");
 });
 
-test("deepseek-official profile is a passthrough provider without Go hardening", () => {
-  assert.equal(DEEPSEEK_OFFICIAL_PROFILE.blockedToolTypes.size, 0);
-  assert.equal(DEEPSEEK_OFFICIAL_PROFILE.compactCompletedToolHistory, false);
-  assert.equal(DEEPSEEK_OFFICIAL_PROFILE.stripSyntheticReasoningPlaceholder, false);
-  assert.equal(DEEPSEEK_OFFICIAL_PROFILE.harnessToolNames.size, 0);
-  assert.equal(DEEPSEEK_OFFICIAL_PROFILE.harnessTools.webSearch, null);
-  assert.equal(DEEPSEEK_OFFICIAL_PROFILE.harnessTools.vision, null);
-  assert.equal(DEEPSEEK_OFFICIAL_PROFILE.baseUrl, "https://api.deepseek.com/responses");
+test("deepseek-official profile routes the main model on DeepSeek with harness on the Go camp", () => {
+  assert.equal(DEEPSEEK_OFFICIAL_PROFILE.blockedToolTypes.has("tool_search"), true);
+  assert.equal(DEEPSEEK_OFFICIAL_PROFILE.blockedToolTypes.has("web_search"), true);
+  assert.equal(DEEPSEEK_OFFICIAL_PROFILE.compactCompletedToolHistory, true);
+  assert.equal(DEEPSEEK_OFFICIAL_PROFILE.stripSyntheticReasoningPlaceholder, true);
+  assert.equal(DEEPSEEK_OFFICIAL_PROFILE.harnessToolNames.has("harness_web_search"), true);
+  assert.equal(DEEPSEEK_OFFICIAL_PROFILE.harnessToolNames.has("harness_vision_inspect"), true);
+  assert.ok(DEEPSEEK_OFFICIAL_PROFILE.harnessTools.webSearch, "web search harness tool defined");
+  assert.ok(DEEPSEEK_OFFICIAL_PROFILE.harnessTools.vision, "vision harness tool defined");
+  assert.equal(DEEPSEEK_OFFICIAL_PROFILE.coreTools.has("apply_patch"), true, "apply_patch is the only Codex local tool DeepSeek accepts");
+  assert.equal(DEEPSEEK_OFFICIAL_PROFILE.coreTools.has("shell_command"), false, "shell_command is rejected by the DeepSeek Responses API");
+  assert.equal(DEEPSEEK_OFFICIAL_PROFILE.baseUrl, "https://api.deepseek.com");
   assert.equal(DEEPSEEK_OFFICIAL_PROFILE.tokenEnvName, "DEEPSEEK_API_KEY");
+  assert.deepEqual(DEEPSEEK_OFFICIAL_PROFILE.availableModels.map((model) => model.id), ["deepseek-v4-flash", "deepseek-v4-pro"]);
+  assert.equal(DEEPSEEK_OFFICIAL_PROFILE.availableModels.every((model) => model.endpoint === "responses"), true);
 });
 
 test("model catalog is generated per profile with distinct comp hashes", () => {
@@ -55,8 +61,16 @@ test("model catalog is generated per profile with distinct comp hashes", () => {
   assert.equal(goCatalog.models[0].slug, "deepseek-v4-flash");
   assert.equal(goCatalog.models[0].comp_hash, "modeldock-opencode-go-v1");
   assert.equal(goCatalog.models[0].supports_search_tool, true);
+  assert.equal(goCatalog.models[0].default_reasoning_level, "high");
+  assert.deepEqual(goCatalog.models[0].supported_reasoning_levels.map((level) => level.effort), ["low", "high", "max"]);
   assert.equal(officialCatalog.models[0].comp_hash, "modeldock-deepseek-official-v1");
   assert.equal(officialCatalog.models[0].supports_search_tool, false);
+  assert.equal(officialCatalog.models[0].default_reasoning_level, "medium", "DeepSeek official defaults to medium thinking");
+  assert.deepEqual(
+    officialCatalog.models[0].supported_reasoning_levels.map((level) => level.effort),
+    ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+    "DeepSeek official accepts its full reasoning effort ladder",
+  );
   assert.notEqual(goCatalog.models[0].comp_hash, officialCatalog.models[0].comp_hash);
 });
 

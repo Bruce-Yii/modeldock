@@ -984,13 +984,17 @@ test("deepseek-official forwards the reasoning effort untouched and pins coordin
   const received = [];
   const upstream = createServer(async (req, res) => {
     const body = await jsonBody(req);
-    received.push({ url: req.url, reasoning: body.reasoning, role: req.headers["x-modeldock-role"] || null });
-    res.setHeader("content-type", "application/json");
-    if (body.input && Array.isArray(body.input) && body.input.length > 0) {
-      res.end(JSON.stringify({ id: "resp_ds", output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "REASONING_OK" }] }], usage: {} }));
+    const role = req.headers["x-modeldock-role"] || null;
+    received.push({ url: req.url, reasoning: body.reasoning, role });
+    if (role === "coordinator") {
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ id: "resp_check", output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: '{"completed": true}' }] }], usage: {} }));
       return;
     }
-    res.end(JSON.stringify(okResponse));
+    res.setHeader("content-type", "text/event-stream");
+    sendSse(res, "response.output_text.delta", { id: "resp_ds", delta: "REASONING_OK", response: { id: "resp_ds", model: "deepseek-v4-flash" } });
+    sendSse(res, "response.completed", { id: "resp_ds", response: { id: "resp_ds", model: "deepseek-v4-flash", usage: { input_tokens: 1, output_tokens: 1 } } });
+    res.end("data: [DONE]\n\n");
   });
   const upstreamPort = await listen(upstream);
   t.after(() => upstream.close());
@@ -1009,9 +1013,10 @@ test("deepseek-official forwards the reasoning effort untouched and pins coordin
   const response = await fetch(`${instance.base}/v1/responses`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ input: "hello", stream: false, reasoning: { effort: "high" } }),
+    body: JSON.stringify({ input: "hello", stream: true, reasoning: { effort: "high" } }),
   });
   assert.equal(response.status, 200);
+  await response.text();
   assert.equal(received[0].reasoning?.effort, "high", "deepseek-official must forward the reasoning effort to the Responses API");
   const coordinator = received.find((entry) => entry.role === "coordinator");
   assert.equal(coordinator.reasoning?.effort, "none", "coordinator/checker calls disable thinking on deepseek-official");

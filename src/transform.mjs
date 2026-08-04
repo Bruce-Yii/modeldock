@@ -68,7 +68,9 @@ function selectForwardedTools(tools, { coreTools, toolSearchTool, disclosed }) {
       forwarded.push({ ...tool, tools: kept.map((child) => structuredClone(child)) });
       continue;
     }
-    if (coreTools.has(tool.name) || disclosed.has(tool.name)) forwarded.push(structuredClone(tool));
+    // Nameless type-level schemas (web_search, tool_search) are provider-native and are
+    // never constrained by the named-tool allowlist; they pass through untouched.
+    if (!tool.name || coreTools.has(tool.name) || disclosed.has(tool.name)) forwarded.push(structuredClone(tool));
   }
   if (toolSearchTool) forwarded.push(structuredClone(toolSearchTool));
   return forwarded;

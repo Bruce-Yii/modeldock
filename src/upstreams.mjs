@@ -1,3 +1,5 @@
+import { providerForModel, tokenFor, profileById } from "./profiles.mjs";
+
 function upstreamUrl(baseUrl, path) {
   return `${baseUrl.replace(/\/$/, "")}/${path.replace(/^\//, "")}`;
 }
@@ -85,13 +87,17 @@ export function createUpstreams({ config, metrics, mediaStore, getVisionModel = 
   const ZEN_FREE_BASE = "https://opencode.ai/zen/v1/chat/completions";
 
   function visionEndpointFor(model) {
+    const provider = providerForModel(config, model);
+    if (provider === "deepseek-official") return { url: upstreamUrl(config.deepseekBaseUrl || profileById("deepseek-official").baseUrl, "responses"), style: "responses" };
+    const opencodeBase = config.opencodeBaseUrl || config.goBaseUrl;
     if (model.endsWith("-free") || model === "big-pickle") return { url: ZEN_FREE_BASE, style: "chat" };
-    if (RESPONSES_MODELS.has(model)) return { url: upstreamUrl(config.goBaseUrl, "responses"), style: "responses" };
-    return { url: upstreamUrl(config.goBaseUrl, "chat/completions"), style: "chat" };
+    if (RESPONSES_MODELS.has(model)) return { url: upstreamUrl(opencodeBase, "responses"), style: "responses" };
+    return { url: upstreamUrl(opencodeBase, "chat/completions"), style: "chat" };
   }
 
   async function callVisionModel(model, images, prompt) {
-    if (!config.goToken) throw new Error("OPENCODE_GO_TOKEN is not configured");
+    const token = tokenFor(config, model);
+    if (!token) throw new Error(`No token configured for provider of ${model}`);
     const { url, style } = visionEndpointFor(model);
     const common = { model, max_output_tokens: 4_096, stream: false };
     if (style === "responses") {
@@ -107,7 +113,7 @@ export function createUpstreams({ config, metrics, mediaStore, getVisionModel = 
     }
     const response = await fetch(url, {
       method: "POST",
-      headers: { Authorization: `Bearer ${config.goToken}`, "Content-Type": "application/json" },
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
       body: JSON.stringify(common),
       signal: AbortSignal.timeout(config.visionTimeoutMs),
     });
