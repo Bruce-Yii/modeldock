@@ -212,7 +212,7 @@ function renderModelOptions(data) {
   }
 }
 
-let messagingBusy = false;
+let debugBusy = false;
 let modelBusy = false;
 let debugEnabled = false;
 
@@ -236,17 +236,17 @@ async function setModels() {
 
 function renderMessaging(data) {
   debugEnabled = Boolean(data.config?.debug?.enabled);
-  const toggle = $("messaging-toggle");
+  const toggle = $("debug-toggle");
   toggle.checked = debugEnabled;
-  toggle.disabled = messagingBusy;
+  toggle.disabled = debugBusy;
   $("buffer-mode-label").classList.toggle("active", !debugEnabled);
   $("streaming-mode-label").classList.toggle("active", debugEnabled);
   toggle.title = debugEnabled ? "Verbose gateway logging" : "Minimal gateway logging";
 }
 
 async function setDebugEnabled(enabled) {
-  messagingBusy = true;
-  $("messaging-toggle").disabled = true;
+  debugBusy = true;
+  $("debug-toggle").disabled = true;
   try {
     const response = await fetch("/api/debug", {
       method: "POST",
@@ -260,8 +260,8 @@ async function setDebugEnabled(enabled) {
     renderMessaging({ config: { debug: { enabled: debugEnabled } } });
     window.alert(error.message);
   } finally {
-    messagingBusy = false;
-    $("messaging-toggle").disabled = false;
+    debugBusy = false;
+    $("debug-toggle").disabled = false;
   }
 }
 
@@ -358,7 +358,7 @@ $("proxy-toggle").addEventListener("change", async (event) => {
   await configAction(enabling ? "enable" : "disable");
 });
 
-$("messaging-toggle").addEventListener("change", (event) => {
+$("debug-toggle").addEventListener("change", (event) => {
   setDebugEnabled(event.target.checked);
 });
 
