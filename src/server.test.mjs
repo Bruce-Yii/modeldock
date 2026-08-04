@@ -711,7 +711,7 @@ test("images are replaced and stored in media store", async (t) => {
   assert.equal(instance.services.mediaStore.snapshot().entries, 1);
 });
 
-test("a visual turn is sent intact to Luna and exposed in route evidence", async (t) => {
+test("a visual turn routes to Luna with image references and vision tooling", async (t) => {
   let received;
   const upstream = createServer(async (req, res) => {
     received = await jsonBody(req);
@@ -743,8 +743,9 @@ test("a visual turn is sent intact to Luna and exposed in route evidence", async
   assert.equal(response.headers.get("x-modeldock-route"), "current_turn_image");
   assert.equal(response.headers.get("x-modeldock-model"), "gpt-5.6-luna");
   assert.equal(received.model, "gpt-5.6-luna");
-  assert.equal(received.input[0].content[1].type, "input_image");
-  assert.equal(received.tools?.some((tool) => tool.name === "harness_vision_inspect") || false, false);
+  assert.equal(received.input[0].content[1].type, "input_text", "base64 image must be replaced with a reference upstream");
+  assert.match(received.input[0].content[1].text, /\[Image attachment img_/);
+  assert.equal(received.tools?.some((tool) => tool.name === "harness_vision_inspect") || false, true, "vision tool is available on the vision route");
   const trace = instance.services.metrics.recent.find((item) => item.kind === "responses");
   assert.equal(trace.model, "gpt-5.6-luna");
   assert.equal(trace.directVision, true);
@@ -1324,6 +1325,7 @@ test("image requests route to the vision model and keep the image in the forward
   assert.equal(response.status, 200);
   assert.equal(upstreamModel, "gpt-5.6-luna", "image routes to the vision model");
   assert.match(sse, /I see a chart/);
-  const imagePart = JSON.stringify(receivedInput).includes("input_image");
-  assert.equal(imagePart, true, "image must remain in the forwarded input for the vision model");
+  const forwardedText = JSON.stringify(receivedInput);
+  assert.equal(forwardedText.includes("input_image"), false, "base64 image must never be forwarded upstream");
+  assert.match(forwardedText, /Image attachment img_/, "image reference is forwarded instead");
 });

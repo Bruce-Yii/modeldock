@@ -133,7 +133,7 @@ test("replaces input_image with placeholder text and registers media ref", () =>
   assert.deepEqual(store.puts, [IMAGE_DATA_URL]);
 });
 
-test("direct Luna routing preserves image content and omits the fallback vision tool", () => {
+test("images are always replaced with references, even on vision routes, and the vision tool stays available", () => {
   const store = fakeStore();
   const source = baseRequest();
   source.input = [{ role: "user", content: [
@@ -145,13 +145,12 @@ test("direct Luna routing preserves image content and omits the fallback vision 
     defaultModel: "deepseek-v4-flash",
     targetModel: "gpt-5.6-luna",
     directVision: true,
+    profile: UNFILTERED_GO_PROFILE,
   });
   assert.equal(payload.model, "gpt-5.6-luna");
-  assert.equal(payload.input[0].content[1].type, "input_image");
-  assert.equal(payload.input[0].content[1].image_url, IMAGE_DATA_URL);
-  assert.match(payload.instructions, /active vision-capable model/i);
-  assert.match(payload.instructions, /Do not call harness_vision_inspect/i);
-  assert.equal(payload.tools.some((tool) => tool.name === "harness_vision_inspect"), false);
+  assert.equal(payload.input[0].content[1].type, "input_text", "base64 must never be forwarded, even on the vision route");
+  assert.match(payload.input[0].content[1].text, /\[Image attachment img_1/);
+  assert.equal(payload.tools.some((tool) => tool.name === "harness_vision_inspect"), true, "vision tool stays available so the model can inspect via reference");
   assert.deepEqual(report.imageRefs, ["img_1"]);
   assert.equal(report.directVision, true);
 });

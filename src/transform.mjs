@@ -355,7 +355,7 @@ function currentTurnStart(input) {
   return lastAssistant + 1;
 }
 
-function rewriteImages(input, mediaStore, imageRefs, currentImageRefs, { preserveImages = false } = {}) {
+function rewriteImages(input, mediaStore, imageRefs, currentImageRefs) {
   if (!Array.isArray(input)) return input;
   const turnStart = currentTurnStart(input);
   return input.map((item, index) => {
@@ -367,7 +367,6 @@ function rewriteImages(input, mediaStore, imageRefs, currentImageRefs, { preserv
       imageRefs.push(ref);
       const current = index >= turnStart;
       if (current) currentImageRefs.push(ref);
-      if (preserveImages) return part;
       return {
         type: "input_text",
         text: current
@@ -417,14 +416,14 @@ export function transformResponsesRequest(source, { mediaStore, defaultModel, ta
 
   const imageRefs = [];
   const currentImageRefs = [];
-  const rewrittenInput = rewriteImages(normalizeInput(payload.input), mediaStore, imageRefs, currentImageRefs, { preserveImages: directVision });
+  const rewrittenInput = rewriteImages(normalizeInput(payload.input), mediaStore, imageRefs, currentImageRefs);
   const injectedHarnessTools = [];
   if (webSearchTool && (blocked.tool_search > 0 || blocked.web_search > 0)) {
     if (!Array.isArray(payload.tools)) payload.tools = [];
     payload.tools.push(structuredClone(webSearchTool));
     injectedHarnessTools.push(webSearchTool.name);
   }
-  if (visionTool && currentImageRefs.length > 0 && !directVision) {
+  if (visionTool && currentImageRefs.length > 0) {
     if (!Array.isArray(payload.tools)) payload.tools = [];
     payload.tools.push(structuredClone(visionTool));
     injectedHarnessTools.push(visionTool.name);
