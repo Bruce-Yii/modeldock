@@ -277,6 +277,8 @@ async function checkCompletion(lastText, payload, services) {
   const baseInstructions = [
     "You are a completion checker for a coding agent. The agent was given a task and produced a reply.",
     'Decide whether the agent has actually completed the task, or whether it stopped early without finishing (e.g. it said "let me check" or "I will now..." without doing the work).',
+    "IMPORTANT: If the agent's reply merely restates or repeats the user's instruction (e.g. it says \"continue reading X\" or \"I will look at X\") without providing a concrete result, summary, or final answer, it is NOT complete: completed must be false.",
+    'A reply that is a real answer (a summary, a finding, a report, an explanation of what was done) is complete: completed must be true.',
     'Respond with ONLY a JSON object like: {"completed": true} or {"completed": false, "needed_tools": ["name1"], "reason": "short reason"}',
     "Return needed_tools only when specific additional tools are missing; otherwise return an empty array.",
     "If the reply is a normal, complete answer to the user's question, completed must be true.",
@@ -577,10 +579,18 @@ async function relayLiveResponses(payload, res, services, signal) {
       if (call?.call_id && payload.model === services.modelSelection.visionModel) {
         services.routeAffinity.register(call.call_id, payload.model);
       }
+      if (services.config.profile?.checkerEnabled === true && mode !== "text") {
+        debugLog(services, `checker skipped: mode=${mode} rounds=${rounds} (not a text turn)`);
+      }
+      if (services.config.profile?.checkerEnabled === true && mode === "text" && rounds >= 3) {
+        debugLog(services, `checker skipped: max rounds reached (${rounds})`);
+      }
       if (mode === "text" && rounds < 3 && services.config.profile?.checkerEnabled === true) {
         const lastText = writer.message?.text || "";
         const check = await checkCompletion(lastText, currentPayload, services);
+        debugLog(services, `checker verdict: completed=${check.completed} needed=${check.neededTools.join(",")} hint="${check.hint}" lastText="${lastText.slice(0, 100)}"`);
         if (!check.completed) {
+          debugLog(services, `checker continuing turn rounds=${rounds} mode=${mode}`);
           const disclosureSet = services.activeDisclosureSet || new Set();
           for (const name of check.neededTools) disclosureSet.add(name);
           const core = services.config.profile?.coreTools || new Set();
