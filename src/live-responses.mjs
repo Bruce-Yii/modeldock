@@ -62,6 +62,7 @@ export class LiveResponsesWriter {
     this.output = [];
     this.nextOutputIndex = 0;
     this.message = null;
+    this.reasoning = null;
     this.call = null;
   }
 
@@ -103,6 +104,32 @@ export class LiveResponsesWriter {
       content_index: 0,
       delta,
       logprobs: [],
+    });
+  }
+
+  reasoningDelta(delta) {
+    this.start();
+    if (!this.reasoning) {
+      const id = `rs_${randomUUID().replace(/-/g, "")}`;
+      const index = this.nextOutputIndex++;
+      this.reasoning = { id, index, text: "" };
+      this.#emit("response.output_item.added", {
+        output_index: index,
+        item: { id, type: "reasoning", summary: [{ type: "summary_text", text: "" }] },
+      });
+      this.#emit("response.reasoning_summary_part.added", {
+        item_id: id,
+        output_index: index,
+        content_index: 0,
+        part: { type: "summary_text", text: "" },
+      });
+    }
+    this.reasoning.text += delta;
+    this.#emit("response.reasoning_summary_text.delta", {
+      item_id: this.reasoning.id,
+      output_index: this.reasoning.index,
+      content_index: 0,
+      delta,
     });
   }
 
@@ -158,6 +185,19 @@ export class LiveResponsesWriter {
 
   finish(usage) {
     this.start();
+    if (this.reasoning) {
+      const { id, index, text } = this.reasoning;
+      this.#emit("response.reasoning_summary_text.done", { item_id: id, output_index: index, content_index: 0, text });
+      this.#emit("response.reasoning_summary_part.done", {
+        item_id: id,
+        output_index: index,
+        content_index: 0,
+        part: { type: "summary_text", text },
+      });
+      const completed = { id, type: "reasoning", summary: [{ type: "summary_text", text }] };
+      this.#emit("response.output_item.done", { output_index: index, item: completed });
+      this.output[index] = completed;
+    }
     if (this.message) {
       const index = this.message.index;
       const part = { type: "output_text", text: this.message.text, annotations: [] };

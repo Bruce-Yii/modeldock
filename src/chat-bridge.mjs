@@ -60,9 +60,16 @@ function inputToChatMessages(input) {
       }
       const paired = batch.filter((call) => outputsByCall.has(call.call_id));
       if (paired.length > 0) {
+        // Go's chat camp (thinking mode) demands reasoning_content on every
+        // assistant.tool_calls turn. Codex does not store the reasoning we forward, so
+        // provide an honest continuation note (not a fabricated thought) to satisfy the
+        // requirement while keeping thinking enabled.
+        const reasoningText = batch.find((call) => typeof call.reasoning_content === "string" && call.reasoning_content)?.reasoning_content
+          || "Continuing the task: a local tool was invoked and its result is provided below.";
         out.push({
           role: "assistant",
           content: null,
+          reasoning_content: reasoningText,
           tool_calls: paired.map((call) => ({
             id: call.call_id,
             type: "function",

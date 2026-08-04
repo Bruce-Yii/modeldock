@@ -444,6 +444,10 @@ async function relayLiveResponses(payload, res, services, signal) {
       const data = event.data;
       const events = isChatCamp ? [...chatChunkToResponsesEvents(data)] : [data];
       for (const ev of events) {
+        if (ev.type === "response.reasoning_text.delta" && typeof ev.delta === "string") {
+          writer.reasoningDelta(ev.delta);
+          continue;
+        }
         if (ev.type === "response.output_text.delta" && typeof ev.delta === "string") {
           mode = mode || "text";
           writer.textDelta(ev.delta);
