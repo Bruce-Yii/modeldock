@@ -145,10 +145,10 @@ const OPENCODE_GO_PROFILE = {
     "harness_web_search",
     "harness_vision_inspect",
   ]),
-  // Enabled with an outer-side nudge throttle: the loop-breaker allows at most one
-  // [MODELDOCK CHECKER] nudge per session per 5s window (across requests), so text/tool
-  // alternation cannot spin the nudge loop; repeated incomplete replies still trip it.
-  checkerEnabled: true,
+  // Disabled: the completion checker's nudge loop interfered with live sessions (injected
+  // [MODELDOCK CHECKER] text polluted Codex thread state and drove reply degeneration).
+  // Re-enable only after the intermediate-state exemption and session-history marking land.
+  checkerEnabled: false,
   availableModels: [
     { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash", endpoint: "responses", supportsVision: false, status: "available" },
     { id: "deepseek-v4-flash-free", label: "DeepSeek V4 Flash Free", endpoint: "responses", free: true, supportsVision: false, quota5h: 100000, status: "available" },
@@ -195,18 +195,31 @@ const OPENCODE_GO_PROFILE = {
 const DEEPSEEK_OFFICIAL_PROFILE = {
   id: "deepseek-official",
   label: "DeepSeek Official",
-  baseUrl: "https://api.deepseek.com/responses",
+  baseUrl: "https://api.deepseek.com",
   tokenEnvName: "DEEPSEEK_API_KEY",
 
-  blockedToolTypes: new Set([]),
-  compactCompletedToolHistory: false,
+  blockedToolTypes: new Set(["tool_search", "web_search"]),
+  compactCompletedToolHistory: true,
   canonicalizeCallIds: true,
-  stripSyntheticReasoningPlaceholder: false,
+  stripSyntheticReasoningPlaceholder: true,
   harnessTools: {
-    webSearch: null,
-    vision: null,
+    webSearch: HARNESS_WEB_SEARCH_TOOL,
+    vision: HARNESS_VISION_TOOL,
+    toolSearch: HARNESS_TOOL_SEARCH,
   },
-  harnessToolNames: new Set([]),
+  harnessToolNames: new Set(["harness_web_search", "harness_vision_inspect", "harness_tool_search"]),
+  coreTools: new Set([
+    "shell_command",
+    "apply_patch",
+    "update_plan",
+    "list_mcp_resources",
+    "list_mcp_resource_templates",
+    "read_mcp_resource",
+    "request_user_input",
+    "harness_web_search",
+    "harness_vision_inspect",
+  ]),
+  checkerEnabled: true,
   availableModels: [
     { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash (Official)", supportsVision: false },
   ],
@@ -235,6 +248,25 @@ export function profileById(id) {
 
 export function profileOptions() {
   return Object.values(PROFILES).map((profile) => ({ id: profile.id, label: profile.label }));
+}
+
+// Resolve which provider owns a model id. The currently active profile wins, then any
+// profile whose curated catalog lists the model. Used to route per-model upstream calls
+// (main model on DeepSeek, vision on OpenCode Go) to the right base URL and token.
+export function providerForModel(config, model) {
+  if (!model) return config?.profileId || "opencode-go";
+  const current = config?.profile || (config?.profileId ? profileById(config.profileId) : null);
+  if (current?.availableModels?.some((entry) => entry.id === model)) return current.id;
+  for (const entry of profileOptions()) {
+    const candidate = profileById(entry.id);
+    if (candidate.availableModels?.some((modelEntry) => modelEntry.id === model)) return candidate.id;
+  }
+  return config?.profileId || "opencode-go";
+}
+
+export function tokenFor(config, model) {
+  const provider = providerForModel(config, model);
+  return config?.tokens?.[provider] || config?.goToken || "";
 }
 
 export { OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE, HARNESS_WEB_SEARCH_TOOL, HARNESS_VISION_TOOL, HARNESS_TOOL_SEARCH };
