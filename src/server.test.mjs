@@ -119,7 +119,7 @@ test("model API exposes selectable main and vision-capable options", async (t) =
   t.after(instance.stop);
   const initial = await (await fetch(`${instance.base}/api/models`)).json();
   assert.equal(initial.selected.mainModel, "deepseek-v4-flash");
-  assert.deepEqual(initial.options.filter((model) => model.supportsVision).map((model) => model.id), ["gpt-5.6-luna", "kimi-k2.5"]);
+  assert.deepEqual(initial.options.filter((model) => model.supportsVision).map((model) => model.id), ["gpt-5.6-luna", "grok-4.5", "kimi-k2.5", "kimi-k2.6", "kimi-k2.7-code", "mimo-v2.5", "minimax-m3", "qwen3.5-plus", "qwen3.6-plus", "qwen3.7-plus", "qwen3.8-max"]);
   const changed = await fetch(`${instance.base}/api/models`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ mainModel: "gpt-5.6-luna", visionModel: "kimi-k2.5" }) });
   assert.equal(changed.status, 200);
   assert.deepEqual((await changed.json()).selected, { mainModel: "gpt-5.6-luna", visionModel: "kimi-k2.5" });
@@ -155,7 +155,7 @@ test("non-streaming relay: forwards normalized body with auth and parses usage",
   assert.equal(received.model, "deepseek-v4-flash");
   assert.equal(received.parallel_tool_calls, false);
   assert.deepEqual(received.input, [{ role: "user", content: [{ type: "input_text", text: "hello" }] }]);
-  assert.deepEqual(received.tools.map((tool) => tool.name), ["harness_web_search"]);
+  assert.deepEqual(received.tools.map((tool) => tool.name), ["harness_web_search", "harness_vision_inspect"]);
 
   const snap = instance.services.metrics.snapshot();
   assert.equal(snap.responses.total, 1);
@@ -743,9 +743,9 @@ test("a visual turn routes to Luna with image references and vision tooling", as
   assert.equal(response.headers.get("x-modeldock-route"), "current_turn_image");
   assert.equal(response.headers.get("x-modeldock-model"), "gpt-5.6-luna");
   assert.equal(received.model, "gpt-5.6-luna");
-  assert.equal(received.input[0].content[1].type, "input_text", "base64 image must be replaced with a reference upstream");
-  assert.match(received.input[0].content[1].text, /\[Image attachment img_/);
-  assert.equal(received.tools?.some((tool) => tool.name === "harness_vision_inspect") || false, true, "vision tool is available on the vision route");
+  assert.equal(received.input[0].content[1].type, "input_image", "the vision model receives the real image, not a reference");
+  assert.equal(received.input[0].content[1].image_url, dataUrl);
+  assert.equal(received.tools?.some((tool) => tool.name === "harness_vision_inspect") || false, false, "Luna sees the image directly and gets no harness vision tool");
   const trace = instance.services.metrics.recent.find((item) => item.kind === "responses");
   assert.equal(trace.model, "gpt-5.6-luna");
   assert.equal(trace.directVision, true);
@@ -808,7 +808,8 @@ test("Luna tool calls stay on Luna, then the next independent turn returns to De
   assert.equal(third.status, 200);
   assert.equal(third.headers.get("x-modeldock-route"), "default_main");
   assert.deepEqual(receivedModels, ["gpt-5.6-luna", "gpt-5.6-luna", "deepseek-v4-flash"]);
-  assert.equal(receivedBodies[2].tools?.some((tool) => tool.name === "harness_vision_inspect") || false, false);
+  // Third turn is back on DeepSeek (main model): the resident vision tool lets it re-inspect the earlier image.
+  assert.equal(receivedBodies[2].tools?.some((tool) => tool.name === "harness_vision_inspect") || false, true);
   assert.match(receivedBodies[2].input[0].content[0].text, /Earlier image attachment/);
 });
 
@@ -1255,7 +1256,7 @@ test("web search harness works alongside disclosure filtering", async (t) => {
     res.setHeader("content-type", "text/event-stream");
     if (mainCalls === 1) {
       assert.ok(toolNames.includes("harness_web_search"), `harness_web_search must be present, got ${JSON.stringify(toolNames)}`);
-      assert.ok(!toolNames.includes("harness_vision_inspect"), `no image means no vision tool, got ${JSON.stringify(toolNames)}`);
+      assert.ok(toolNames.includes("harness_vision_inspect"), `vision tool is resident on the main-model path, got ${JSON.stringify(toolNames)}`);
       sendSse(res, "response.output_item.added", { output_index: 0, item: { id: "fc_w", type: "function_call", name: "harness_web_search", call_id: "call_w", arguments: "" } });
       sendSse(res, "response.function_call_arguments.delta", { output_index: 0, delta: '{"queries":["modeldock"]}' });
     } else {
@@ -1326,6 +1327,6 @@ test("image requests route to the vision model and keep the image in the forward
   assert.equal(upstreamModel, "gpt-5.6-luna", "image routes to the vision model");
   assert.match(sse, /I see a chart/);
   const forwardedText = JSON.stringify(receivedInput);
-  assert.equal(forwardedText.includes("input_image"), false, "base64 image must never be forwarded upstream");
-  assert.match(forwardedText, /Image attachment img_/, "image reference is forwarded instead");
+  assert.equal(forwardedText.includes("input_image"), true, "the real image is forwarded to the vision model on the direct route");
+  assert.ok(forwardedText.includes(image), "the vision model receives the actual base64 image, not a reference");
 });

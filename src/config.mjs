@@ -125,6 +125,8 @@ export function loadConfig() {
     exaApiKey: process.env.EXA_API_KEY || "",
     recentLimit: integer("MODELDOCK_RECENT_LIMIT", 50, { min: 10, max: 500 }),
     messagingMode: messagingMode(process.env.MODELDOCK_MESSAGING_MODE),
+    modelRefreshHours: Number(process.env.MODELDOCK_MODEL_REFRESH_HOURS || 24),
+    modelProbeEnabled: process.env.MODELDOCK_MODEL_PROBE_ENABLED !== "0",
     codexHome,
   });
 }

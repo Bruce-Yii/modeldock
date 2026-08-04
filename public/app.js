@@ -192,17 +192,19 @@ function renderModelOptions(data) {
   }
   const mainFilter = (model) => model.provider === selectedProvider;
   const visionFilter = (model) => model.supportsVision && model.provider === (visionProviderSelect?.value || selectedVisionProvider);
-  for (const [id, filter, value] of [["main-model-select", mainFilter, selected.mainModel], ["vision-model-select", visionFilter, selected.visionModel]]) {
+  for (const [id, filter, value, sortBy] of [["main-model-select", mainFilter, selected.mainModel, null], ["vision-model-select", visionFilter, selected.visionModel, "visionScore"]]) {
     const select = $(id);
     if (!select) continue;
     const previous = select.value;
     select.replaceChildren();
     const filtered = models.options.filter(filter);
+    if (sortBy) filtered.sort((a, b) => (b[sortBy] ?? -1) - (a[sortBy] ?? -1) || a.id.localeCompare(b.id));
     for (const model of filtered) {
       const option = document.createElement("option");
       option.value = model.id;
-      option.textContent = model.label;
+      option.textContent = model.tierLabel ? `${model.label} (${model.tierLabel})` : model.label;
       option.dataset.provider = model.provider || "";
+      option.dataset.tier = model.visionTier || "";
       select.append(option);
     }
     select.value = filtered.some((model) => model.id === value) ? value : (filtered[0]?.id || previous);

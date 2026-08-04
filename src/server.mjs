@@ -13,6 +13,7 @@ import { responseToSse } from "./responses-sse.mjs";
 import { CodexConfigSwitcher } from "./config-switcher.mjs";
 import { RouteAffinity, routeResponsesRequest } from "./router.mjs";
 import { profileOptions, profileById } from "./profiles.mjs";
+import { LoopBreaker } from "./loop-breaker.mjs";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.resolve(dirname, "../public");
@@ -26,13 +27,20 @@ function goUrl(config, resource) {
   return `${config.goBaseUrl.replace(/\/$/, "")}/${resource.replace(/^\//, "")}`;
 }
 
+const VISION_TIER_LABELS = { strong: "High", medium: "Mid", basic: "Low", poor: "Weak" };
+
+function withTierLabel(model) {
+  if (!model.visionTier) return model;
+  return { ...model, tierLabel: VISION_TIER_LABELS[model.visionTier] || model.visionTier };
+}
+
 function modelOptions(config, profileId) {
   const all = [];
   for (const entry of profileOptions()) {
     const profile = profileById(entry.id);
     for (const model of profile?.availableModels || []) {
       if (!all.some((existing) => existing.id === model.id && existing.provider === entry.id)) {
-        all.push({ ...model, provider: entry.id });
+        all.push({ ...withTierLabel(model), provider: entry.id });
       }
     }
   }
@@ -72,7 +80,7 @@ function modelProviderOf(options, modelId) {
   return options.find((entry) => entry.id === modelId)?.provider || "other";
 }
 
-function statusPayload({ config, metrics, mediaStore, routeAffinity, messaging, modelSelection }) {
+function statusPayload({ config, metrics, mediaStore, routeAffinity, messaging, modelSelection, loopBreaker }) {
   const selected = modelSelection || { mainModel: config.mainModel, visionModel: config.visionModel };
   const options = modelOptions(config);
   const visionOptions = options.filter((entry) => entry.supportsVision);
@@ -90,6 +98,7 @@ function statusPayload({ config, metrics, mediaStore, routeAffinity, messaging, 
     messaging: { mode: messaging?.mode || "streaming" },
     media: mediaStore.snapshot(),
     routing: routeAffinity?.snapshot?.() || { activeCallIds: 0 },
+    loopBreaker: loopBreaker?.snapshot?.() || { activeSessions: 0, trippedSessions: 0 },
   });
 }
 
@@ -122,6 +131,23 @@ function recordConfigAction(metrics, operation, result) {
     latencyMs: 0,
     status: result.ok ? "ok" : "error",
     ...(result.error ? { error: result.error } : {}),
+  });
+  metrics.recent.length = Math.min(metrics.recent.length, metrics.recentLimit);
+  metrics.emit("change");
+}
+
+function recordLoopBreak(metrics, sessionKey, nags) {
+  const now = Date.now();
+  metrics.recent.unshift({
+    id: `loop-${now}`,
+    kind: "loop_breaker",
+    operation: "checker_disabled",
+    session: typeof sessionKey === "string" ? sessionKey.slice(0, 24) : "default",
+    startedAt: now,
+    finishedAt: now,
+    latencyMs: 0,
+    status: "error",
+    error: `Loop detected (${nags} checker nudges in window); checker disabled for this session`,
   });
   metrics.recent.length = Math.min(metrics.recent.length, metrics.recentLimit);
   metrics.emit("change");
@@ -632,26 +658,39 @@ async function relayLiveResponses(payload, res, services, signal) {
       if (services.config.profile?.checkerEnabled === true && mode === "text" && rounds >= 3) {
         debugLog(services, `checker skipped: max rounds reached (${rounds})`);
       }
-      if (mode === "text" && rounds < 3 && services.config.profile?.checkerEnabled === true) {
+      const sessionKey = services.activeSessionKey;
+      if (services.config.profile?.checkerEnabled === true && mode === "text" && rounds < 3 && services.loopBreaker?.isTripped(sessionKey)) {
+        debugLog(services, `checker skipped: loop breaker tripped for session=${sessionKey}`);
+      }
+      if (mode === "text" && rounds < 3 && services.config.profile?.checkerEnabled === true && !services.loopBreaker?.isTripped(sessionKey)) {
         const lastText = writer.message?.text || "";
         const check = await checkCompletion(lastText, currentPayload, services);
         debugLog(services, `checker verdict: completed=${check.completed} needed=${check.neededTools.join(",")} hint="${check.hint}" lastText="${lastText.slice(0, 100)}"`);
         if (!check.completed) {
-          debugLog(services, `checker continuing turn rounds=${rounds} mode=${mode}`);
-          const disclosureSet = services.activeDisclosureSet || new Set();
-          for (const name of check.neededTools) disclosureSet.add(name);
-          const core = services.config.profile?.coreTools || new Set();
-          const kept = mergeDisclosedTools(services.activeToolRegistry, currentPayload.tools, core, disclosureSet);
-          const injected = [
-            {
-              type: "message",
-              role: "user",
-              content: [{ type: "input_text", text: `[MODELDOCK CHECKER] The previous assistant reply appears incomplete: "${lastText.slice(0, 2000)}".\n${check.hint ? `Reason: ${check.hint}\n` : ""}${check.neededTools.length > 0 ? `The following tools are now available: ${check.neededTools.join(", ")}. Use them to finish the task.` : "Please continue and finish the task."}` }],
-            },
-          ];
-          rounds += 1;
-          currentPayload = { ...currentPayload, tools: kept.length > 0 ? kept : currentPayload.tools, input: [...(currentPayload.input || []), ...injected], stream: true };
-          continue;
+          const trip = services.loopBreaker?.recordNag(sessionKey, { goal: lastUserGoal(currentPayload.input) }) || { tripped: false, justTripped: false, nags: 0 };
+          if (trip.justTripped) {
+            console.log(`[gate] loop breaker tripped session=${sessionKey} nags=${trip.nags}; disabling checker for this session`);
+            recordLoopBreak(services.metrics, sessionKey, trip.nags);
+          }
+          if (trip.tripped) {
+            debugLog(services, `checker halted by loop breaker; returning reply as-is rounds=${rounds}`);
+          } else {
+            debugLog(services, `checker continuing turn rounds=${rounds} mode=${mode}`);
+            const disclosureSet = services.activeDisclosureSet || new Set();
+            for (const name of check.neededTools) disclosureSet.add(name);
+            const core = services.config.profile?.coreTools || new Set();
+            const kept = mergeDisclosedTools(services.activeToolRegistry, currentPayload.tools, core, disclosureSet);
+            const injected = [
+              {
+                type: "message",
+                role: "user",
+                content: [{ type: "input_text", text: `[MODELDOCK CHECKER] The previous assistant reply appears incomplete: "${lastText.slice(0, 2000)}".\n${check.hint ? `Reason: ${check.hint}\n` : ""}${check.neededTools.length > 0 ? `The following tools are now available: ${check.neededTools.join(", ")}. Use them to finish the task.` : "Please continue and finish the task."}` }],
+              },
+            ];
+            rounds += 1;
+            currentPayload = { ...currentPayload, tools: kept.length > 0 ? kept : currentPayload.tools, input: [...(currentPayload.input || []), ...injected], stream: true };
+            continue;
+          }
         }
       }
       const response = writer.finish(usage);
@@ -748,6 +787,8 @@ async function relayResponses(req, res, services) {
       affinity: routeAffinity,
     });
     const { key, set: disclosureSet } = disclosureFor(services, source);
+    services.activeSessionKey = key;
+    services.loopBreaker?.observeGoal(key, lastUserGoal(source?.input));
     services.activeToolRegistry = Array.isArray(source?.tools) ? source.tools : [];
     services.activeDisclosureSet = disclosureSet;
     transformed = transformResponsesRequest(source, {
@@ -1003,7 +1044,7 @@ function serveModels(req, res, { config, modelSelection }) {
   return res.json(codexModelCatalog(config));
 }
 
-const VISION_MODEL_HINTS = ["luna", "omni", "vision", "vl", "mimi", "glm-5"];
+const VISION_MODEL_HINTS = ["luna", "omni", "vision", "vl", "mimi", "glm-5", "grok", "kimi"];
 
 function labelForModelId(id) {
   return id
@@ -1012,86 +1053,214 @@ function labelForModelId(id) {
     .join(" ");
 }
 
-function guessSupportsVision(id) {
-  const lower = id.toLowerCase();
-  return VISION_MODEL_HINTS.some((hint) => lower.includes(hint));
+function modelEndpoint(modelId) {
+  if (["gpt-5.6-luna", "grok-4.5"].includes(modelId)) return "responses";
+  return "chat";
 }
 
 let VISION_PROBE_IMAGE = null;
 
-async function probeVisionCapability(modelId, config) {
-  try {
-    let imageUrl = VISION_PROBE_IMAGE;
-    if (!imageUrl) {
-      const { readFileSync, existsSync } = await import("node:fs");
-      const candidates = ["D:/projects/modeldock/assets/dashboard.png", "D:/projects/modeldock/dashboard.png"];
-      const found = candidates.find((p) => existsSync(p));
-      if (!found) return "unknown";
-      const b64 = readFileSync(found).toString("base64");
-      imageUrl = `data:image/png;base64,${b64}`;
-      VISION_PROBE_IMAGE = imageUrl;
-    }
-    const response = await fetch(`${config.goBaseUrl.replace(/\/$/, "")}/responses`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${config.goToken}` },
+function visionProbeUrlAndBody(modelId, config, imageUrl) {
+  const endpoint = modelEndpoint(modelId);
+  const base = config.goBaseUrl.replace(/\/$/, "");
+  const headers = { "Content-Type": "application/json", Authorization: `Bearer ${config.goToken}` };
+  if (endpoint === "responses") {
+    return {
+      url: `${base}/responses`,
+      headers,
       body: JSON.stringify({
         model: modelId,
         input: [{ role: "user", content: [{ type: "input_text", text: "What is this?" }, { type: "input_image", image_url: imageUrl }] }],
         stream: false,
-        max_output_tokens: 8,
+        max_output_tokens: 64,
       }),
-      signal: AbortSignal.timeout(15_000),
-    });
-    return response.ok ? "vision" : response.status === 401 ? "unauthorized" : "text";
+    };
+  }
+  return {
+    url: `${base.replace(/\/go$/, "")}/chat/completions`,
+    headers,
+    body: JSON.stringify({
+      model: modelId,
+      max_tokens: 64,
+      messages: [{ role: "user", content: [{ type: "text", text: "What is this?" }, { type: "image_url", image_url: { url: imageUrl } }] }],
+    }),
+  };
+}
+
+async function callVisionModel(modelId, config, imageUrl, question, maxTokens = 64) {
+  const { url, headers, body } = visionProbeUrlAndBody(modelId, config, imageUrl);
+  const parsed = JSON.parse(body);
+  if (url.endsWith("/responses")) {
+    parsed.input[0].content[0].text = question;
+    parsed.max_output_tokens = maxTokens;
+  } else {
+    parsed.messages[0].content[0].text = question;
+    parsed.max_tokens = maxTokens;
+  }
+  const response = await fetch(url, { method: "POST", headers, body: JSON.stringify(parsed), signal: AbortSignal.timeout(25_000) });
+  if (!response.ok) {
+    const detail = (await response.text()).slice(0, 300);
+    return { error: `HTTP ${response.status} ${detail}` };
+  }
+  const data = await response.json();
+  if (url.endsWith("/responses")) {
+    const text = (data.output || [])
+      .filter((entry) => entry.type === "message" && entry.content)
+      .flatMap((entry) => entry.content)
+      .filter((part) => part.type === "output_text")
+      .map((part) => part.text)
+      .join("");
+    return { text };
+  }
+  return { text: data.choices?.[0]?.message?.content || "" };
+}
+
+async function probeImageSupport(modelId, config) {
+  try {
+    if (!VISION_PROBE_IMAGE) {
+      const { readFileSync, existsSync } = await import("node:fs");
+      const candidates = ["D:/projects/modeldock/assets/dashboard.png", "D:/projects/modeldock/dashboard.png"];
+      const found = candidates.find((p) => existsSync(p));
+      if (!found) return { capability: "unknown", status: "available" };
+      const b64 = readFileSync(found).toString("base64");
+      VISION_PROBE_IMAGE = `data:image/png;base64,${b64}`;
+    }
+    const result = await callVisionModel(modelId, config, VISION_PROBE_IMAGE, "What is this?", 64);
+    if (result.error) {
+      if (result.error.includes("Unsupported model") || result.error.includes("ModelNotFound") || result.error.includes("Router.Unavailable")) {
+        return { capability: "text", status: "unavailable" };
+      }
+      return { capability: "text", status: "available" };
+    }
+    return { capability: "vision", status: "available" };
   } catch {
-    return "unknown";
+    return { capability: "unknown", status: "unknown" };
   }
 }
 
-async function probeVisionCandidates(profile, candidates, config) {
+let JUDGE_MODEL = null;
+
+function judgeText(text) {
+  if (!text || !text.trim()) return 0;
+  const lower = text.toLowerCase();
+  if (/(can't|cannot|couldn't|no image|not an image|can not see|unable to see|no picture)/.test(lower)) return 0;
+  return 1;
+}
+
+async function scoreDashboardTask(modelId, config) {
+  const imageUrl = VISION_PROBE_IMAGE;
+  if (!imageUrl) return 0;
+  const question = "Describe this dashboard screenshot in detail. List the specific metrics, numbers, and charts you can see.";
+  const result = await callVisionModel(modelId, config, imageUrl, question, 256);
+  if (result.error) return 0;
+  const base = judgeText(result.text);
+  if (base === 0) return 0;
+  const hasNumbers = /\d[\d.,%]*(%|k|m|K|M)?/.test(result.text);
+  const hasMetricWords = /\b(cpu|gpu|memory|ram|requests|latency|error|tokens|usage|active|model|time|duration|rate|total|count)\b/i.test(result.text);
+  return (hasNumbers ? 1 : 0) + (hasMetricWords ? 1 : 0);
+}
+
+async function evaluateVision(modelId, config) {
+  const { TASKS, loadTaskImage, scoreTask, tierForScore } = await import("./vision-eval.mjs");
   const results = [];
-  for (const model of candidates) {
-    const capability = await probeVisionCapability(model.id, config);
-    results.push({ id: model.id, capability });
+  let deterministicScore = 0;
+  let maxDeterministic = 0;
+  for (const task of TASKS) {
+    const imageUrl = `data:image/png;base64,${loadTaskImage(task)}`;
+    const answer = await callVisionModel(modelId, config, imageUrl, task.question, 48);
+    const score = answer.error ? 0 : scoreTask(task, answer.text);
+    deterministicScore += score;
+    maxDeterministic += 1;
+    results.push({ task: task.id, difficulty: task.difficulty, passed: score === 1 });
   }
+  const dashboardScore = deterministicScore >= 3 ? await scoreDashboardTask(modelId, config) : 0;
+  const total = deterministicScore + dashboardScore;
+  const maxTotal = maxDeterministic + 2;
+  return {
+    deterministic: deterministicScore,
+    dashboard: dashboardScore,
+    score: total,
+    maxScore: maxTotal,
+    tier: tierForScore(total, maxTotal),
+    results,
+  };
+}
+
+async function probeVisionCandidates(profile, candidates, config) {
+  const results = await Promise.all(
+    candidates.map(async (model) => ({ id: model.id, ...(await probeImageSupport(model.id, config)) })),
+  );
   profile.availableModels = profile.availableModels.map((model) => {
     const result = results.find((entry) => entry.id === model.id);
     if (!result) return model;
     return {
       ...model,
+      endpoint: modelEndpoint(model.id),
       supportsVision: result.capability === "vision",
       visionStatus: result.capability,
+      status: result.status,
     };
   });
   const vision = results.filter((r) => r.capability === "vision").map((r) => r.id);
-  const unauthorized = results.filter((r) => r.capability === "unauthorized").map((r) => r.id);
-  console.log(`[gate] vision probe done: vision=[${vision.join(", ") || "none"}] unauthorized=[${unauthorized.join(", ") || "none"}]`);
+  const unavailable = results.filter((r) => r.status === "unavailable").map((r) => r.id);
+  console.log(`[gate] vision probe done: vision=[${vision.join(", ") || "none"}] unavailable=[${unavailable.join(", ") || "none"}]`);
+  const VISION_SCORE_THRESHOLD = 4;
+  const visionModels = profile.availableModels.filter((model) => model.supportsVision);
+  if (visionModels.length) {
+    const evaluations = await Promise.all(
+      visionModels.map(async (model) => ({ id: model.id, evaluation: await evaluateVision(model.id, config) })),
+    );
+    profile.availableModels = profile.availableModels.map((model) => {
+      const evalEntry = evaluations.find((entry) => entry.id === model.id);
+      if (!evalEntry) return model;
+      const evaluation = evalEntry.evaluation;
+      const qualified = evaluation.score >= VISION_SCORE_THRESHOLD;
+      return {
+        ...model,
+        visionScore: evaluation.score,
+        visionMaxScore: evaluation.maxScore,
+        visionTier: evaluation.tier,
+        visionResults: evaluation.results,
+        supportsVision: qualified,
+        visionStatus: qualified ? "vision" : "no-vision",
+      };
+    });
+    const ranked = evaluations
+      .sort((a, b) => b.evaluation.score - a.evaluation.score)
+      .map((entry) => `${entry.id}=${entry.evaluation.score}/${entry.evaluation.maxScore}(${entry.evaluation.tier})${entry.evaluation.score >= VISION_SCORE_THRESHOLD ? "" : "-rejected"}`);
+    console.log(`[gate] vision evaluation done: ${ranked.join(", ")}`);
+  }
 }
 
 async function refreshProfileModels(profile, config) {
   if (!profile || profile.id !== "opencode-go" || !config.goToken) return;
   if (!config.goBaseUrl.includes("opencode.ai")) return;
+  if (config.modelProbeEnabled === false) return;
   try {
     const base = config.goBaseUrl.replace(/\/$/, "");
     const headers = { Authorization: `Bearer ${config.goToken}` };
     const goRes = await fetch(`${base}/models`, { headers, signal: AbortSignal.timeout(10_000) });
     const goIds = goRes.ok ? ((await goRes.json())?.data || []).map((entry) => entry?.id).filter((id) => typeof id === "string" && id) : [];
-    const ids = [...new Set(goIds)].sort((a, b) => a.localeCompare(b));
-    if (!ids.length) return;
-    const knownVision = new Set((profile.availableModels || []).filter((model) => model.supportsVision).map((model) => model.id));
-    const models = ids.map((id) => ({
-      id,
-      label: labelForModelId(id),
-      supportsVision: knownVision.has(id) || guessSupportsVision(id),
-    }));
+    const fetchedIds = [...new Set(goIds)];
+    if (!fetchedIds.length) return;
+    const existing = profile.availableModels || [];
+    const existingById = new Map(existing.map((model) => [model.id, model]));
+    const existingOrder = new Map(existing.map((model, index) => [model.id, index]));
+    const known = fetchedIds.filter((id) => existingById.has(id)).sort((a, b) => existingOrder.get(a) - existingOrder.get(b));
+    const unknown = fetchedIds.filter((id) => !existingById.has(id)).sort((a, b) => a.localeCompare(b));
+    const models = [
+      ...known.map((id) => existingById.get(id)),
+      ...unknown.map((id) => ({
+        id,
+        label: labelForModelId(id),
+        endpoint: modelEndpoint(id),
+        supportsVision: false,
+        visionStatus: "unknown",
+        status: "available",
+      })),
+    ];
     profile.availableModels = models;
-    console.log(`[gate] refreshed opencode-go model catalog: ${ids.length} models`);
-    const visionCandidates = models.filter((model) => model.supportsVision);
-    const freeCandidates = models.filter((model) => model.id.endsWith("-free"));
-    const probeCandidates = [...new Map([...visionCandidates, ...freeCandidates].map((model) => [model.id, model])).values()];
-    if (probeCandidates.length) {
-      probeVisionCandidates(profile, probeCandidates, config).catch(() => {});
-    }
+    console.log(`[gate] refreshed opencode-go model catalog: ${models.length} models (${known.length} known, ${unknown.length} new)`);
   } catch (error) {
     console.log(`[gate] model catalog refresh failed: ${error.message}`);
   }
@@ -1115,12 +1284,19 @@ export function createServices(config = loadConfig()) {
   const routeAffinity = new RouteAffinity();
   const messaging = { mode: mutableConfig.messagingMode === "buffered" ? "buffered" : "streaming" };
   const toolDisclosure = new Map();
+  const loopBreaker = new LoopBreaker();
   const runtime = { profile: mutableConfig.profile, profileId: mutableConfig.profileId };
-  refreshProfileModels(mutableConfig.profile, mutableConfig).then(
+  const refreshModelCatalog = () => refreshProfileModels(mutableConfig.profile, mutableConfig).then(
     () => console.log(`[gate] model refresh done, availableModels=${(mutableConfig.profile?.availableModels || []).length}`),
     (error) => console.log(`[gate] model refresh error: ${error.message}`),
   );
-  return { config: mutableConfig, runtime, metrics, mediaStore, upstreams, configSwitcher, routeAffinity, messaging, modelSelection, toolDisclosure };
+  refreshModelCatalog();
+  const refreshIntervalHours = Number(mutableConfig.modelRefreshHours || 24);
+  const modelRefreshTimer = refreshIntervalHours > 0
+    ? setInterval(refreshModelCatalog, refreshIntervalHours * 3_600_000)
+    : null;
+  if (modelRefreshTimer) modelRefreshTimer.unref();
+  return { config: mutableConfig, runtime, metrics, mediaStore, upstreams, configSwitcher, routeAffinity, messaging, modelSelection, toolDisclosure, loopBreaker, refreshModelCatalog, modelRefreshTimer };
 }
 
 function disclosureFor(services, payload) {
