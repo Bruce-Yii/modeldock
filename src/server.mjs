@@ -1,6 +1,6 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import express from "express";
 import { createMcpExpressApp } from "@modelcontextprotocol/express";
 import { loadConfig, publicConfig } from "./config.mjs";
@@ -377,20 +377,38 @@ function fillReasoningContent(payload, services) {
   return { ...payload, input };
 }
 
-// OpenCode official clients send a session-affinity header pair plus an opencode
-// user-agent; the zen gateway treats bare relays differently (rate limits, quotas,
-// caching). Mimic the official client shape: derive a stable ses_ id per Codex
-// session so affinity is consistent, and use the opencode user-agent string.
+// OpenCode official clients generate IDs as `ses_` + 12 hex chars encoding the
+// creation timestamp (BigInt(timestamp)*0x1000+counter, high 48 bits) + 14 random
+// base62 chars (see packages/schema/src/identifier.ts). The zen gateway parses the
+// timestamp from those 12 hex chars (id.timestamp), so bare hex-derived IDs are not
+// recognized. For a Codex session we derive BOTH the timestamp field and the random
+// tail from a hash of the Codex session id, so every request of one Codex session
+// carries the exact same parseable ses_ id -> the gateway sees one stable session
+// (quota/cache affinity), while the format stays indistinguishable from the client.
 const OPENCODE_USER_AGENT = "opencode/1.18.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14";
+const SESSION_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+
+function opencodeSessionId(seed) {
+  if (seed) {
+    const digest = createHash("sha256").update(seed).digest();
+    const time = Array.from({ length: 6 }, (_, index) => digest[index].toString(16).padStart(2, "0")).join("");
+    let tail = "";
+    for (let i = 0; i < 14; i += 1) tail += SESSION_ALPHABET[digest[6 + i] % SESSION_ALPHABET.length];
+    return `ses_${time}${tail}`;
+  }
+  const timestamp = Date.now();
+  const current = BigInt(timestamp) * 0x1000n;
+  const time = Array.from({ length: 6 }, (_, index) =>
+    Number((current >> BigInt(40 - 8 * index)) & 0xffn).toString(16).padStart(2, "0"),
+  ).join("");
+  let tail = "";
+  for (let i = 0; i < 14; i += 1) tail += SESSION_ALPHABET[Math.floor(Math.random() * SESSION_ALPHABET.length)];
+  return `ses_${time}${tail}`;
+}
 
 function opencodeSessionHeaders(payload) {
   const codexSession = payload?.client_metadata?.session_id || payload?.client_metadata?.thread_id;
-  let ses = codexSession;
-  if (typeof ses === "string" && ses) {
-    ses = `ses_${ses.replace(/[^a-zA-Z0-9]/g, "").slice(0, 32)}`;
-  } else {
-    ses = `ses_${randomUUID().replace(/-/g, "")}`;
-  }
+  const ses = opencodeSessionId(typeof codexSession === "string" && codexSession ? codexSession : null);
   return {
     "x-session-id": ses,
     "x-session-affinity": ses,
