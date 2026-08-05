@@ -474,6 +474,20 @@ export function transformResponsesRequest(source, { mediaStore, defaultModel, ta
     });
   }
   const rawInput = normalizeInput(payload.input);
+  // Reasoning history balloons fast (244+ items observed in long sessions) and the
+  // model only needs the latest reasoning; old thinking text is dead weight. Keep the
+  // most recent RECENT_REASONING items, drop the rest.
+  const RECENT_REASONING = 6;
+  if (Array.isArray(payload.input) && Array.isArray(rawInput)) {
+    const reasoningIndices = [];
+    for (let i = 0; i < rawInput.length; i += 1) {
+      if (rawInput[i]?.type === "reasoning") reasoningIndices.push(i);
+    }
+    if (reasoningIndices.length > RECENT_REASONING) {
+      const drop = new Set(reasoningIndices.slice(0, reasoningIndices.length - RECENT_REASONING));
+      payload.input = rawInput.filter((_, index) => !drop.has(index));
+    }
+  }
   if (hiddenToolNames && hiddenToolNames.size > 0) {
     payload.tools = selectForwardedTools(payload.tools, { hiddenToolNames: effectiveHidden });
   }
