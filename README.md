@@ -108,7 +108,7 @@ The ModelDock gate and dashboard listen only on your machine (127.0.0.1). Model,
 
 ModelDock 是一个本地小工具，两件本事：
 
-- **给 DeepSeek V4 Flash 增加 Vision 能力** —— 当前视觉轮次自动交给视觉模型 Luna（Kimi 备用），下一轮再回到 DeepSeek；DeepSeek 也可以通过本地视觉工具请求 Luna 观察图片。
+- **给 DeepSeek V4 Flash 增加 Vision 能力** —— 当前视觉轮次自动交给视觉模型（默认 MiMo V2.5 Free，兜底 MiniMax M3），下一轮再回到 DeepSeek；DeepSeek 也可以通过本地视觉工具请求观察图片，包括本地截图文件。
 - **把其他 API 桥接给 Codex（API Bridge）** —— ModelDock 在本地转发并规范化 Codex Responses 请求；Codex 的 Shell、文件和 MCP 等本地工具照常工作，不兼容的 hosted web/tool search 会替换成本地编排的 Exa 搜索。
 
 ## 你得到什么
@@ -197,7 +197,7 @@ ModelDock 的网关和仪表盘只监听本机（127.0.0.1）；模型、视觉�
 
 ModelDock はローカルで動く小さなヘルパーです。できることはふたつ：
 
-- **DeepSeek V4 Flash にビジョン機能を追加** — 画像を含むターンはビジョンモデル Luna（Kimi フォールバック）へ送り、次の独立したターンで DeepSeek に戻ります。DeepSeek からローカルの視覚ツール経由で Luna に観察を依頼することもできます。
+- **DeepSeek V4 Flash にビジョン機能を追加** — 画像を含むターンはビジョンモデル（既定は MiMo V2.5 Free、フォールバックは MiniMax M3）へ送り、次の独立したターンで DeepSeek に戻ります。DeepSeek からローカルの視覚ツール経由で観察を依頼することもでき、ローカルのスクリーンショットにも対応します。
 - **Codex への API ブリッジ** — ModelDock は Codex Responses をローカルで転送・正規化します。Shell、ファイル、MCP などのローカルツールを保ち、上流 API が受け付けない hosted web/tool search は Exa 検索に置き換えます。
 
 ## できること

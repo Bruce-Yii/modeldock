@@ -5,7 +5,7 @@ ModelDock is, how a request flows through the system, what each module owns, and
 pieces are wired together the way they are. It complements the user-facing README, which
 exists only for installing and running ModelDock.
 
-> **Verified against:** commit `e5ddd35` (2026-08-04), `npm test` = 161 passing.
+> **Verified against:** commit `2f90048` (2026-08-04), `npm test` = 160 passing.
 > When you change routing, transform, profiles, or endpoints, re-verify the affected
 > section and bump this line. The codebase moves faster than prose — an unverified
 > architecture doc is worse than none.
@@ -20,12 +20,12 @@ does two headline jobs:
 1. **Vision for a text-only model.** DeepSeek V4 Flash cannot see images. ModelDock
    detects images in a turn and either (a) routes the whole turn to a vision-capable model
    **with the real image attached** (direct vision, one round-trip), or (b) exposes a
-   **resident** `harness_vision_inspect` tool so the text-only main model can request a
+   **resident** `vision_inspect` tool so the text-only main model can request a
    Luna observation of a captured or historical image on demand.
  2. **API bridge for Codex.** Codex emits hosted tool schemas (`web_search`, `tool_search`)
     that the Go upstream rejects. `transform.mjs` strips them and substitutes locally
     orchestrated equivalents: an Exa web search via `harness_web_search`. All other Codex
-    tools are forwarded as-is (`showAllTools`).
+    tools are forwarded as-is apart from a small per-model blacklist (`hiddenToolNames`).
 
 Because Codex's local tools (`shell_command`, `apply_patch`, `view_image`, …) are safe to
 keep, they are forwarded; only the hosted schemas are replaced.
@@ -66,7 +66,7 @@ Codex ──POST /v1/responses──> ModelDock gate (Express, loopback only)
                                   │    (chat camp only; responses camp passes through)
                                   ├─ harness loop:      execute local tools between turns
                                   │   harness_web_search       → Exa MCP (upstreams)
-                                  │   harness_vision_inspect    → vision model (upstreams)
+                                  │   vision_inspect    → vision model (upstreams)
                                   │
                                   ▼
         stream: live-normalized relay (live-responses.mjs)
@@ -107,10 +107,11 @@ arrives here.
    - Otherwise → `default_main` (the request's model or the configured main model).
  3. **Transform.** `transformResponsesRequest` (src/transform.mjs) returns the forwarded
     `payload` plus a `report`. Key steps (see below for details): block `tool_search` /
-    `web_search`; filter tools through the profile allowlist; rewrite image history —
+    `web_search`; drop blacklisted tools (`hiddenToolNames`, trimmed per target model);
+    rewrite image history —
     **historical** `input_image`s become `img_...` media-store references, but on the
     direct-vision route the **current-turn** image is kept as-is so Luna sees the real
-    pixels; inject the harness tools (`harness_web_search` on demand, `harness_vision_inspect`
+    pixels; inject the harness tools (`harness_web_search` on demand, `vision_inspect`
     resident on the main-model path); set `parallel_tool_calls = false`. On the chat
     camp, **native tool pairs are kept** (no receipt flattening) so `chat-bridge.mjs`
     can rebuild `assistant.tool_calls` history.
@@ -149,7 +150,7 @@ Codex sends `POST /v1/responses` with a current-turn user message containing an
    - `rewriteImages` **keeps the current-turn `input_image` as-is** because
      `keepCurrentImages: directVision` is set — Luna receives the real pixels in a single
      pass, no tool round-trip (asserted in tests).
-   - The `harness_vision_inspect` tool is **not** injected on this route (Luna sees the
+   - The `vision_inspect` tool is **not** injected on this route (Luna sees the
      image directly); it is injected only on main-model turns.
    - A route instruction is appended to `instructions`: the image is attached directly,
      inspect it, and return conclusions in the assistant message so the next main-model
@@ -177,7 +178,7 @@ A fresh user message with no image → `currentTurnItems` has no `input_image` a
 pinned call → `default_main` → `deepseek-v4-flash`. The main model reads Luna's
 turn-1 text from the conversation history (and the earlier image is now framed as
 `[Earlier image attachment img_abc…. do not re-inspect…]` by `rewriteImages`). Because
-`harness_vision_inspect` is **resident** on the main-model path, DeepSeek can also request
+`vision_inspect` is **resident** on the main-model path, DeepSeek can also request
 a fresh Luna observation of that historical ref if the user asks a new visual question.
 
 Because the whole loop lives inside one `relayResponses` request/response for the
@@ -193,20 +194,26 @@ Tools:
 | Tool | Execution | Notes |
 | --- | --- | --- |
 | `harness_web_search` | `upstreams.searchWeb` → Exa MCP tool `web_search_exa` | Multiple queries supported; per-query site/after filtering |
-| `harness_vision_inspect` | `upstreams.inspectVision` → vision model | Reads image from `media-store` or a local path, calls the configured vision model with fallback; resident on the main-model path; calls removed from the tools after use |
+| `vision_inspect` | `upstreams.inspectVision` → vision model | Reads image from `media-store` or a local path, calls the configured vision model with fallback; resident on the main-model path; calls removed from the tools after use |
 
 Harness tool names are driven by `profile.harnessToolNames`. Loop round limit = 4; a
 normal turn generally completes in 1-2 rounds (model emits text first), so this is a
 safety net rather than a common case.
 
-### Tool exposure model (show-all)
+### Tool exposure model (blacklist + per-model trim)
 
-Both profiles set `showAllTools: true`: every Codex tool the client declares is
-forwarded upstream as-is — the chat bridge accepts all tool schemas, and the
-deepseek-official API accepts every function-typed tool natively, so there is no
-allowlist and no progressive disclosure. The earlier `harness_tool_search` +
-per-session disclosure machinery was removed (2026-08-04); `transform.mjs` no longer
-filters named tools on these profiles.
+There is no allowlist and no progressive disclosure: the chat bridge accepts all tool
+schemas and the deepseek-official API accepts every function-typed tool natively, so
+client tools are forwarded as-is by default. The earlier `harness_tool_search` +
+per-session disclosure machinery was removed (2026-08-04).
+
+What remains is a small **blacklist**, not a pass-through. Both profiles set
+`hiddenToolNames: new Set(["view_image"])`, and `transform.mjs` drops those named tools
+via `selectForwardedTools` (namespaced tools are kept wholesale). The blacklist is then
+**trimmed per target model**: `effectiveHidden` un-hides `view_image` when the model the
+request is routed to actually supports vision, so a vision-capable target still gets it
+while the text-only main model does not — the text model is pointed at `vision_inspect`
+instead (see the base instructions).
 
 ## Profiles (src/profiles.mjs)
 
@@ -218,7 +225,7 @@ Profiles encode provider-specific behavior; the active one is selected by
 | --- | --- | --- |
 | Provider endpoint | `https://opencode.ai/zen/go/v1` (+ `zen/v1` for free models) | `https://api.deepseek.com` (Responses wire) |
 | Blocked hosted tools | `tool_search`, `web_search` | none (web_search native, tool_search ignored) |
-| Tool exposure | `showAllTools: true` — all client tools forwarded | `showAllTools: true` — all client tools forwarded |
+| Tool exposure | `hiddenToolNames: {view_image}`, un-hidden when the target model supports vision | same |
 | Wire style | chat bridge (below) for chat-camp models; Responses for luna/grok | Responses |
 | Harness tools | web_search, vision | vision (web_search native on the provider) |
 | Reasoning (catalog) | default `high`; `low/high/max` | default `medium`; `none/minimal/low/medium/high/xhigh/max`, forwarded untouched |
@@ -280,7 +287,7 @@ consults the model id:
 Every outbound request (relay, harness loop, vision inspect,
 vision probe) routes through these helpers, so each model hits its own provider's
 endpoint **with that provider's token**. This is why `deepseek-v4-flash` (main) can run
-on the DeepSeek API while `harness_vision_inspect` still observes images through
+on the DeepSeek API while `vision_inspect` still observes images through
 OpenCode Go's free camp without a paid balance.
 
 ### Chat bridge wire details (chat-bridge.mjs)
@@ -365,7 +372,7 @@ in two ways:
   as a ref; the part itself is replaced by placeholder text **except** on the
   direct-vision route, where the current-turn image is kept and forwarded as-is.
 - Tool results containing `input_image` parts (`toolOutputText`) put the image in as well,
-  replacing it with an instruction to use `harness_vision_inspect`.
+  replacing it with an instruction to use `vision_inspect`.
 
 A ref is `img_` + first 20 hex chars of SHA-256 of the image bytes (data URL) or the URL.
 Entries expire by TTL; an LRU-style eviction keeps the store under `maxEntries`; the
