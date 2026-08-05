@@ -1,5 +1,6 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { randomUUID } from "node:crypto";
 import express from "express";
 import { createMcpExpressApp } from "@modelcontextprotocol/express";
 import { loadConfig, publicConfig } from "./config.mjs";
@@ -376,6 +377,27 @@ function fillReasoningContent(payload, services) {
   return { ...payload, input };
 }
 
+// OpenCode official clients send a session-affinity header pair plus an opencode
+// user-agent; the zen gateway treats bare relays differently (rate limits, quotas,
+// caching). Mimic the official client shape: derive a stable ses_ id per Codex
+// session so affinity is consistent, and use the opencode user-agent string.
+const OPENCODE_USER_AGENT = "opencode/1.18.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14";
+
+function opencodeSessionHeaders(payload) {
+  const codexSession = payload?.client_metadata?.session_id || payload?.client_metadata?.thread_id;
+  let ses = codexSession;
+  if (typeof ses === "string" && ses) {
+    ses = `ses_${ses.replace(/[^a-zA-Z0-9]/g, "").slice(0, 32)}`;
+  } else {
+    ses = `ses_${randomUUID().replace(/-/g, "")}`;
+  }
+  return {
+    "x-session-id": ses,
+    "x-session-affinity": ses,
+    "User-Agent": OPENCODE_USER_AGENT,
+  };
+}
+
 async function fetchGoResponses(payload, services, signal, accept = "application/json") {
   const requestModel = payload.model || services.config.mainModel;
   const endpoint = chatEndpointFor(requestModel, services.config);
@@ -391,7 +413,7 @@ async function fetchGoResponses(payload, services, signal, accept = "application
         Authorization: `Bearer ${tokenFor(services.config, requestModel)}`,
         Accept: accept,
         "Content-Type": "application/json",
-        "User-Agent": "modeldock-opencode-go-gate/0.1.0",
+        ...opencodeSessionHeaders(payload),
       },
       body: JSON.stringify(chatPayload),
       signal,
@@ -410,7 +432,9 @@ async function fetchGoResponses(payload, services, signal, accept = "application
       Authorization: `Bearer ${tokenFor(services.config, requestModel)}`,
       Accept: accept,
       "Content-Type": "application/json",
-      "User-Agent": "modeldock-opencode-go-gate/0.1.0",
+      // OpenCode session-affinity headers only for the OpenCode Go camp; the
+      // deepseek-official provider must NOT be fingerprinted as an opencode client.
+      ...(isDeepseekOfficial ? {} : opencodeSessionHeaders(payload)),
     },
     body: JSON.stringify(forwarded),
     signal,
