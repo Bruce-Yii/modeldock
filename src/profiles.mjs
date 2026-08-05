@@ -108,11 +108,11 @@ const OPENCODE_GO_PROFILE = {
   tokenEnvName: "OPENCODE_GO_TOKEN",
 
   blockedToolTypes: new Set(["tool_search", "web_search"]),
-  // Forward every Codex tool (the chat bridge accepts all schemas). view_image stays:
-  // the direct-vision route hands image turns to a vision model, and view_image lets the
-  // model surface screenshots to the human. Native web_search/tool_search are blocked
-  // above and replaced by harness_web_search + vision_inspect.
-  hiddenToolNames: new Set([]),
+  // Forward every Codex tool except view_image: it hands the model base64 it cannot
+  // interpret (text-only main model) and caused pixel-decode loops. vision_inspect is
+  // the single visual path — it analyzes AND surfaces the image into the conversation.
+  // Native web_search/tool_search are blocked above and replaced by harness_web_search.
+  hiddenToolNames: new Set(["view_image"]),
   // Role of flattened tool receipts in history. "user" is the battle-tested default
   // (TOOL_EXECUTION_COMPLETED as a user message, accepted by Go in every tested shape).
   // "assistant" frames the same text as the agent's own statement ("I executed a tool
