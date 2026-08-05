@@ -161,9 +161,16 @@ export function responsesToChatRequest(payload, { reasoningLookup = null } = {})
   const body = {
     model: payload.model,
     messages,
-    max_tokens: payload.max_output_tokens ?? 4096,
+    // Mirror the official opencode client budget (32000) instead of a hard 4096, which
+    // truncated long outputs whenever Codex omits max_output_tokens.
+    max_tokens: payload.max_output_tokens ?? 32000,
     stream: payload.stream === true,
   };
+  // Forward the client's identity so the upstream sees official-client-shaped traffic
+  // (session/turn/installation ids) instead of an anonymous relay.
+  if (payload.client_metadata && typeof payload.client_metadata === "object") {
+    body.metadata = payload.client_metadata;
+  }
   if (Array.isArray(payload.tools) && payload.tools.length > 0) {
     body.tools = toolsToChat(payload.tools);
   }
