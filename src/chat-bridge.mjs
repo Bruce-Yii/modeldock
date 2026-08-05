@@ -218,6 +218,16 @@ export function* chatChunkToResponsesEvents(parsed) {
     }
   }
   if (choice.finish_reason) {
-    yield { type: "response.completed", response: { usage: parsed.usage || null } };
+    // Chat completions reports usage as prompt_tokens/completion_tokens; map it to the
+    // Responses shape (input_tokens/output_tokens) so metrics count real tokens.
+    const usage = parsed.usage;
+    const responsesUsage = usage
+      ? {
+          input_tokens: usage.prompt_tokens ?? usage.input_tokens ?? 0,
+          output_tokens: usage.completion_tokens ?? usage.output_tokens ?? 0,
+          total_tokens: usage.total_tokens ?? 0,
+        }
+      : null;
+    yield { type: "response.completed", response: { usage: responsesUsage } };
   }
 }

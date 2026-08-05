@@ -129,7 +129,7 @@ test("chatChunkToResponsesEvents: text, reasoning, tool_calls and finish map to 
     usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
   })];
   assert.equal(done[0].type, "response.completed");
-  assert.deepEqual(done[0].response.usage, { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 });
+  assert.deepEqual(done[0].response.usage, { input_tokens: 1, output_tokens: 1, total_tokens: 2 });
 });
 
 test("responsesToChatRequest replays recorded reasoning via reasoningLookup", () => {
