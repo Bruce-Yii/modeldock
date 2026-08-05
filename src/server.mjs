@@ -209,32 +209,6 @@ function upstreamBaseForModel(config, model) {
   return (config.opencodeBaseUrl || config.goBaseUrl).replace(/\/$/, "");
 }
 
-function coordinatorFetch(config, purpose, input, maxTokens = 256) {
-  const model = config.mainModel;
-  return fetch(`${upstreamBaseForModel(config, model)}/responses`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${tokenFor(config, model)}`,
-      "Content-Type": "application/json",
-      "User-Agent": "modeldock-opencode-go-gate/0.1.0",
-      "x-modeldock-role": "coordinator",
-      "x-modeldock-purpose": purpose,
-    },
-    body: JSON.stringify({
-      model,
-      input,
-      stream: false,
-      max_output_tokens: maxTokens,
-      // DeepSeek thinks by default and can burn the whole budget on reasoning (observed
-      // as empty verdicts and retries); coordinator calls are tiny judgments, so
-      // pin effort none on that provider.
-      ...(config.profile?.id === "deepseek-official" ? { reasoning: { effort: "none" } } : {}),
-      metadata: { modeldock_role: "coordinator", purpose },
-    }),
-    signal: AbortSignal.timeout(config.visionTimeoutMs),
-  });
-}
-
 async function executeHarnessCall(call, upstreams, { services, toolRegistry = [], disclosureSet = null } = {}) {
   const args = parseArguments(call.arguments);
   if (call.name === "harness_web_search") {
@@ -437,12 +411,24 @@ async function relayLiveResponses(payload, res, services, signal) {
       res.flushHeaders();
     }
 
+    // Keep the downstream SSE idle window open while the upstream thinks (DeepSeek can
+    // take 30-60s+ before its first token on huge contexts; most SSE clients time out on
+    // silence, not on total duration). A comment line resets the idle timer harmlessly.
+    let receivedFirstEvent = false;
+    const keepalive = setInterval(() => {
+      if (receivedFirstEvent || res.writableEnded) return;
+      res.write(": keepalive\n\n");
+    }, 30_000);
+    const stopKeepalive = () => clearInterval(keepalive);
+
     let call = null;
     let argumentsText = "";
     let mode = null;
     const requestModel = currentPayload.model || services.config.mainModel;
     const isChatCamp = chatEndpointFor(requestModel, services.config).style === "chat";
+    try {
     for await (const event of parseSse(upstream.body)) {
+      receivedFirstEvent = true;
       const data = event.data;
       const events = isChatCamp ? [...chatChunkToResponsesEvents(data)] : [data];
       for (const ev of events) {
@@ -481,7 +467,10 @@ async function relayLiveResponses(payload, res, services, signal) {
           continue;
         }
       if (ev.type === "response.completed") usage = addUsage(usage, ev.response?.usage);
+      }
     }
+    } finally {
+      stopKeepalive();
     }
 
     if (mode !== "harness") {
