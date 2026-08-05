@@ -35,10 +35,11 @@ function resolveProfileOptions(profile) {
   const blockedToolTypes = profile?.blockedToolTypes || DEFAULT_BLOCKED_TOOL_TYPES;
   const webSearchTool = profile?.harnessTools?.webSearch || null;
   const visionTool = profile?.harnessTools?.vision || null;
-  // showAllTools: forward every named tool (the chat bridge accepts all schemas, so the
-  // allowlist exists only to save tokens; full disclosure keeps every Codex tool visible).
-  const coreTools = profile?.showAllTools ? null : (profile?.coreTools || null);
-  return { blockedToolTypes, webSearchTool, visionTool, coreTools };
+  // Blacklist-style tool policy: every named tool is forwarded EXCEPT those the
+  // profile cannot use (hiddenToolNames). Namespaced tools are kept wholesale.
+  const hiddenToolNames = profile?.hiddenToolNames || new Set();
+  const coreTools = profile?.coreTools || null;
+  return { blockedToolTypes, webSearchTool, visionTool, hiddenToolNames, coreTools };
 }
 
 function disclosedToolNamesFromHistory(input) {
@@ -55,22 +56,23 @@ function disclosedToolNamesFromHistory(input) {
   return disclosed;
 }
 
-function selectForwardedTools(tools, { coreTools, disclosed }) {
+function selectForwardedTools(tools, { hiddenToolNames }) {
   if (!Array.isArray(tools) || tools.length === 0) return tools;
-  if (!coreTools) return tools;
+  if (!hiddenToolNames || hiddenToolNames.size === 0) return tools;
+  const hidden = new Set(hiddenToolNames);
   const forwarded = [];
   for (const tool of tools) {
     if (!tool || typeof tool !== "object") continue;
     if (tool.type === "namespace") {
       const children = Array.isArray(tool.tools) ? tool.tools : [];
-      const kept = children.filter((child) => coreTools.has(child?.name) || disclosed.has(child?.name));
+      const kept = children.filter((child) => !hidden.has(child?.name));
       if (kept.length === 0) continue;
       forwarded.push({ ...tool, tools: kept.map((child) => structuredClone(child)) });
       continue;
     }
-    // Nameless type-level schemas (web_search, tool_search) are provider-native and are
-    // never constrained by the named-tool allowlist; they pass through untouched.
-    if (!tool.name || coreTools.has(tool.name) || disclosed.has(tool.name)) forwarded.push(structuredClone(tool));
+    // Nameless type-level schemas (web_search, tool_search) are handled by
+    // blockedToolTypes; named tools are hidden only if the profile says so.
+    if (!tool.name || !hidden.has(tool.name)) forwarded.push(structuredClone(tool));
   }
   return forwarded;
 }
@@ -418,7 +420,7 @@ export function transformResponsesRequest(source, { mediaStore, defaultModel, ta
     throw new Error("Responses request body must be a JSON object");
   }
 
-  const { blockedToolTypes, webSearchTool, visionTool, coreTools } = resolveProfileOptions(profile);
+  const { blockedToolTypes, webSearchTool, visionTool, hiddenToolNames, coreTools } = resolveProfileOptions(profile);
   // Chat bridge consumes native function_call/function_call_output pairs and converts
   // them to chat-dialect tool_calls itself. Flattening to receipts would erase the tool
   // structure, so skip compaction for the chat camp (opencode-go, unless overridden).
@@ -439,10 +441,8 @@ export function transformResponsesRequest(source, { mediaStore, defaultModel, ta
     });
   }
   const rawInput = normalizeInput(payload.input);
-  const historyDisclosed = disclosedToolNamesFromHistory(rawInput);
-  const disclosed = disclosedTools ? new Set([...historyDisclosed, ...disclosedTools]) : historyDisclosed;
-  if (coreTools) {
-    payload.tools = selectForwardedTools(payload.tools, { coreTools, disclosed });
+  if (hiddenToolNames && hiddenToolNames.size > 0) {
+    payload.tools = selectForwardedTools(payload.tools, { hiddenToolNames });
   }
 
   let toolChoiceRewritten = false;

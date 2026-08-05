@@ -15,7 +15,7 @@ const HARNESS_WEB_SEARCH_TOOL = {
 
 const HARNESS_VISION_TOOL = {
   type: "function",
-  name: "harness_vision_inspect",
+  name: "vision_inspect",
   description: "Inspect an image using a vision model. Pass EITHER a local absolute file path (path) of a screenshot you just took, OR an image_ref previously attached to the conversation. Provide the question you want answered about the image.",
   parameters: {
     type: "object",
@@ -124,7 +124,7 @@ const OPENCODE_GO_PROFILE = {
     webSearch: HARNESS_WEB_SEARCH_TOOL,
     vision: HARNESS_VISION_TOOL,
   },
-  harnessToolNames: new Set(["harness_web_search", "harness_vision_inspect"]),
+  harnessToolNames: new Set(["harness_web_search", "vision_inspect"]),
   coreTools: new Set([
     "shell_command",
     "apply_patch",
@@ -135,7 +135,7 @@ const OPENCODE_GO_PROFILE = {
     "request_user_input",
     "view_image",
     "harness_web_search",
-    "harness_vision_inspect",
+    "vision_inspect",
   ]),
   availableModels: [
     { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash", endpoint: "responses", supportsVision: false, status: "available" },
@@ -196,7 +196,7 @@ const DEEPSEEK_OFFICIAL_PROFILE = {
     webSearch: HARNESS_WEB_SEARCH_TOOL,
     vision: HARNESS_VISION_TOOL,
   },
-  harnessToolNames: new Set(["harness_web_search", "harness_vision_inspect"]),
+  harnessToolNames: new Set(["harness_web_search", "vision_inspect"]),
   // Verified live (2026-08-04) against the real Codex tool set: the official Responses
   // API accepts every Codex local tool as long as it is declared type "function"
   // (shell_command, update_plan, mcp resources, request_user_input, view_image) and
@@ -214,7 +214,7 @@ const DEEPSEEK_OFFICIAL_PROFILE = {
     "request_user_input",
     "view_image",
     "harness_web_search",
-    "harness_vision_inspect",
+    "vision_inspect",
   ]),
   availableModels: [
     { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash", endpoint: "responses", supportsVision: false, status: "available" },

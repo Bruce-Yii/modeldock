@@ -43,7 +43,7 @@ function baseResponse(id, payload, status, output, usage = null) {
     temperature: payload.temperature ?? null,
     text: payload.text ?? { format: { type: "text" } },
     tool_choice: payload.tool_choice ?? "auto",
-    tools: (payload.tools ?? []).filter((tool) => tool?.name !== "harness_web_search" && tool?.name !== "harness_vision_inspect"),
+    tools: (payload.tools ?? []).filter((tool) => tool?.name !== "harness_web_search" && tool?.name !== "vision_inspect"),
     top_p: payload.top_p ?? null,
     truncation: payload.truncation ?? "disabled",
     usage,
@@ -107,6 +107,23 @@ export class LiveResponsesWriter {
     });
   }
 
+  // Emit a standalone assistant message carrying an image (e.g. the screenshot that a
+  // vision_inspect call analyzed), so Codex renders it in the conversation.
+  imagePart(imageUrl, label = "") {
+    this.start();
+    const id = `img_${randomUUID().replace(/-/g, "")}`;
+    const index = this.nextOutputIndex++;
+    const part = { type: "output_image", image_url: imageUrl, annotations: [] };
+    this.#emit("response.output_item.added", {
+      output_index: index,
+      item: { id, type: "message", role: "assistant", status: "in_progress", content: [part] },
+    });
+    this.#emit("response.content_part.added", { item_id: id, output_index: index, content_index: 0, part });
+    const completed = { id, type: "message", role: "assistant", status: "completed", content: [part] };
+    this.#emit("response.output_item.done", { output_index: index, item: completed });
+    this.output[index] = completed;
+  }
+
   reasoningDelta(delta) {
     this.start();
     if (!this.reasoning) {
@@ -121,8 +138,7 @@ export class LiveResponsesWriter {
         item_id: id,
         output_index: index,
         content_index: 0,
-        part: { type: "summary_text", text: "" },
-      });
+        part: { type: "summary_text", text: "" },      });
     }
     this.reasoning.text += delta;
     this.#emit("response.reasoning_summary_text.delta", {

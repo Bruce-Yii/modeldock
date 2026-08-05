@@ -42,12 +42,12 @@ test("keeps a plain request intact and adds the resident vision tool on the main
       mediaStore: fakeStore(), defaultModel: "deepseek-v4-flash" });
   assert.equal(payload.model, "deepseek-v4-flash");
   assert.equal(payload.stream, true);
-  // harness_vision_inspect is resident on DeepSeek turns so it can always request a Luna observation.
-  assert.deepEqual(payload.tools.map((t) => t.name), ["shell_command", "harness_vision_inspect"]);
+  // vision_inspect is resident on DeepSeek turns so it can always request a Luna observation.
+  assert.deepEqual(payload.tools.map((t) => t.name), ["shell_command", "vision_inspect"]);
   assert.deepEqual(report.blocked, { tool_search: 0, web_search: 0 });
   assert.equal(report.originalToolCount, 1);
   assert.equal(report.forwardedToolCount, 2);
-  assert.deepEqual(report.injectedHarnessTools, ["harness_vision_inspect"]);
+  assert.deepEqual(report.injectedHarnessTools, ["vision_inspect"]);
   assert.equal(report.toolChoiceRewritten, false);
   assert.deepEqual(report.imageRefs, []);
 });
@@ -63,11 +63,11 @@ test("filters web_search and tool_search tools and counts them", () => {
   const { payload, report } = transformResponsesRequest(source, {
       profile: UNFILTERED_GO_PROFILE,
       mediaStore: fakeStore(), defaultModel: "d" });
-  assert.deepEqual(payload.tools.map((t) => t.name), ["f1", "harness_web_search", "harness_vision_inspect"]);
+  assert.deepEqual(payload.tools.map((t) => t.name), ["f1", "harness_web_search", "vision_inspect"]);
   assert.deepEqual(report.blocked, { tool_search: 1, web_search: 2 });
   assert.equal(report.originalToolCount, 4);
   assert.equal(report.forwardedToolCount, 3);
-  assert.deepEqual(report.injectedHarnessTools, ["harness_web_search", "harness_vision_inspect"]);
+  assert.deepEqual(report.injectedHarnessTools, ["harness_web_search", "vision_inspect"]);
 });
 
 test("rewrites tool_choice required to auto", () => {
@@ -153,7 +153,7 @@ test("direct vision route keeps the real current-turn image for Luna and injects
   // Luna is vision-capable, so the current-turn image is forwarded as-is (never rewritten to a reference).
   assert.equal(payload.input[0].content[1].type, "input_image", "the vision model receives the real image");
   assert.equal(payload.input[0].content[1].image_url, IMAGE_DATA_URL);
-  assert.equal(payload.tools.some((tool) => tool.name === "harness_vision_inspect"), false, "Luna sees the image directly and needs no harness vision tool");
+  assert.equal(payload.tools.some((tool) => tool.name === "vision_inspect"), false, "Luna sees the image directly and needs no harness vision tool");
   assert.deepEqual(report.imageRefs, ["img_1"], "still cached for the dashboard / later reference");
   assert.equal(report.directVision, true);
 });
@@ -171,7 +171,7 @@ test("historical images compress to a reference while the resident vision tool s
   assert.match(payload.input[0].content[0].text, /Earlier image attachment/);
   assert.match(payload.input[0].content[0].text, /following assistant observation/);
   // Main-model turn: the tool is resident so DeepSeek can re-inspect the referenced image on a new visual question.
-  assert.equal(payload.tools.some((tool) => tool.name === "harness_vision_inspect"), true);
+  assert.equal(payload.tools.some((tool) => tool.name === "vision_inspect"), true);
   assert.deepEqual(report.imageRefs, ["img_1"]);
   assert.deepEqual(report.currentImageRefs, []);
 });
@@ -258,7 +258,7 @@ test("handles a missing tools array by creating one for the resident vision tool
   const { payload, report } = transformResponsesRequest(source, {
       profile: UNFILTERED_GO_PROFILE,
       mediaStore: fakeStore(), defaultModel: "d" });
-  assert.deepEqual((payload.tools || []).map((t) => t.name), ["harness_vision_inspect"]);
+  assert.deepEqual((payload.tools || []).map((t) => t.name), ["vision_inspect"]);
   assert.equal(report.originalToolCount, 0);
   assert.equal(report.forwardedToolCount, 1);
   assert.deepEqual(report.blocked, { tool_search: 0, web_search: 0 });

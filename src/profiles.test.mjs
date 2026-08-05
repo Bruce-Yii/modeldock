@@ -31,7 +31,7 @@ test("opencode-go profile keeps the Go-specific hardening flags", () => {
   assert.equal(OPENCODE_GO_PROFILE.canonicalizeCallIds, true);
   assert.equal(OPENCODE_GO_PROFILE.stripSyntheticReasoningPlaceholder, true);
   assert.equal(OPENCODE_GO_PROFILE.harnessToolNames.has("harness_web_search"), true);
-  assert.equal(OPENCODE_GO_PROFILE.harnessToolNames.has("harness_vision_inspect"), true);
+  assert.equal(OPENCODE_GO_PROFILE.harnessToolNames.has("vision_inspect"), true);
   assert.ok(OPENCODE_GO_PROFILE.harnessTools.webSearch, "web search harness tool defined");
   assert.ok(OPENCODE_GO_PROFILE.harnessTools.vision, "vision harness tool defined");
 });
@@ -42,7 +42,7 @@ test("deepseek-official profile routes the main model on DeepSeek with harness o
   assert.equal(DEEPSEEK_OFFICIAL_PROFILE.compactCompletedToolHistory, true);
   assert.equal(DEEPSEEK_OFFICIAL_PROFILE.stripSyntheticReasoningPlaceholder, true);
   assert.equal(DEEPSEEK_OFFICIAL_PROFILE.harnessToolNames.has("harness_web_search"), true);
-  assert.equal(DEEPSEEK_OFFICIAL_PROFILE.harnessToolNames.has("harness_vision_inspect"), true);
+  assert.equal(DEEPSEEK_OFFICIAL_PROFILE.harnessToolNames.has("vision_inspect"), true);
   assert.ok(DEEPSEEK_OFFICIAL_PROFILE.harnessTools.webSearch, "web search harness tool defined");
   assert.ok(DEEPSEEK_OFFICIAL_PROFILE.harnessTools.vision, "vision harness tool defined");
   assert.equal(DEEPSEEK_OFFICIAL_PROFILE.coreTools.has("apply_patch"), true, "apply_patch is the only Codex local tool DeepSeek accepts");
@@ -92,5 +92,5 @@ test("harness tool schemas stay immutable between profiles", () => {
   cloned.name = "mutated";
   assert.equal(OPENCODE_GO_PROFILE.harnessTools.webSearch.name, before, "profile schema unaffected by clone mutation");
   assert.equal(HARNESS_WEB_SEARCH_TOOL.name, "harness_web_search");
-  assert.equal(HARNESS_VISION_TOOL.name, "harness_vision_inspect");
+  assert.equal(HARNESS_VISION_TOOL.name, "vision_inspect");
 });

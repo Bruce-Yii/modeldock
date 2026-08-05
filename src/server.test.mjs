@@ -157,7 +157,7 @@ test("non-streaming relay: forwards normalized body with auth and parses usage",
   assert.equal(received.model, "deepseek-v4-flash");
   assert.equal(received.parallel_tool_calls, false);
   assert.deepEqual(received.input, [{ role: "user", content: [{ type: "input_text", text: "hello" }] }]);
-  assert.deepEqual(received.tools.map((tool) => tool.name), ["harness_web_search", "harness_vision_inspect"]);
+  assert.deepEqual(received.tools.map((tool) => tool.name), ["harness_web_search", "vision_inspect"]);
 
   const snap = instance.services.metrics.snapshot();
   assert.equal(snap.responses.total, 1);
@@ -732,7 +732,7 @@ test("a visual turn routes to Luna with image references and vision tooling", as
   assert.equal(received.model, "gpt-5.6-luna");
   assert.equal(received.input[0].content[1].type, "input_image", "the vision model receives the real image, not a reference");
   assert.equal(received.input[0].content[1].image_url, dataUrl);
-  assert.equal(received.tools?.some((tool) => tool.name === "harness_vision_inspect") || false, false, "Luna sees the image directly and gets no harness vision tool");
+  assert.equal(received.tools?.some((tool) => tool.name === "vision_inspect") || false, false, "Luna sees the image directly and gets no harness vision tool");
   const trace = instance.services.metrics.recent.find((item) => item.kind === "responses");
   assert.equal(trace.model, "gpt-5.6-luna");
   assert.equal(trace.directVision, true);
@@ -796,7 +796,7 @@ test("Luna tool calls stay on Luna, then the next independent turn returns to De
   assert.equal(third.headers.get("x-modeldock-route"), "default_main");
   assert.deepEqual(receivedModels, ["gpt-5.6-luna", "gpt-5.6-luna", "deepseek-v4-flash"]);
   // Third turn is back on DeepSeek (main model): the resident vision tool lets it re-inspect the earlier image.
-  assert.equal(receivedBodies[2].tools?.some((tool) => tool.name === "harness_vision_inspect") || false, true);
+  assert.equal(receivedBodies[2].tools?.some((tool) => tool.name === "vision_inspect") || false, true);
   assert.match(receivedBodies[2].input[0].content[0].text, /Earlier image attachment/);
 });
 
@@ -818,7 +818,7 @@ test("DeepSeek fallback vision receives an explicit Luna observation and cannot 
     if (mainCalls === 1) {
       res.end(JSON.stringify({ id: "resp_vision_call", output: [{
         type: "function_call",
-        name: "harness_vision_inspect",
+        name: "vision_inspect",
         call_id: "call_vision",
         arguments: JSON.stringify({ image_ref: actualRef, question: "Why is the button hidden?", mode: "ui" }),
       }] }));
@@ -840,7 +840,7 @@ test("DeepSeek fallback vision receives an explicit Luna observation and cannot 
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
       input: "Continue the task.",
-      tools: [{ type: "function", name: "harness_vision_inspect", description: "vision", parameters: { type: "object", properties: {} } }],
+      tools: [{ type: "function", name: "vision_inspect", description: "vision", parameters: { type: "object", properties: {} } }],
     }),
   });
   assert.equal(response.status, 200);
@@ -850,7 +850,7 @@ test("DeepSeek fallback vision receives an explicit Luna observation and cannot 
   assert.match(observation, /VISION_INSPECTION_COMPLETED/);
   assert.match(observation, /vision_model: gpt-5\.6-luna/);
   assert.match(observation, /visual_evidence_begin[\s\S]*button is covered by a modal[\s\S]*visual_evidence_end/);
-  assert.equal(continuation.tools.some((tool) => tool.name === "harness_vision_inspect"), false);
+  assert.equal(continuation.tools.some((tool) => tool.name === "vision_inspect"), false);
   const trace = instance.services.metrics.recent.find((item) => item.kind === "responses");
   assert.equal(trace.harnessToolRounds, 1);
 });
@@ -1075,7 +1075,7 @@ test("web search harness works alongside disclosure filtering", async (t) => {
     res.setHeader("content-type", "text/event-stream");
     if (mainCalls === 1) {
       assert.ok(toolNames.includes("harness_web_search"), `harness_web_search must be present, got ${JSON.stringify(toolNames)}`);
-      assert.ok(toolNames.includes("harness_vision_inspect"), `vision tool is resident on the main-model path, got ${JSON.stringify(toolNames)}`);
+      assert.ok(toolNames.includes("vision_inspect"), `vision tool is resident on the main-model path, got ${JSON.stringify(toolNames)}`);
       sendSse(res, "response.output_item.added", { output_index: 0, item: { id: "fc_w", type: "function_call", name: "harness_web_search", call_id: "call_w", arguments: "" } });
       sendSse(res, "response.function_call_arguments.delta", { output_index: 0, delta: '{"queries":["modeldock"]}' });
     } else {
@@ -1161,7 +1161,7 @@ test("main model on DeepSeek with vision + harness on OpenCode Go: per-provider 
     res.setHeader("content-type", "application/json");
     const deepseekCount = calls.filter((c) => c.camp === "deepseek").length;
     if (camp === "deepseek" && deepseekCount === 1) {
-      res.end(JSON.stringify({ id: "resp_ds1", output: [{ type: "function_call", name: "harness_vision_inspect", call_id: "call_v", arguments: JSON.stringify({ image_ref: actualRef, question: "What does the chart show?" }) }], usage: {} }));
+      res.end(JSON.stringify({ id: "resp_ds1", output: [{ type: "function_call", name: "vision_inspect", call_id: "call_v", arguments: JSON.stringify({ image_ref: actualRef, question: "What does the chart show?" }) }], usage: {} }));
       return;
     }
     if (camp === "opencode") {
@@ -1212,7 +1212,7 @@ test("main model on DeepSeek with vision + harness on OpenCode Go: per-provider 
   assert.match(opencodeCalls[0].auth, /Bearer opencode-token/, "vision requests carry the OpenCode Go token");
   assert.match(deepseekCalls[0].url, /\/responses$/, "DeepSeek camp uses the responses wire style");
   assert.match(opencodeCalls[0].url, /\/go\/responses$/, "vision model routes to its own provider base");
-  assert.ok(deepseekCalls[0].tools.includes("harness_vision_inspect"), "harness vision tool is resident on the DeepSeek main-model path");
+  assert.ok(deepseekCalls[0].tools.includes("vision_inspect"), "harness vision tool is resident on the DeepSeek main-model path");
   assert.ok(deepseekCalls[0].tools.includes(":tool_search"), "hosted tool_search is forwarded (DeepSeek ignores it silently)");
   assert.ok(deepseekCalls[0].tools.includes(":web_search"), "hosted web_search is forwarded (DeepSeek supports it natively)");
   assert.equal(deepseekCalls[0].tools.includes("harness_web_search"), false, "no Exa harness search is injected when hosted schemas pass through");

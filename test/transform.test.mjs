@@ -25,7 +25,7 @@ test("filters Codex hosted tools and normalizes required tool choice", () => {
   assert.equal(result.payload.model, "deepseek-v4-flash");
   assert.equal(result.payload.tool_choice, "auto");
   assert.equal(result.payload.parallel_tool_calls, false);
-  assert.deepEqual(result.payload.tools.map((tool) => tool.name), ["shell_command", "harness_web_search", "harness_vision_inspect"]);
+  assert.deepEqual(result.payload.tools.map((tool) => tool.name), ["shell_command", "harness_web_search", "vision_inspect"]);
   assert.equal(result.payload.input[0].content[0].text, "hello");
   assert.deepEqual(result.report.blocked, { tool_search: 1, web_search: 1 });
 });
@@ -185,9 +185,9 @@ test("replaces image tool outputs with a cached reference instead of base64 text
   const result = transformResponsesRequest(
     {
       model: "deepseek-v4-flash",
-      tools: [{ type: "function", name: "harness_vision_inspect", parameters: { type: "object", properties: {} } }],
+      tools: [{ type: "function", name: "vision_inspect", parameters: { type: "object", properties: {} } }],
       input: [
-        { type: "function_call", id: "call_1", call_id: "call_1", name: "harness_vision_inspect", arguments: "{}" },
+        { type: "function_call", id: "call_1", call_id: "call_1", name: "vision_inspect", arguments: "{}" },
         { type: "function_call_output", call_id: "call_1", output: [{ type: "input_image", image_url: image }] },
       ],
     },
