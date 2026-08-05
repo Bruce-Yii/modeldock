@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { randomUUID, createHash } from "node:crypto";
 import express from "express";
 import { createMcpExpressApp } from "@modelcontextprotocol/express";
-import { loadConfig, publicConfig } from "./config.mjs";
+import { loadConfig, publicConfig, writeEnvFile, envFileFor } from "./config.mjs";
 import { MediaStore } from "./media-store.mjs";
 import { Metrics, extractResponseUsage, extractUsageFromSse } from "./metrics.mjs";
 import { transformResponsesRequest } from "./transform.mjs";
@@ -11,13 +11,53 @@ import { createUpstreams } from "./upstreams.mjs";
 import { createMcpNodeHandler } from "./mcp.mjs";
 import { LiveResponsesWriter, parseSse } from "./live-responses.mjs";
 import { CodexConfigSwitcher } from "./config-switcher.mjs";
+import { createAutostart } from "./autostart.mjs";
 import { RouteAffinity, routeResponsesRequest } from "./router.mjs";
 import { profileOptions, profileById, providerForModel, tokenFor } from "./profiles.mjs";
 import { chatEndpointFor, chatChunkToResponsesEvents, responsesToChatRequest } from "./chat-bridge.mjs";
+import staticFiles from "./static-inline.mjs";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.resolve(dirname, "../public");
 const assetsDir = path.resolve(dirname, "../assets");
+const hasInlineStatic = staticFiles !== null && typeof staticFiles === "object";
+
+const STATIC_MIME = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".png": "image/png",
+  ".ico": "image/x-icon",
+};
+
+function contentTypeFor(file) {
+  const ext = file.slice(file.lastIndexOf(".")).toLowerCase();
+  return STATIC_MIME[ext] || "application/octet-stream";
+}
+
+// Serve the dashboard from the inlined frontend tree when running the release bundle
+// (single file, no on-disk assets). Falls through to the on-disk public/ and assets/
+// directories in dev (npm run dev / node src/server.mjs / npm test).
+function serveInlineStatic(app) {
+  if (!hasInlineStatic) return;
+  const publicTree = staticFiles.public || {};
+  const assetTree = staticFiles.assets || {};
+  const serve = (req, res, tree, stripPrefix) => {
+    const rel = req.path.slice(stripPrefix.length).replace(/^\/+/, "");
+    const file = rel || "index.html";
+    if (!(file in tree)) return false;
+    const body = tree[file];
+    res.setHeader("Content-Type", contentTypeFor(file));
+    res.setHeader("Cache-Control", stripPrefix ? "public, max-age=604800" : "no-cache");
+    res.send(body);
+    return true;
+  };
+  app.use("/assets", (req, res, next) => { if (!serve(req, res, assetTree, "/assets")) next(); });
+  app.use((req, res, next) => {
+    if (req.method !== "GET") return next();
+    if (!serve(req, res, publicTree, "")) next();
+  });
+}
 
 function urlHost(host) {
   return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
@@ -106,7 +146,7 @@ function modelProviderOf(options, modelId) {
   return options.find((entry) => entry.id === modelId)?.provider || "other";
 }
 
-function statusPayload({ config, metrics, mediaStore, routeAffinity, modelSelection }) {
+function statusPayload({ config, metrics, mediaStore, routeAffinity, modelSelection, autostart }) {
   const selected = modelSelection || { mainModel: config.mainModel, visionModel: config.visionModel };
   const options = modelOptions(config);
   const visionOptions = options.filter((entry) => entry.supportsVision);
@@ -124,7 +164,34 @@ function statusPayload({ config, metrics, mediaStore, routeAffinity, modelSelect
     },
     media: mediaStore.snapshot(),
     routing: routeAffinity?.snapshot?.() || { activeCallIds: 0 },
+    autostart: {
+      supported: Boolean(autostart?.supported?.()),
+      enabled: Boolean(autostart?.enabled?.()),
+    },
   });
+}
+
+function settingsPayload(services) {
+  const { config, autostart, modelSelection } = services;
+  const mainToken = config.tokens?.["opencode-go"] || config.goToken || "";
+  const deepseekToken = config.tokens?.["deepseek-official"] || "";
+  return {
+    envFile: config.envFile || "",
+    tokenConfigured: Boolean(mainToken || deepseekToken),
+    providers: [
+      { id: "opencode-go", label: "OpenCode Go", tokenConfigured: Boolean(mainToken) },
+      { id: "deepseek-official", label: "DeepSeek (Official)", tokenConfigured: Boolean(deepseekToken) },
+    ],
+    models: {
+      mainModel: modelSelection?.mainModel || config.mainModel,
+      visionModel: modelSelection?.visionModel || config.visionModel,
+      visionFallbackModel: config.visionFallbackModel || "",
+    },
+    autostart: {
+      supported: Boolean(autostart?.supported?.()),
+      enabled: Boolean(autostart?.enabled?.()),
+    },
+  };
 }
 
 function configMutationGuard(config) {
@@ -665,6 +732,17 @@ async function relayResponses(req, res, services) {
     if (config.debug?.noReasoning) {
       delete transformed.payload.reasoning;
     }
+    // L2 rolling summary: compact old assistant history into a pinned summary block.
+    const summaryKey = key || "default";
+    const existing = services.sessionSummaries?.get(summaryKey) || null;
+    const existingSummary = existing?.text || null;
+    // Debounce: one compaction per session per 5 minutes keeps us from re-summarizing
+    // on every request while a long turn is still generating.
+    const SUMMARY_DEBOUNCE_MS = 5 * 60_000;
+    if (!existing || Date.now() - existing.at > SUMMARY_DEBOUNCE_MS) {
+      const newSummary = await summarizeHistory(services, summaryKey, transformed.payload, existingSummary);
+      if (newSummary) services.sessionSummaries?.set(summaryKey, { text: newSummary, at: Date.now() });
+    }
   } catch (error) {
     finish({ ok: false, error: error.message });
     return res.status(400).json({ error: { message: error.message, type: "invalid_request_error" } });
@@ -913,7 +991,12 @@ function modelEndpoint(modelId) {
   return "responses";
 }
 
-let VISION_PROBE_IMAGE = null;
+// Image used to probe whether an upstream model can actually see images. In the release
+// bundle this is the inlined dashboard.png; in dev it falls back to a tiny 32x24 RGB-bar
+// data URL so the probe needs no on-disk asset and works from any layout.
+const VISION_PROBE_IMAGE =
+  (hasInlineStatic && staticFiles.assets?.["dashboard.png"]) ||
+  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAYCAIAAAAUMWhjAAAALElEQVR4nGP47+CAHzkcSCCACv7jQQyjFoxaMGrBqAWjFoxaMGrBqAVDwwIALqWKRWv2VpsAAAAASUVORK5CYII=";
 
 function visionProbeUrlAndBody(modelId, config, imageUrl) {
   const provider = providerForModel(config, modelId);
@@ -978,14 +1061,6 @@ async function callVisionModel(modelId, config, imageUrl, question, maxTokens = 
 
 async function probeImageSupport(modelId, config) {
   try {
-    if (!VISION_PROBE_IMAGE) {
-      const { readFileSync, existsSync } = await import("node:fs");
-      const candidates = ["D:/projects/modeldock/assets/dashboard.png", "D:/projects/modeldock/dashboard.png"];
-      const found = candidates.find((p) => existsSync(p));
-      if (!found) return { capability: "unknown", status: "available" };
-      const b64 = readFileSync(found).toString("base64");
-      VISION_PROBE_IMAGE = `data:image/png;base64,${b64}`;
-    }
     const result = await callVisionModel(modelId, config, VISION_PROBE_IMAGE, "What is this?", 64);
     if (result.error) {
       if (result.error.includes("Unsupported model") || result.error.includes("ModelNotFound") || result.error.includes("Router.Unavailable")) {
@@ -1098,6 +1173,12 @@ async function refreshProfileModels(profile, config) {
   const opencodeToken = config.tokens?.["opencode-go"] || config.goToken;
   if (!opencodeToken) return;
   if (!config.goBaseUrl.includes("opencode.ai")) return;
+  // Model catalog refresh, opt-in via MODELDOCK_MODEL_PROBE_ENABLED=1. The shipped
+  // curated catalog (profiles.mjs) is the primary model source and ships with the
+  // release; users do not need to re-probe. This only does a light GET /models merge
+  // so newly added upstream ids appear alongside the curated ones. Vision
+  // probing/evaluation (probeVisionCandidates/evaluateVision) is dev-only test
+  // tooling and is NOT wired into this path or into startup.
   if (config.modelProbeEnabled === false) return;
   try {
     const base = config.goBaseUrl.replace(/\/$/, "");
@@ -1127,6 +1208,121 @@ async function refreshProfileModels(profile, config) {
   }
 }
 
+// L2 rolling summary: when a session's assistant history grows past a threshold, the
+// oldest portion is summarized by the main model into a compact structured block that
+// stays pinned in context. The summary rolls forward: each compaction feeds the prior
+// summary plus the new delta, keeping the block bounded while preserving task state
+// (goal, done, decisions, status, todo) — the antidote to local-optimum loops.
+const SUMMARY_TRIGGER_BYTES = 200_000; // assistant text beyond this triggers compaction
+const SUMMARY_WINDOW_ITEMS = 40; // most recent messages stay verbatim
+const SUMMARY_PROMPT = [
+  "You are the memory keeper of a long-running coding session. Read the conversation history and produce a compact structured summary in this exact format:",
+  "GOAL: <the user's original task, one line>",
+  "DONE: <what has been completed, bullet list>",
+  "DECISIONS: <key decisions and constraints that must NOT be forgotten, bullet list>",
+  "STATUS: <current state, one line>",
+  "TODO: <what remains, bullet list>",
+  "Keep it under 200 words. Preserve technical details, file paths, and any constraint the model decided earlier — the model must not re-derive them.",
+].join("\n");
+
+async function summarizeHistory(services, key, payload, existingSummary) {
+  try {
+    const input = Array.isArray(payload.input) ? payload.input : [];
+    const assistants = [];
+    for (const item of input) {
+      if (item?.role !== "assistant") continue;
+      const text = Array.isArray(item.content) ? item.content.map((p) => p.text || "").join(" ") : item.content || "";
+      if (text) assistants.push(text);
+    }
+    const total = assistants.reduce((acc, t) => acc + t.length, 0);
+    if (total <= SUMMARY_TRIGGER_BYTES || assistants.length <= SUMMARY_WINDOW_ITEMS) return null;
+
+    const keepCount = SUMMARY_WINDOW_ITEMS;
+    const oldText = assistants.slice(0, Math.max(1, assistants.length - keepCount)).join("\n\n");
+    const recentText = assistants.slice(-keepCount).join("\n\n");
+    const summarizeTarget = existingSummary
+      ? `PREVIOUS SUMMARY:\n${existingSummary}\n\nNEW HISTORY SINCE THEN:\n${oldText}`
+      : `HISTORY TO SUMMARIZE:\n${oldText}`;
+
+    const requestModel = services.config.mainModel;
+    const endpoint = chatEndpointFor(requestModel, services.config);
+    let summaryText = null;
+    if (endpoint.style === "chat") {
+      const chatBody = responsesToChatRequest({
+        model: requestModel,
+        stream: false,
+        input: [
+          { role: "developer", content: [{ type: "input_text", text: SUMMARY_PROMPT }] },
+          { role: "user", content: [{ type: "input_text", text: summarizeTarget }] },
+        ],
+      });
+      const res = await fetch(endpoint.url, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${tokenFor(services.config, requestModel)}`,
+          "Content-Type": "application/json",
+          ...opencodeSessionHeaders({ client_metadata: { session_id: `${key}#summary` } }),
+        },
+        body: JSON.stringify(chatBody),
+        signal: AbortSignal.timeout(60_000),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        summaryText = data.choices?.[0]?.message?.content || null;
+      }
+    } else {
+      const res = await fetch(`${upstreamBaseForModel(services.config, requestModel)}/responses`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${tokenFor(services.config, requestModel)}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: requestModel,
+          input: [
+            { role: "developer", content: [{ type: "input_text", text: SUMMARY_PROMPT }] },
+            { role: "user", content: [{ type: "input_text", text: summarizeTarget }] },
+          ],
+          stream: false,
+          max_output_tokens: 500,
+        }),
+        signal: AbortSignal.timeout(60_000),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        summaryText = (data.output || [])
+          .filter((item) => item?.type === "message")
+          .flatMap((item) => (item.content || []).map((p) => p.text || ""))
+          .join("") || null;
+      }
+    }
+    if (!summaryText) return null;
+
+    // Replace the summarized old assistants with the summary block, keep the recent
+    // window verbatim. Summary goes right after the leading developer/L1 block.
+    const oldCount = Math.max(1, assistants.length - keepCount);
+    let removed = 0;
+    const newInput = input.filter((item) => {
+      if (item?.role !== "assistant") return true;
+      const text = Array.isArray(item.content) ? item.content.map((p) => p.text || "").join(" ") : item.content || "";
+      if (text && removed < oldCount) { removed += 1; return false; }
+      return true;
+    });
+    const insertIdx = newInput.findIndex((item) => item?.role === "user");
+    const summaryItem = {
+      role: "user",
+      content: [{ type: "input_text", text: `[SESSION SUMMARY — earlier work, keep in mind]\n${summaryText}\n[end summary]` }],
+    };
+    payload.input = insertIdx >= 0
+      ? [...newInput.slice(0, insertIdx), summaryItem, ...newInput.slice(insertIdx)]
+      : [summaryItem, ...newInput];
+    return summaryText;
+  } catch (error) {
+    debugLog(services, `summary failed: ${error.message}`);
+    return null;
+  }
+}
+
 export function createServices(config = loadConfig()) {
   const mutableConfig = { ...config };
   const metrics = new Metrics({ recentLimit: mutableConfig.recentLimit });
@@ -1136,6 +1332,9 @@ export function createServices(config = loadConfig()) {
     maxEntries: mutableConfig.mediaMaxEntries,
   });
   const modelSelection = { mainModel: mutableConfig.mainModel, visionModel: mutableConfig.visionModel };
+  // L2: rolling per-session summaries (session_id -> { text, at }). Grows monotonically
+  // with the conversation; each compaction folds the new delta into the old summary.
+  const sessionSummaries = new Map();
   // Vision calls carry the same opencode session identity as the main-model turn that
   // triggered them (set per request by the relay), so the dashboard groups them under
   // one session instead of a session-less row.
@@ -1152,6 +1351,8 @@ export function createServices(config = loadConfig()) {
     baseUrl: `http://${urlHost(mutableConfig.host)}:${mutableConfig.port}/v1`,
     model: mutableConfig.mainModel,
   });
+  const autostart = createAutostart();
+  autostart.refresh().catch(() => {});
   const routeAffinity = new RouteAffinity();
   const toolDisclosure = new Map();
   // Reasoning cache: call_id -> the reasoning text the model produced before that tool
@@ -1178,7 +1379,7 @@ export function createServices(config = loadConfig()) {
     ? setInterval(refreshModelCatalog, refreshIntervalHours * 3_600_000)
     : null;
   if (modelRefreshTimer) modelRefreshTimer.unref();
-  return { config: mutableConfig, runtime, metrics, mediaStore, upstreams, configSwitcher, routeAffinity, modelSelection, toolDisclosure, reasoningCache, rememberReasoning, reasoningFor, refreshModelCatalog, modelRefreshTimer, setActiveSessionSeed: (seed) => { activeSessionSeed = seed; } };
+  return { config: mutableConfig, runtime, metrics, mediaStore, upstreams, configSwitcher, autostart, routeAffinity, modelSelection, toolDisclosure, reasoningCache, rememberReasoning, reasoningFor, sessionSummaries, refreshModelCatalog, modelRefreshTimer, setActiveSessionSeed: (seed) => { activeSessionSeed = seed; } };
 }
 
 function disclosureFor(services, payload) {
@@ -1196,7 +1397,7 @@ function disclosureFor(services, payload) {
 }
 
 export function createApp(services = createServices()) {
-  const { config, metrics, mediaStore, upstreams, configSwitcher, routeAffinity } = services;
+  const { config, metrics, mediaStore, upstreams, configSwitcher, autostart, routeAffinity } = services;
   const app = createMcpExpressApp({ host: config.host, jsonLimit: "25mb" });
   app.disable("x-powered-by");
 
@@ -1281,6 +1482,36 @@ export function createApp(services = createServices()) {
     recordConfigAction(metrics, `debug_${enabled ? "on" : "off"}`, { ok: true });
     return res.json({ enabled });
   });
+  app.post("/api/autostart", mutateConfig, async (req, res) => {
+    const enabled = Boolean(req.body?.enabled);
+    try {
+      const result = await autostart.setEnabled(enabled);
+      recordConfigAction(metrics, `autostart_${enabled ? "on" : "off"}`, { ok: true });
+      return res.json(result);
+    } catch (error) {
+      recordConfigAction(metrics, `autostart_${enabled ? "on" : "off"}`, { ok: false, error: error.message });
+      return res.status(500).json({ error: { type: "autostart_failed", message: error.message } });
+    }
+  });
+  app.get("/api/settings", (req, res) => res.json(settingsPayload(services)));
+  app.post("/api/settings", mutateConfig, (req, res) => {
+    const body = req.body || {};
+    try {
+      if (body.opencodeGoToken) {
+        writeEnvFile({ OPENCODE_GO_TOKEN: String(body.opencodeGoToken) });
+        config.tokens["opencode-go"] = String(body.opencodeGoToken);
+      }
+      if (body.deepseekApiKey) {
+        writeEnvFile({ DEEPSEEK_API_KEY: String(body.deepseekApiKey) });
+        config.tokens["deepseek-official"] = String(body.deepseekApiKey);
+      }
+      recordConfigAction(metrics, "settings_update", { ok: true });
+      return res.json(settingsPayload(services));
+    } catch (error) {
+      recordConfigAction(metrics, "settings_update", { ok: false, error: error.message });
+      return res.status(500).json({ error: { type: "settings_failed", message: error.message } });
+    }
+  });
 
   const eventClients = new Set();
   const broadcast = () => {
@@ -1302,6 +1533,7 @@ export function createApp(services = createServices()) {
     });
   });
 
+  serveInlineStatic(app);
   app.use(express.static(publicDir, { extensions: ["html"], maxAge: 0 }));
   app.use("/assets", express.static(assetsDir, { maxAge: "7d" }));
   app.use((req, res) => res.status(404).json({ error: { message: "Not found" } }));
