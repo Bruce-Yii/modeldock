@@ -424,17 +424,18 @@ async function fetchGoResponses(payload, services, signal, accept = "application
   // for providers that speak reasoning natively (deepseek-official accepts effort in
   // { none, minimal, low, medium, high, xhigh, max }).
   const isDeepseekOfficial = services.config.profile?.id === "deepseek-official";
+  const isOpencodeGo = services.config.profile?.id === "opencode-go";
   const forwarded = { ...(isDeepseekOfficial ? fillReasoningContent(payload, services) : payload) };
-  if (!isDeepseekOfficial) delete forwarded.reasoning;
+  if (isOpencodeGo) delete forwarded.reasoning;
   return fetch(`${upstreamBaseForModel(services.config, requestModel)}/responses`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${tokenFor(services.config, requestModel)}`,
       Accept: accept,
       "Content-Type": "application/json",
-      // OpenCode session-affinity headers only for the OpenCode Go camp; the
-      // deepseek-official provider must NOT be fingerprinted as an opencode client.
-      ...(isDeepseekOfficial ? {} : opencodeSessionHeaders(payload)),
+      // OpenCode session-affinity headers only for the OpenCode Go camp; other
+      // providers must NOT be fingerprinted as an opencode client.
+      ...(isOpencodeGo ? opencodeSessionHeaders(payload) : {}),
     },
     body: JSON.stringify(forwarded),
     signal,
