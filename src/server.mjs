@@ -1216,13 +1216,14 @@ async function refreshProfileModels(profile, config) {
 const SUMMARY_TRIGGER_BYTES = 200_000; // assistant text beyond this triggers compaction
 const SUMMARY_WINDOW_ITEMS = 40; // most recent messages stay verbatim
 const SUMMARY_PROMPT = [
-  "You are the memory keeper of a long-running coding session. Read the conversation history and produce a compact structured summary in this exact format:",
+  "You are the memory keeper of a long-running coding session. Your ONLY job is to summarize the provided conversation history.",
+  "Produce a compact structured summary in this exact format:",
   "GOAL: <the user's original task, one line>",
   "DONE: <what has been completed, bullet list>",
   "DECISIONS: <key decisions and constraints that must NOT be forgotten, bullet list>",
   "STATUS: <current state, one line>",
   "TODO: <what remains, bullet list>",
-  "Keep it under 200 words. Preserve technical details, file paths, and any constraint the model decided earlier — the model must not re-derive them.",
+  "Rules: output ONLY the summary block above — no code, no explanations, no continued work. Keep it under 200 words. Preserve technical details, file paths, and any constraint the model decided earlier — the model must not re-derive them.",
 ].join("\n");
 
 async function summarizeHistory(services, key, payload, existingSummary) {
@@ -1238,7 +1239,13 @@ async function summarizeHistory(services, key, payload, existingSummary) {
     if (total <= SUMMARY_TRIGGER_BYTES || assistants.length <= SUMMARY_WINDOW_ITEMS) return null;
 
     const keepCount = SUMMARY_WINDOW_ITEMS;
-    const oldText = assistants.slice(0, Math.max(1, assistants.length - keepCount)).join("\n\n");
+    let oldText = assistants.slice(0, Math.max(1, assistants.length - keepCount)).join("\n\n");
+    // Bound the summarizer input; the summary only needs the gist of old work, not
+    // every byte (a 300KB+ history would make the summary call itself slow/timeout).
+    const SUMMARY_INPUT_LIMIT = 100_000;
+    if (oldText.length > SUMMARY_INPUT_LIMIT) {
+      oldText = `${oldText.slice(0, SUMMARY_INPUT_LIMIT * 0.6)}\n...[truncated ${oldText.length} chars]...\n${oldText.slice(-SUMMARY_INPUT_LIMIT * 0.4)}`;
+    }
     const recentText = assistants.slice(-keepCount).join("\n\n");
     const summarizeTarget = existingSummary
       ? `PREVIOUS SUMMARY:\n${existingSummary}\n\nNEW HISTORY SINCE THEN:\n${oldText}`
