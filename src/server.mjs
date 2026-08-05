@@ -650,7 +650,8 @@ async function relayResponses(req, res, services) {
       visionModel: modelSelection.visionModel,
       affinity: routeAffinity,
     });
-    const { set: disclosureSet } = disclosureFor(services, source);
+    const { key, set: disclosureSet } = disclosureFor(services, source);
+    services.setActiveSessionSeed?.(source?.client_metadata?.session_id || source?.client_metadata?.thread_id || key || null);
     services.activeToolRegistry = Array.isArray(source?.tools) ? source.tools : [];
     services.activeDisclosureSet = disclosureSet;
     transformed = transformResponsesRequest(source, {
@@ -952,7 +953,12 @@ async function callVisionModel(modelId, config, imageUrl, question, maxTokens = 
     parsed.messages[0].content[0].text = question;
     parsed.max_tokens = maxTokens;
   }
-  const response = await fetch(url, { method: "POST", headers, body: JSON.stringify(parsed), signal: AbortSignal.timeout(25_000) });
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { ...headers, ...opencodeSessionHeaders({ client_metadata: { session_id: "modeldock-probe" } }) },
+    body: JSON.stringify(parsed),
+    signal: AbortSignal.timeout(25_000),
+  });
   if (!response.ok) {
     const detail = (await response.text()).slice(0, 300);
     return { error: `HTTP ${response.status} ${detail}` };
@@ -1130,7 +1136,17 @@ export function createServices(config = loadConfig()) {
     maxEntries: mutableConfig.mediaMaxEntries,
   });
   const modelSelection = { mainModel: mutableConfig.mainModel, visionModel: mutableConfig.visionModel };
-  const upstreams = createUpstreams({ config: mutableConfig, metrics, mediaStore, getVisionModel: () => modelSelection.visionModel });
+  // Vision calls carry the same opencode session identity as the main-model turn that
+  // triggered them (set per request by the relay), so the dashboard groups them under
+  // one session instead of a session-less row.
+  let activeSessionSeed = null;
+  const upstreams = createUpstreams({
+    config: mutableConfig,
+    metrics,
+    mediaStore,
+    getVisionModel: () => modelSelection.visionModel,
+    getSessionSeed: () => activeSessionSeed,
+  });
   const configSwitcher = new CodexConfigSwitcher({
     codexHome: mutableConfig.codexHome,
     baseUrl: `http://${urlHost(mutableConfig.host)}:${mutableConfig.port}/v1`,
@@ -1162,7 +1178,7 @@ export function createServices(config = loadConfig()) {
     ? setInterval(refreshModelCatalog, refreshIntervalHours * 3_600_000)
     : null;
   if (modelRefreshTimer) modelRefreshTimer.unref();
-  return { config: mutableConfig, runtime, metrics, mediaStore, upstreams, configSwitcher, routeAffinity, modelSelection, toolDisclosure, reasoningCache, rememberReasoning, reasoningFor, refreshModelCatalog, modelRefreshTimer };
+  return { config: mutableConfig, runtime, metrics, mediaStore, upstreams, configSwitcher, routeAffinity, modelSelection, toolDisclosure, reasoningCache, rememberReasoning, reasoningFor, refreshModelCatalog, modelRefreshTimer, setActiveSessionSeed: (seed) => { activeSessionSeed = seed; } };
 }
 
 function disclosureFor(services, payload) {
