@@ -377,24 +377,23 @@ function fillReasoningContent(payload, services) {
   return { ...payload, input };
 }
 
-// OpenCode official clients generate IDs as `ses_` + 12 hex chars encoding the
-// creation timestamp (BigInt(timestamp)*0x1000+counter, high 48 bits) + 14 random
-// base62 chars (see packages/schema/src/identifier.ts). The zen gateway parses the
-// timestamp from those 12 hex chars (id.timestamp), so bare hex-derived IDs are not
-// recognized. For a Codex session we derive BOTH the timestamp field and the random
-// tail from a hash of the Codex session id, so every request of one Codex session
-// carries the exact same parseable ses_ id -> the gateway sees one stable session
-// (quota/cache affinity), while the format stays indistinguishable from the client.
+// OpenCode official clients (desktop/CLI) identify sessions via the x-opencode-*
+// header family: x-opencode-session (ses_ + 12 hex timestamp + 14 base62),
+// x-opencode-request (msg_ + same shape), x-opencode-client ("desktop"/"cli") and
+// x-opencode-project. The zen usage dashboard reads those to group requests under a
+// session; bare relays without them appear session-less. For a Codex session we derive
+// the ses_ timestamp field AND tail from a hash of the Codex session id, so every
+// request of one Codex session carries the same parseable session id.
 const OPENCODE_USER_AGENT = "opencode/1.18.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14";
 const SESSION_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
-function opencodeSessionId(seed) {
+function opencodeIdentifier(seed, prefix) {
   if (seed) {
     const digest = createHash("sha256").update(seed).digest();
     const time = Array.from({ length: 6 }, (_, index) => digest[index].toString(16).padStart(2, "0")).join("");
     let tail = "";
     for (let i = 0; i < 14; i += 1) tail += SESSION_ALPHABET[digest[6 + i] % SESSION_ALPHABET.length];
-    return `ses_${time}${tail}`;
+    return `${prefix}_${time}${tail}`;
   }
   const timestamp = Date.now();
   const current = BigInt(timestamp) * 0x1000n;
@@ -403,15 +402,22 @@ function opencodeSessionId(seed) {
   ).join("");
   let tail = "";
   for (let i = 0; i < 14; i += 1) tail += SESSION_ALPHABET[Math.floor(Math.random() * SESSION_ALPHABET.length)];
-  return `ses_${time}${tail}`;
+  return `${prefix}_${time}${tail}`;
 }
 
 function opencodeSessionHeaders(payload) {
   const codexSession = payload?.client_metadata?.session_id || payload?.client_metadata?.thread_id;
-  const ses = opencodeSessionId(typeof codexSession === "string" && codexSession ? codexSession : null);
+  const seed = typeof codexSession === "string" && codexSession ? codexSession : null;
+  const session = opencodeIdentifier(seed, "ses");
+  // msg_ request id: stable per request; derive from session seed + input length so
+  // successive turns differ but stay recognizably from the same client.
+  const requestSeed = seed ? `${seed}#${Array.isArray(payload.input) ? payload.input.length : 0}` : null;
+  const request = opencodeIdentifier(requestSeed, "msg");
   return {
-    "x-session-id": ses,
-    "x-session-affinity": ses,
+    "x-opencode-session": session,
+    "x-opencode-request": request,
+    "x-opencode-client": "desktop",
+    "x-opencode-project": seed ? seed.slice(0, 32) : "local",
     "User-Agent": OPENCODE_USER_AGENT,
   };
 }
