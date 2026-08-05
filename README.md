@@ -19,7 +19,7 @@
 
 ModelDock is a small local helper with two superpowers:
 
-- **Vision for DeepSeek V4 Flash** — Visual turns are routed to a vision model (Luna, with Kimi fallback), then the next independent turn returns to DeepSeek. DeepSeek can also request a Luna observation through a local vision tool.
+- **Vision for DeepSeek V4 Flash** — Visual turns are routed to a vision model (MiMo V2.5 Free by default, with MiniMax M3 fallback), then the next independent turn returns to DeepSeek. DeepSeek can also request a vision observation through a local vision tool, including local screenshot files.
 - **API bridge for Codex** — ModelDock forwards and normalizes Codex Responses requests. Local shell, file, and MCP tools keep working; incompatible hosted web/tool-search schemas are replaced with locally orchestrated Exa search.
 
 ## What you get

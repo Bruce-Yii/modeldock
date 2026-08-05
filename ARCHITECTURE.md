@@ -5,7 +5,7 @@ ModelDock is, how a request flows through the system, what each module owns, and
 pieces are wired together the way they are. It complements the user-facing README, which
 exists only for installing and running ModelDock.
 
-> **Verified against:** commit `852d00a` + uncommitted cross-provider routing work, `npm test` = 166 passing.
+> **Verified against:** commit `e5ddd35` (2026-08-04), `npm test` = 161 passing.
 > When you change routing, transform, profiles, or endpoints, re-verify the affected
 > section and bump this line. The codebase moves faster than prose — an unverified
 > architecture doc is worse than none.
@@ -22,13 +22,13 @@ does two headline jobs:
    **with the real image attached** (direct vision, one round-trip), or (b) exposes a
    **resident** `harness_vision_inspect` tool so the text-only main model can request a
    Luna observation of a captured or historical image on demand.
-2. **API bridge for Codex.** Codex emits hosted tool schemas (`web_search`, `tool_search`)
-   that the Go upstream rejects. `transform.mjs` strips them and substitutes locally
-   orchestrated equivalents: an Exa web search and an LLM-driven `harness_tool_search`
-   that lazily discloses tools to keep the upstream payload small.
+ 2. **API bridge for Codex.** Codex emits hosted tool schemas (`web_search`, `tool_search`)
+    that the Go upstream rejects. `transform.mjs` strips them and substitutes locally
+    orchestrated equivalents: an Exa web search via `harness_web_search`. All other Codex
+    tools are forwarded as-is (`showAllTools`).
 
-Because Codex's local tools (`shell_command`, `apply_patch`, …) are safe to keep, they are
-forwarded; only the hosted schemas are replaced.
+Because Codex's local tools (`shell_command`, `apply_patch`, `view_image`, …) are safe to
+keep, they are forwarded; only the hosted schemas are replaced.
 
 The gateway also maintains a **live model catalog**: it fetches the upstream `/models`
 list at startup, merges it with a curated, ranked `availableModels` seed, probes and
@@ -67,7 +67,6 @@ Codex ──POST /v1/responses──> ModelDock gate (Express, loopback only)
                                   ├─ harness loop:      execute local tools between turns
                                   │   harness_web_search       → Exa MCP (upstreams)
                                   │   harness_vision_inspect    → vision model (upstreams)
-                                  │   harness_tool_search      → coordinator LLM, disclose
                                   │
                                   ▼
         stream: live-normalized relay (live-responses.mjs)
@@ -194,22 +193,20 @@ Tools:
 | Tool | Execution | Notes |
 | --- | --- | --- |
 | `harness_web_search` | `upstreams.searchWeb` → Exa MCP tool `web_search_exa` | Multiple queries supported; per-query site/after filtering |
-| `harness_vision_inspect` | `upstreams.inspectVision` → vision model | Reads image from `media-store`, calls the configured vision model with fallback; resident on the main-model path; calls removed from the tools after use |
-| `harness_tool_search` | `coordinatorFetch` → small model call, JSON that picks tool names | Feeds matches back as the tool definitions, so the model can now *see* previously hidden tools |
+| `harness_vision_inspect` | `upstreams.inspectVision` → vision model | Reads image from `media-store` or a local path, calls the configured vision model with fallback; resident on the main-model path; calls removed from the tools after use |
 
-Harness tool names are driven by `profile.harnessToolNames` (opencode-go additionally
-enables `harness_tool_search`). Loop round limit = 4; a normal turn generally completes
-in 1-2 rounds (model emits text first), so this is a safety net rather than a common case.
+Harness tool names are driven by `profile.harnessToolNames`. Loop round limit = 4; a
+normal turn generally completes in 1-2 rounds (model emits text first), so this is a
+safety net rather than a common case.
 
-### The tool-disclosure model
+### Tool exposure model (show-all)
 
-`harness_tool_search` is *progressive disclosure*: instead of shipping a giant tool
-manifest, the gateway gives the model a small "search" tool that, given a goal, uses the
-coordinator to pick relevant tools from its local registry. Those matches are stored in a
-per-session `Set` (`server.mjs` disclosure map) and are only sent upstream on the *next*
-request via `mergeDisclosedTools`. `transform.mjs` also scans the conversation history for
-`function_call_output` blocks to discover the tool names that the *client* has already shown,
-so a refresh doesn't drop tools the model already has.
+Both profiles set `showAllTools: true`: every Codex tool the client declares is
+forwarded upstream as-is — the chat bridge accepts all tool schemas, and the
+deepseek-official API accepts every function-typed tool natively, so there is no
+allowlist and no progressive disclosure. The earlier `harness_tool_search` +
+per-session disclosure machinery was removed (2026-08-04); `transform.mjs` no longer
+filters named tools on these profiles.
 
 ## Profiles (src/profiles.mjs)
 
@@ -221,24 +218,23 @@ Profiles encode provider-specific behavior; the active one is selected by
 | --- | --- | --- |
 | Provider endpoint | `https://opencode.ai/zen/go/v1` (+ `zen/v1` for free models) | `https://api.deepseek.com` (Responses wire) |
 | Blocked hosted tools | `tool_search`, `web_search` | none (web_search native, tool_search ignored) |
-| Tool allowlist (`coreTools`) | shell_command, apply_patch, update_plan, list_mcp_resources, list_mcp_resource_templates, read_mcp_resource, request_user_input, harness_web_search, harness_vision_inspect | same as opencode-go (all function-type tools are native; only `custom` is restricted to apply_patch) |
-| Harness tools | web_search, vision, tool_search | vision, tool_search (web_search native on the provider) |
+| Tool exposure | `showAllTools: true` — all client tools forwarded | `showAllTools: true` — all client tools forwarded |
+| Wire style | chat bridge (below) for chat-camp models; Responses for luna/grok | Responses |
+| Harness tools | web_search, vision | vision (web_search native on the provider) |
 | Reasoning (catalog) | default `high`; `low/high/max` | default `medium`; `none/minimal/low/medium/high/xhigh/max`, forwarded untouched |
-| Compaction / normalization | compact completed history; canonicalize call IDs; strip synthetic reasoning placeholder | compact completed history; canonicalize call IDs; strip synthetic reasoning placeholder |
+| Compaction / normalization | chat camp keeps native tool pairs (no receipt flattening); canonicalize call IDs; strip synthetic reasoning placeholder | compact completed history; canonicalize call IDs; strip synthetic reasoning placeholder |
 | Input modalities | text + image | text only |
 
 > **DeepSeek tool acceptance (verified live 2026-08-04):** the official Responses API
 > accepts every Codex local tool declared `type: "function"` (shell_command, update_plan,
-> mcp resources, request_user_input, view_image) plus namespaces natively — the real
-> Codex traffic is all function-typed, so the deepseek profile uses the same allowlist as
-> opencode-go. Only the `custom` tool type is restricted to `apply_patch` (`Unsupported
-> custom tool: 'shell_command'. Only 'apply_patch' is supported.`). Hosted `web_search`
-> is native (echoed in the response tools list); `tool_search` is silently ignored. Vision
-> and tool-search harness tools stay resident and execute through the OpenCode Go camp,
-> so a DeepSeek main model keeps the same dashboard experience.
+> mcp resources, request_user_input, view_image) plus namespaces natively. Only the
+> `custom` tool type is restricted to `apply_patch` (`Unsupported custom tool:
+> 'shell_command'. Only 'apply_patch' is supported.`). Hosted `web_search` is native
+> (echoed in the response tools list); `tool_search` is silently ignored. Vision harness
+> tools stay resident and execute through the OpenCode Go camp, so a DeepSeek main model
+> keeps the same dashboard experience.
 > Reasoning effort is forwarded verbatim to the official API (thinking defaults on;
-> `none` disables it), while coordinator calls pin `effort: "none"` so tiny
-> judgment calls do not burn their token budget on reasoning.
+> `none` disables it).
 
 The opencode-go profile also carries `availableModels`, a **curated seed catalog** (~27
 entries as of this writing) with per-model metadata: `endpoint` (responses|chat),
@@ -314,6 +310,16 @@ For chat-camp models the relay never speaks Responses upstream:
   native pairs flow through to the bridge and become real `tool_calls` history — the
   model sees its own tool use and keeps emitting calls (flattened history made it
   "forget" tools and answer in text only).
+- **Reasoning replay**: Go's chat camp (thinking mode) demands `reasoning_content` on
+  every `assistant.tool_calls` turn, but Codex drops reasoning from its re-posted
+  history. The relay records the reasoning text it streamed before each tool call
+  (bounded LRU keyed by `call_id`, `services.rememberReasoning`), and the bridge
+  replays it via `reasoningLookup` on the next turn — real thought text, with a
+  one-line continuation note only as a cache-miss fallback.
+- **SSE keepalive**: while the upstream thinks before its first token (DeepSeek can take
+  30-60s+ on huge contexts), `relayLiveResponses` writes an SSE comment line every 30s
+  to reset the downstream idle window, so Codex does not time out on silence; the timer
+  stops on the first real event.
 
 ### Vision capability ranking (probe + eval bench)
 
@@ -409,11 +415,11 @@ validated at load time.
 ## Streaming modes
 
 Streaming requests (`stream: true`) always use the **live** relay: the client gets a real
-incremental SSE stream; text deltas pass through; harness tool results are injected, and
-harness tool results are injected inline. Non-streaming requests (`stream: false`) use a
-plain JSON passthrough with the harness loop applied. There is no buffer toggle; the dashboard
-`DEBUG` switch toggles verbose gateway logging (`MODELDOCK_DEBUG` at startup, `/api/debug`
-at runtime).
+incremental SSE stream; text deltas pass through, and harness tool results are injected
+inline with a 30s keepalive while the upstream thinks. Non-streaming requests
+(`stream: false`) share the same forward path with a JSON accept header and the harness
+loop applied. There is no buffer toggle; the dashboard `DEBUG` switch toggles verbose
+gateway logging (`MODELDOCK_DEBUG` at startup, `/api/debug` at runtime).
 
 ## Config env vars (subset)
 
@@ -432,8 +438,8 @@ at runtime).
 
 ## Tests
 
-Tests live in `src/*.test.mjs` and `test/`; `npm test` runs 167 tests, including the
-cross-provider DeepSeek routing suite. Note that
+Tests live in `src/*.test.mjs` and `test/`; `npm test` runs 161 tests, including the
+chat-bridge conversion suite and the cross-provider DeepSeek routing suite. Note that
 `src/profiles.test.mjs` is *not* referenced in the
 `npm test` script (dead), and `test/*.test.mjs` are older duplicates of some `src`
 suites — they still run and still pass, but when in doubt change the `src` version.
@@ -443,9 +449,6 @@ suites — they still run and still pass, but when in doubt change the `src` ver
 - **Documents deliverable**: everything is captured/instrumented via `describeResponse`,
   `describeInput`, and the `report` object; the dashboard shows the sanitized evidence,
   never prompt text or images.
-- **The coordinator** is a tiny model call (few tokens) used for `checkCompletion` and
-  `searchToolRegistry` (`harness_tool_search`), both from the same
-  `coordinatorFetch` helper in `server.mjs`. It follows the main model's camp.
 - **Implicit contract with the client.** Codex emits a lot of Responses/custom history
   (view_image as a codex tool, tool_call blocks, etc.); the transform layer absorbs those —
   read `transform.mjs` tests for the exact edge cases.
@@ -453,6 +456,10 @@ suites — they still run and still pass, but when in doubt change the `src` ver
   ids switch the upstream base to the zen camp and chat wire style; the rest of the
   pipeline is untouched. Verified empirically against the live endpoints: free models
   answer on `zen/v1` (both chat and responses), and are rejected by the `go` camp.
+- **Reasoning round-trip.** Go's chat camp demands `reasoning_content` back on
+  tool-loop turns; the gateway records streamed reasoning per `call_id` and replays it
+  (`services.rememberReasoning` / `reasoningLookup`), keeping thinking mode enabled
+  without Codex having to store reasoning itself.
 
 ## Where to start reading
 
