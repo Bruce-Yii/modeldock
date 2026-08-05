@@ -225,8 +225,18 @@ function moveInterleavedAssistantBeforeToolCalls(input) {
   return reordered;
 }
 
-function fallbackToolReceipt(call, output, mediaStore, imageRefs, role = "user") {
-  const text = toolOutputText(output, mediaStore, imageRefs);
+const RECEIPT_OUTPUT_LIMIT = 2_000;
+
+function truncateToolOutput(text) {
+  if (text.length <= RECEIPT_OUTPUT_LIMIT) return text;
+  const head = text.slice(0, RECEIPT_OUTPUT_LIMIT * 0.6);
+  const tail = text.slice(-RECEIPT_OUTPUT_LIMIT * 0.4);
+  return `${head}\n...[tool output truncated: ${text.length} bytes]...\n${tail}`;
+}
+
+function fallbackToolReceipt(call, output, mediaStore, imageRefs, role = "user", truncate = false) {
+  const raw = toolOutputText(output, mediaStore, imageRefs);
+  const text = truncate ? truncateToolOutput(raw) : raw;
   const isAssistant = role === "assistant";
   return {
     item: {
@@ -331,7 +341,7 @@ function normalizeToolHistory(input, tools, mediaStore, imageRefs, { canonicaliz
           output: toolOutputText(item.output, mediaStore, imageRefs),
         }];
       }
-      const receipt = fallbackToolReceipt(call, item.output, mediaStore, imageRefs, receiptRole);
+      const receipt = fallbackToolReceipt(call, item.output, mediaStore, imageRefs, receiptRole, true);
       fallbackResults += 1;
       fallbackOutputBytes += receipt.bytes;
       return [receipt.item];
@@ -342,7 +352,7 @@ function normalizeToolHistory(input, tools, mediaStore, imageRefs, { canonicaliz
   return { input: normalized, nativeCalls, nativeOutputs, fallbackResults, fallbackOutputBytes, canonicalizedCallIds };
 }
 
-function compactCompletedToolHistory(input, mediaStore, imageRefs, receiptRole = "user") {
+function compactCompletedToolHistory(input, mediaStore, imageRefs, receiptRole = "user", keepRecent = 0) {
   if (!Array.isArray(input)) return { input, compacted: 0, outputBytes: 0 };
   const calls = new Map(input
     .filter((item) => (item?.type === "function_call" || item?.type === "custom_tool_call") && item.call_id)
@@ -350,17 +360,26 @@ function compactCompletedToolHistory(input, mediaStore, imageRefs, receiptRole =
   const completed = new Set(input
     .filter((item) => (item?.type === "function_call_output" || item?.type === "custom_tool_call_output") && item.call_id && calls.has(item.call_id))
     .map((item) => item.call_id));
+  // Order completed call ids by last appearance; keep the most recent `keepRecent` pairs
+  // native (the chat bridge needs their structure for tool_calls) and compact the rest.
+  const completedOrder = [];
+  for (const item of input) {
+    if ((item?.type === "function_call_output" || item?.type === "custom_tool_call_output") && item.call_id && completed.has(item.call_id) && !completedOrder.includes(item.call_id)) {
+      completedOrder.push(item.call_id);
+    }
+  }
+  const keepIds = new Set(completedOrder.slice(-keepRecent));
   let outputBytes = 0;
   const compacted = input.flatMap((item) => {
-    if (item?.call_id && completed.has(item.call_id) && (item.type === "function_call" || item.type === "custom_tool_call")) return [];
-    if (item?.call_id && completed.has(item.call_id) && (item.type === "function_call_output" || item.type === "custom_tool_call_output")) {
-      const receipt = fallbackToolReceipt(calls.get(item.call_id), item.output, mediaStore, imageRefs, receiptRole);
+    if (item?.call_id && completed.has(item.call_id) && !keepIds.has(item.call_id) && (item.type === "function_call" || item.type === "custom_tool_call")) return [];
+    if (item?.call_id && completed.has(item.call_id) && !keepIds.has(item.call_id) && (item.type === "function_call_output" || item.type === "custom_tool_call_output")) {
+      const receipt = fallbackToolReceipt(calls.get(item.call_id), item.output, mediaStore, imageRefs, receiptRole, true);
       outputBytes += receipt.bytes;
       return [receipt.item];
     }
     return [item];
   });
-  return { input: compacted, compacted: completed.size, outputBytes };
+  return { input: compacted, compacted: completed.size - keepIds.size, outputBytes };
 }
 
 function describeInput(input) {
@@ -432,10 +451,14 @@ export function transformResponsesRequest(source, { mediaStore, defaultModel, ta
     ? new Set([...hiddenToolNames].filter((name) => name !== "view_image"))
     : hiddenToolNames;
   // Chat bridge consumes native function_call/function_call_output pairs and converts
-  // them to chat-dialect tool_calls itself. Flattening to receipts would erase the tool
-  // structure, so skip compaction for the chat camp (opencode-go, unless overridden).
+  // them to chat-dialect tool_calls itself. Flattening ALL of them to receipts would
+  // erase tool structure, but keeping every pair inflates the payload (179KB+ observed)
+  // and makes the upstream prefill so slow Codex times out. Compromise: compact old
+  // completed pairs into receipts and keep only the most recent few native for the
+  // bridge (RECENT_TOOL_PAIRS).
   const chatBridgeActive = profile?.chatCampOverride === "chat" || (profile?.chatCampOverride !== "responses" && profile?.id === "opencode-go");
-  const shouldCompactCompletedToolHistory = Boolean(profile?.compactCompletedToolHistory) && !chatBridgeActive;
+  const RECENT_TOOL_PAIRS = 4;
+  const shouldCompactCompletedToolHistory = Boolean(profile?.compactCompletedToolHistory);
   const shouldCanonicalizeCallIds = profile?.canonicalizeCallIds !== false;
   const shouldStripReasoningPlaceholder = profile?.stripSyntheticReasoningPlaceholder !== false;
   const receiptRole = profile?.receiptRole === "assistant" ? "assistant" : "user";
@@ -482,7 +505,7 @@ export function transformResponsesRequest(source, { mediaStore, defaultModel, ta
     injectedHarnessTools.push(visionTool.name);
   }
   const toolHistory = normalizeToolHistory(rewrittenInput, payload.tools, mediaStore, imageRefs, { canonicalizeCallIds: shouldCanonicalizeCallIds, receiptRole });
-  const compactedHistory = shouldCompactCompletedToolHistory ? compactCompletedToolHistory(toolHistory.input, mediaStore, imageRefs, receiptRole) : { input: toolHistory.input, compacted: 0, outputBytes: 0 };
+  const compactedHistory = shouldCompactCompletedToolHistory ? compactCompletedToolHistory(toolHistory.input, mediaStore, imageRefs, receiptRole, chatBridgeActive ? RECENT_TOOL_PAIRS : 0) : { input: toolHistory.input, compacted: 0, outputBytes: 0 };
   const stringifiedAssistantMessages = Array.isArray(compactedHistory.input)
     ? compactedHistory.input.filter((item) => item?.role === "assistant" && Array.isArray(item.content) && assistantMessageText(item).length > 0).length
     : 0;
@@ -518,8 +541,8 @@ export function transformResponsesRequest(source, { mediaStore, defaultModel, ta
       imageRefs: [...new Set(imageRefs)],
       currentImageRefs: [...new Set(currentImageRefs)],
       inputShape: describeInput(payload.input),
-      nativeToolCalls: shouldCompactCompletedToolHistory ? 0 : toolHistory.nativeCalls,
-      nativeToolOutputs: shouldCompactCompletedToolHistory ? 0 : toolHistory.nativeOutputs,
+      nativeToolCalls: toolHistory.nativeCalls - (shouldCompactCompletedToolHistory ? compactedHistory.compacted : 0),
+      nativeToolOutputs: toolHistory.nativeOutputs - (shouldCompactCompletedToolHistory ? compactedHistory.compacted : 0),
       canonicalizedToolCallIds: toolHistory.canonicalizedCallIds,
       fallbackToolResults: toolHistory.fallbackResults,
       compactedToolResults: toolHistory.fallbackResults + compactedHistory.compacted,

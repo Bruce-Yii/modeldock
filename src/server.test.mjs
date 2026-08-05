@@ -365,16 +365,16 @@ test("compresses completed Codex tool history to ordered receipts for Go", async
   const sse = await response.text();
   assert.equal(response.status, 200);
   assert.match(sse, /HISTORY_OK/);
+  // Chat camp keeps the most recent tool pairs native (RECENT_TOOL_PAIRS=4); both pairs
+  // here are within the window, so they stay as function_call/function_call_output for
+  // the chat bridge to convert into tool_calls.
   assert.deepEqual(received.input.map((item) => item.role || item.type), [
-    "user", "assistant", "assistant", "assistant", "user",
+    "user", "function_call", "function_call_output", "assistant", "function_call", "function_call_output", "user",
   ]);
-  assert.equal(received.input.some((item) => Array.isArray(item.tool_calls)), false);
-  const receipts = received.input.filter((item) => item.role === "assistant" && typeof item.content === "string" && item.content.includes("tool_output_begin")).map((item) => item.content);
-  assert.equal(receipts.length, 2, "two assistant receipts present");
   const trace = instance.services.metrics.recent.find((item) => item.kind === "responses");
-  assert.equal(trace.nativeToolCalls, 0);
-  assert.equal(trace.nativeToolOutputs, 0);
-  assert.equal(trace.compactedToolResults, 2);
+  assert.equal(trace.nativeToolCalls, 2);
+  assert.equal(trace.nativeToolOutputs, 2);
+  assert.equal(trace.compactedToolResults, 0);
   assert.equal(trace.fallbackToolResults, 0);
   assert.equal(trace.droppedAssistantMessages, 1);
 });
