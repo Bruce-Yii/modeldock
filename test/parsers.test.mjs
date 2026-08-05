@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { extractUsageFromSse } from "../src/metrics.mjs";
 import { extractOutputText, parseMcpTextResult } from "../src/upstreams.mjs";
-import { adaptGoResponse, responseToSse } from "../src/responses-sse.mjs";
+import { adaptGoResponse } from "../src/responses-sse.mjs";
 
 test("parses Exa MCP JSON and SSE text content", () => {
   const json = JSON.stringify({ jsonrpc: "2.0", id: 1, result: { content: [{ type: "text", text: "result" }] } });
@@ -22,29 +22,6 @@ test("extracts only model-facing output text", () => {
   );
 });
 
-test("synthesizes a complete Responses text lifecycle for Codex", () => {
-  const sse = responseToSse({
-    id: "resp_1",
-    model: "deepseek-v4-flash",
-    output: [{ id: "msg_1", type: "message", role: "assistant", content: [{ type: "output_text", text: "OK", annotations: [] }] }],
-    usage: { input_tokens: 3, output_tokens: 1 },
-  });
-  const types = [...sse.matchAll(/^event: (.+)$/gm)].map((match) => match[1]);
-  assert.deepEqual(types, [
-    "response.created",
-    "response.in_progress",
-    "response.output_item.added",
-    "response.content_part.added",
-    "response.output_text.delta",
-    "response.output_text.done",
-    "response.content_part.done",
-    "response.output_item.done",
-    "response.completed",
-  ]);
-  assert.match(sse, /"item_id":"msg_1"/);
-  assert.match(sse, /data: \[DONE\]/);
-});
-
 test("maps Go function calls back to custom tool calls", () => {
   const adapted = adaptGoResponse(
     {
@@ -60,7 +37,6 @@ test("maps Go function calls back to custom tool calls", () => {
     call_id: "call_1",
     input: "PATCH_OK",
   });
-  assert.match(responseToSse(adapted), /response\.custom_tool_call_input\.done/);
 });
 
 test("adds stable item and call IDs when Go omits them", () => {

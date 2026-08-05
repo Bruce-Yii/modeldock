@@ -78,10 +78,10 @@ Codex ──POST /v1/responses──> ModelDock gate (Express, loopback only)
 
 | File | Role |
 | --- | --- |
-| `src/server.mjs` | Express app, entry point, request relay, harness tool loop, completion checker, coordinator calls, model catalog refresh + vision probing/evaluation, endpoint wiring |
+| `src/server.mjs` | Express app, entry point, request relay, harness tool loop, model catalog refresh + vision probing/evaluation, endpoint wiring |
 | `src/router.mjs` | Decide which model a request should hit; `RouteAffinity` pins follow-up tool turns to the model that started them |
 | `src/transform.mjs` | Normalize a Responses request: block hosted tools, rewrite images (keep them on the direct-vision route), inject harness tools, canonicalize tool history |
-| `src/profiles.mjs` | Provider profiles (opencode-go, deepseek-official); controls which tools are blocked/forwarded, the curated `availableModels` catalog, checker toggle; `providerForModel`/`tokenFor` resolve per-model provider and token |
+| `src/profiles.mjs` | Provider profiles (opencode-go, deepseek-official); controls which tools are blocked/forwarded, the curated `availableModels` catalog; `providerForModel`/`tokenFor` resolve per-model provider and token |
 | `src/upstreams.mjs` | Outbound client helpers: Exa web search (MCP), vision inspect with per-model endpoint/style routing |
 | `src/live-responses.mjs` | Streaming relay path: `LiveResponsesWriter` + SSE parser |
 | `src/chat-bridge.mjs` | Chat Completions bridge for the OpenCode camp: Responses⇄chat payload conversion and chat SSE→Responses event adaptation |
@@ -90,7 +90,6 @@ Codex ──POST /v1/responses──> ModelDock gate (Express, loopback only)
 | `src/config-switcher.mjs` | Back up / rewrite / restore Codex's `config.toml` to point at ModelDock, with drift detection |
 | `src/metrics.mjs` | Per-kind request metrics, usage extraction, event emitter feeding the dashboard |
 | `src/media-store.mjs` | In-memory cache mapping `img_<hash>` refs to image blobs (data-URL or HTTPS) for the vision harness |
-| `src/loop-breaker.mjs` | Per-session circuit breaker for checker nag loops; trips after N nags in a window and disables the checker for that session |
 | `src/vision-eval.mjs` | Deterministic vision benchmark (7 tasks: color/shape/OCR/chart/arrow) used to score and tier vision-capable models |
 | `public/` | Static dashboard (`index.html` + `app.js` + `styles.css`) consuming `/api/events` |
 
@@ -118,8 +117,7 @@ arrives here.
     can rebuild `assistant.tool_calls` history.
  4. **Forward.** `relayResponses` selects a relay based on `payload.stream`:
     - `stream: false` → a plain JSON passthrough with the harness loop applied.
-    - `stream: true` → `relayLiveResponses` (SSE passthrough with inline harness execution
-      and the completion checker).
+    - `stream: true` → `relayLiveResponses` (SSE passthrough with inline harness execution).
  5. **Relay live.** `parseSse` reads the upstream stream. On the chat camp, each chunk is
     first adapted by `chat-bridge.mjs` (`chatChunkToResponsesEvents`: reasoning_content →
     reasoning delta, content → `output_text.delta`, tool_calls → function_call events);
@@ -129,14 +127,7 @@ arrives here.
     append the result and make a fresh upstream call — this is the "harness loop". The
     harness result is appended as a native `function_call_output` pair, which the bridge
     converts back to chat-dialect tool history on the next round.
- 6. **Checker (live mode only, opt-in per profile).** On a *text* turn (no function call),
-    if the profile enables `checkerEnabled`, call `checkCompletion` — a few-token coordinator
-    call — to determine whether the agent actually finished. If not, inject a
-    `[MODELDOCK CHECKER]` user message and re-call upstream. Hard caps both the harness
-    rounds and the checker retries, so a runaway turn cannot loop forever. A per-session
-    `LoopBreaker` additionally trips after 3 checker nags in 5s and disables the checker
-   for that session (see below), so a stuck agent can't spin across hundreds of requests.
-7. **Terminate.** `writer.finish(usage)` emits `response.completed` and `[DONE]`. Usage,
+ 6. **Terminate.** `writer.finish(usage)` emits `response.completed` and `[DONE]`. Usage,
    latency, and transform statistics are recorded in `metrics`.
 
 ### Worked example: the two-model image handoff
@@ -224,7 +215,7 @@ so a refresh doesn't drop tools the model already has.
 
 Profiles encode provider-specific behavior; the active one is selected by
 `MODELDOCK_PROFILE` (default `opencode-go`). Everything about "what tools we trust",
-"what to block", and "does the checker run" comes from the profile.
+"what to block" comes from the profile.
 
 | Setting | opencode-go | deepseek-official |
 | --- | --- | --- |
@@ -234,7 +225,6 @@ Profiles encode provider-specific behavior; the active one is selected by
 | Harness tools | web_search, vision, tool_search | vision, tool_search (web_search native on the provider) |
 | Reasoning (catalog) | default `high`; `low/high/max` | default `medium`; `none/minimal/low/medium/high/xhigh/max`, forwarded untouched |
 | Compaction / normalization | compact completed history; canonicalize call IDs; strip synthetic reasoning placeholder | compact completed history; canonicalize call IDs; strip synthetic reasoning placeholder |
-| `checkerEnabled` | true | true |
 | Input modalities | text + image | text only |
 
 > **DeepSeek tool acceptance (verified live 2026-08-04):** the official Responses API
@@ -247,7 +237,7 @@ Profiles encode provider-specific behavior; the active one is selected by
 > and tool-search harness tools stay resident and execute through the OpenCode Go camp,
 > so a DeepSeek main model keeps the same dashboard experience.
 > Reasoning effort is forwarded verbatim to the official API (thinking defaults on;
-> `none` disables it), while coordinator/checker calls pin `effort: "none"` so tiny
+> `none` disables it), while coordinator calls pin `effort: "none"` so tiny
 > judgment calls do not burn their token budget on reasoning.
 
 The opencode-go profile also carries `availableModels`, a **curated seed catalog** (~27
@@ -291,7 +281,7 @@ consults the model id:
   minimax → Responses style on the go base; `*-free`/`big-pickle` → chat/completions on
   the zen base; every other model → chat/completions on the go base.
 
-Every outbound request (relay, harness loop, coordinator/checker, vision inspect,
+Every outbound request (relay, harness loop, vision inspect,
 vision probe) routes through these helpers, so each model hits its own provider's
 endpoint **with that provider's token**. This is why `deepseek-v4-flash` (main) can run
 on the DeepSeek API while `harness_vision_inspect` still observes images through
@@ -360,24 +350,6 @@ keep that framing.
   `visionFallbackModel` on error.
 - Both record metrics.
 
-## Loop breaker (loop-breaker.mjs)
-
-The completion checker's per-request `rounds < 3` cap does not stop a stuck agent from
-spinning across *hundreds* of Codex re-POSTs (checker nags → model says "let me check" →
-checker nags again). `LoopBreaker` closes that hole at the session level:
-
-- each checker "not done" verdict calls `recordNag(sessionKey)`; a sliding window (5s)
-  counts nags, and ≥ 3 trips the session;
-- once tripped, `relayLiveResponses` skips the checker entirely for that session
-  (`isTripped`), removing the reinforcement that keeps the loop alive;
-- a genuinely new user goal (`observeGoal` on every request) resets the session, so a
-  fresh task re-enables the checker;
-- the trip is surfaced as a `loop_breaker` entry in the metrics trace and in
-  `/api/status.loopBreaker`.
-
-Sessions are keyed by `client_metadata.session_id`/`thread_id` (same key as tool
-disclosure), capped at 64.
-
 ## Media store (media-store.mjs)
 
 `media-store` maps `img_<hash>` → `{ imageUrl, mime, size, timestamps }`. Images reach it
@@ -438,8 +410,8 @@ validated at load time.
 
 Streaming requests (`stream: true`) always use the **live** relay: the client gets a real
 incremental SSE stream; text deltas pass through; harness tool results are injected, and
-the completion checker runs inline. Non-streaming requests (`stream: false`) use a plain
-JSON passthrough with the harness loop applied. There is no buffer toggle; the dashboard
+harness tool results are injected inline. Non-streaming requests (`stream: false`) use a
+plain JSON passthrough with the harness loop applied. There is no buffer toggle; the dashboard
 `DEBUG` switch toggles verbose gateway logging (`MODELDOCK_DEBUG` at startup, `/api/debug`
 at runtime).
 
@@ -461,7 +433,7 @@ at runtime).
 ## Tests
 
 Tests live in `src/*.test.mjs` and `test/`; `npm test` runs 167 tests, including the
-`loop-breaker` suite and the cross-provider DeepSeek routing suite. Note that
+cross-provider DeepSeek routing suite. Note that
 `src/profiles.test.mjs` is *not* referenced in the
 `npm test` script (dead), and `test/*.test.mjs` are older duplicates of some `src`
 suites — they still run and still pass, but when in doubt change the `src` version.
@@ -489,4 +461,4 @@ suites — they still run and still pass, but when in doubt change the `src` ver
 2. `src/transform.mjs` — the normalization logic that makes everything else possible.
 3. `src/upstreams.mjs` + `src/profiles.mjs` — the per-model endpoint/style routing and the
    curated catalog with vision metadata.
-4. `src/loop-breaker.mjs` — the session-level guard on the checker loop.
+4. `src/chat-bridge.mjs` — the Responses⇄Chat Completions conversion for the OpenCode camp.
