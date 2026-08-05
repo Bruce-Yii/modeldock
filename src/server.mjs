@@ -330,6 +330,52 @@ function debugLog(services, message) {
   if (services?.config?.debug?.enabled) console.log(`[gate] ${message}`);
 }
 
+// DeepSeek's Responses API rejects any follow-up turn whose reasoning items carry no
+// `content` ("The `reasoning_text` in the thinking mode must be passed back to the API"),
+// and dropping the item does not help either — verified live 2026-08-04 by replaying the
+// exact failing payload. We stream DeepSeek's reasoning_text to Codex as a *summary*
+// (LiveResponsesWriter has no content channel), and Codex echoes that summary back with
+// `content: null`, so the text survives in the wrong field. Record it here keyed by the
+// reasoning id we minted, so the outbound side can refill `content` even if a future
+// client stops echoing the summary.
+function rememberReasoningItems(services, response) {
+  if (!services?.rememberReasoning) return;
+  for (const item of response?.output || []) {
+    if (item?.type !== "reasoning" || !item.id) continue;
+    const text = (item.summary || []).map((part) => part?.text || "").join("\n").trim();
+    if (text) services.rememberReasoning(item.id, text);
+  }
+}
+
+// Move `reasoning.summary` into `reasoning.content` before the payload leaves for a
+// provider that demands it. DeepSeek never emits a summary at all (verified live: it
+// streams only `response.reasoning_text.delta`), so the text our writer filed under
+// `summary` is the verbatim reasoning — moving it is lossless. It is a *move*, not a
+// copy: `content` alone is accepted (verified live), and echoing the same text in both
+// fields would bill the whole reasoning history twice on every turn.
+function fillReasoningContent(payload, services) {
+  if (!Array.isArray(payload.input)) return payload;
+  let filled = 0;
+  const input = payload.input.map((item) => {
+    if (item?.type !== "reasoning") return item;
+    if (Array.isArray(item.content) && item.content.length > 0) {
+      // Already carries the text; drop a redundant summary if the client sent one.
+      if (!item.summary?.length) return item;
+      const { summary: _summary, ...rest } = item;
+      return rest;
+    }
+    const summaryText = (item.summary || []).map((part) => part?.text || "").join("\n").trim();
+    const text = summaryText || (item.id && services?.reasoningFor ? services.reasoningFor(item.id) : null);
+    if (!text) return item;
+    filled += 1;
+    const { summary: _summary, encrypted_content: _encrypted, ...rest } = item;
+    return { ...rest, content: [{ type: "reasoning_text", text }] };
+  });
+  if (!filled) return payload;
+  debugLog(services, `moved reasoning summary -> content on ${filled} item(s)`);
+  return { ...payload, input };
+}
+
 async function fetchGoResponses(payload, services, signal, accept = "application/json") {
   const requestModel = payload.model || services.config.mainModel;
   const endpoint = chatEndpointFor(requestModel, services.config);
@@ -355,8 +401,9 @@ async function fetchGoResponses(payload, services, signal, accept = "application
   // responses and demands it back on tool-loop turns -> 400), but forward it untouched
   // for providers that speak reasoning natively (deepseek-official accepts effort in
   // { none, minimal, low, medium, high, xhigh, max }).
-  const forwarded = { ...payload };
-  if (services.config.profile?.id !== "deepseek-official") delete forwarded.reasoning;
+  const isDeepseekOfficial = services.config.profile?.id === "deepseek-official";
+  const forwarded = { ...(isDeepseekOfficial ? fillReasoningContent(payload, services) : payload) };
+  if (!isDeepseekOfficial) delete forwarded.reasoning;
   return fetch(`${upstreamBaseForModel(services.config, requestModel)}/responses`, {
     method: "POST",
     headers: {
@@ -479,6 +526,7 @@ async function relayLiveResponses(payload, res, services, signal) {
         services.routeAffinity.register(call.call_id, payload.model);
       }
       const response = writer.finish(usage);
+      rememberReasoningItems(services, response);
       return { ok: true, httpStatus: 200, bytesOut: writer.bytes, usage, rounds, response };
     }
 

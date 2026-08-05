@@ -1020,6 +1020,50 @@ test("deepseek-official forwards the reasoning effort untouched", async (t) => {
   assert.equal(received[0].reasoning?.effort, "high", "deepseek-official must forward the reasoning effort to the Responses API");
 });
 
+test("deepseek-official refills reasoning.content from the echoed summary", async (t) => {
+  let received;
+  const upstream = createServer(async (req, res) => {
+    received = await jsonBody(req);
+    res.setHeader("content-type", "text/event-stream");
+    sendSse(res, "response.output_text.delta", { id: "resp_ds", delta: "OK", response: { id: "resp_ds", model: "deepseek-v4-flash" } });
+    sendSse(res, "response.completed", { id: "resp_ds", response: { id: "resp_ds", model: "deepseek-v4-flash", usage: { input_tokens: 1, output_tokens: 1 } } });
+    res.end("data: [DONE]\n\n");
+  });
+  const upstreamPort = await listen(upstream);
+  t.after(() => upstream.close());
+  const instance = await startApp({
+    profile: DEEPSEEK_OFFICIAL_PROFILE,
+    profileId: "deepseek-official",
+    goBaseUrl: `http://127.0.0.1:${upstreamPort}`,
+    deepseekBaseUrl: `http://127.0.0.1:${upstreamPort}`,
+    mainModel: "deepseek-v4-flash",
+    tokens: { "opencode-go": "opencode-token", "deepseek-official": "deepseek-token" },
+  });
+  t.after(instance.stop);
+
+  // Exactly the shape Codex re-posts: our summary survives, `content` comes back null.
+  // DeepSeek 400s on that ("reasoning_text ... must be passed back"), verified live.
+  const response = await fetch(`${instance.base}/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      stream: true,
+      input: [
+        { role: "user", content: [{ type: "input_text", text: "go on" }] },
+        { type: "reasoning", id: "rs_abc123", summary: [{ type: "summary_text", text: "I need to check the version." }], content: null, encrypted_content: null },
+        { type: "function_call", id: "fc_1", call_id: "call_00_real", name: "shell_command", arguments: "{}" },
+        { type: "function_call_output", call_id: "call_00_real", output: "v22\nExit code: 0" },
+      ],
+    }),
+  });
+  assert.equal(response.status, 200);
+  await response.text();
+  const reasoning = received.input.find((item) => item.type === "reasoning");
+  assert.deepEqual(reasoning.content, [{ type: "reasoning_text", text: "I need to check the version." }], "content must be refilled from the summary");
+  assert.equal(reasoning.summary, undefined, "the summary must be moved, not copied — sending both bills the text twice");
+  assert.equal(reasoning.encrypted_content, undefined, "the empty encrypted_content placeholder is dropped too");
+});
+
 test("debug dump writes the transformed upstream payload to disk", async (t) => {
   const dumpDir = await mkdtemp(path.join(os.tmpdir(), "modeldock-dump-"));
   t.after(() => rm(dumpDir, { recursive: true, force: true }));
