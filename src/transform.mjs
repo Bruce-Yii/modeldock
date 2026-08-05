@@ -474,19 +474,51 @@ export function transformResponsesRequest(source, { mediaStore, defaultModel, ta
     });
   }
   const rawInput = normalizeInput(payload.input);
+  if (hiddenToolNames && hiddenToolNames.size > 0) {
+    payload.tools = selectForwardedTools(payload.tools, { hiddenToolNames: effectiveHidden });
+  }
   // Reasoning history balloons fast (244+ items observed in long sessions) and the
   // model only needs the latest reasoning; old thinking text is dead weight. Keep the
   // most recent RECENT_REASONING items, drop the rest.
   const RECENT_REASONING = 6;
-  if (Array.isArray(payload.input) && Array.isArray(rawInput)) {
+  let currentInput = Array.isArray(payload.input) ? payload.input : rawInput;
+  if (Array.isArray(rawInput)) {
     const reasoningIndices = [];
-    for (let i = 0; i < rawInput.length; i += 1) {
-      if (rawInput[i]?.type === "reasoning") reasoningIndices.push(i);
+    for (let i = 0; i < currentInput.length; i += 1) {
+      if (currentInput[i]?.type === "reasoning") reasoningIndices.push(i);
     }
     if (reasoningIndices.length > RECENT_REASONING) {
       const drop = new Set(reasoningIndices.slice(0, reasoningIndices.length - RECENT_REASONING));
-      payload.input = rawInput.filter((_, index) => !drop.has(index));
+      currentInput = currentInput.filter((_, index) => !drop.has(index));
     }
+  }
+  // L1: keep the session goal pinned near the top (after reasoning compaction, so the
+  // insertion is not clobbered). Find the earliest real user instruction (not the plugin
+  // list / app-context boilerplate) and surface it as the first user message.
+  if (Array.isArray(currentInput) && currentInput.length > 8) {
+    const users = [];
+    for (let i = 0; i < currentInput.length; i += 1) {
+      const item = currentInput[i];
+      if (item?.role !== "user" || !Array.isArray(item.content)) continue;
+      const text = item.content.map((part) => part?.text || "").join(" ").trim();
+      if (!text) continue;
+      if (/<recommended_plugins>|<app-context>|instructions for|^[#\s]*$/.test(text.slice(0, 120))) continue;
+      users.push({ index: i, item });
+      if (users.length === 1) break;
+    }
+    if (users.length === 1 && users[0].index > 1) {
+      const firstUserIdx = currentInput.findIndex((item) => item?.role === "user");
+      if (firstUserIdx >= 0) {
+        currentInput = [
+          ...currentInput.slice(0, firstUserIdx),
+          structuredClone(users[0].item),
+          ...currentInput.slice(firstUserIdx),
+        ];
+      }
+    }
+  }
+  if (currentInput !== (Array.isArray(payload.input) ? payload.input : rawInput)) {
+    payload.input = currentInput;
   }
   if (hiddenToolNames && hiddenToolNames.size > 0) {
     payload.tools = selectForwardedTools(payload.tools, { hiddenToolNames: effectiveHidden });
