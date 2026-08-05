@@ -108,9 +108,11 @@ const OPENCODE_GO_PROFILE = {
   tokenEnvName: "OPENCODE_GO_TOKEN",
 
   blockedToolTypes: new Set(["tool_search", "web_search"]),
-  // Show every Codex tool to the model: the chat bridge accepts all tool schemas, so
-  // the allowlist (coreTools) is bypassed entirely.
-  showAllTools: true,
+  // Forward every Codex tool (the chat bridge accepts all schemas). view_image stays:
+  // the direct-vision route hands image turns to a vision model, and view_image lets the
+  // model surface screenshots to the human. Native web_search/tool_search are blocked
+  // above and replaced by harness_web_search + vision_inspect.
+  hiddenToolNames: new Set([]),
   // Role of flattened tool receipts in history. "user" is the battle-tested default
   // (TOOL_EXECUTION_COMPLETED as a user message, accepted by Go in every tested shape).
   // "assistant" frames the same text as the agent's own statement ("I executed a tool
@@ -187,8 +189,11 @@ const DEEPSEEK_OFFICIAL_PROFILE = {
   tokenEnvName: "DEEPSEEK_API_KEY",
 
   blockedToolTypes: new Set([]),
-  // The official API accepts every Codex local tool as type "function", so show all.
-  showAllTools: true,
+  // The official DeepSeek API accepts every Codex local tool as type "function", so
+  // forward all except tools useless to a text-only model: view_image (native "vision"
+  // helper) is hidden because the model cannot interpret images — vision_inspect is the
+  // gateway's text-model path for visuals. Native web_search stays (provider supports it).
+  hiddenToolNames: new Set(["view_image"]),
   compactCompletedToolHistory: true,
   canonicalizeCallIds: true,
   stripSyntheticReasoningPlaceholder: true,
