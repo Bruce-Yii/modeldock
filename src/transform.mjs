@@ -421,6 +421,16 @@ export function transformResponsesRequest(source, { mediaStore, defaultModel, ta
   }
 
   const { blockedToolTypes, webSearchTool, visionTool, hiddenToolNames, coreTools } = resolveProfileOptions(profile);
+  // Tools follow the MODEL, not the provider: view_image is useful only to vision-capable
+  // models (they can read the base64 it returns). When the target model supports vision,
+  // view_image is kept; for text models it is hidden and vision_inspect is the visual path.
+  const targetSupportsVision = Boolean(
+    (Array.isArray(profile?.availableModels) ? profile.availableModels : [])
+      .find((model) => model.id === (targetModel || defaultModel))?.supportsVision,
+  );
+  const effectiveHidden = (hiddenToolNames && targetSupportsVision && hiddenToolNames.has("view_image"))
+    ? new Set([...hiddenToolNames].filter((name) => name !== "view_image"))
+    : hiddenToolNames;
   // Chat bridge consumes native function_call/function_call_output pairs and converts
   // them to chat-dialect tool_calls itself. Flattening to receipts would erase the tool
   // structure, so skip compaction for the chat camp (opencode-go, unless overridden).
@@ -442,7 +452,7 @@ export function transformResponsesRequest(source, { mediaStore, defaultModel, ta
   }
   const rawInput = normalizeInput(payload.input);
   if (hiddenToolNames && hiddenToolNames.size > 0) {
-    payload.tools = selectForwardedTools(payload.tools, { hiddenToolNames });
+    payload.tools = selectForwardedTools(payload.tools, { hiddenToolNames: effectiveHidden });
   }
 
   let toolChoiceRewritten = false;
