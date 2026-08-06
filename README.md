@@ -124,6 +124,11 @@ Tell it: "Help me install ModelDock and configure the API token from .env.exampl
   kept (they live in your local config file, outside the app).
 - Installed with **Option A** (git clone)? The Update button runs `git pull` for you,
   or just pull manually and restart.
+- **Update safety**: updates come only from this repository's GitHub Releases, over
+  HTTPS. Before installing, ModelDock verifies the download against the release's
+  SHA256 checksum — a corrupted or tampered file is refused — and it never replaces
+  itself with an older version. If verification fails, the running version just keeps
+  running.
 
 ## How it works (plain English)
 
@@ -239,6 +244,7 @@ https://github.com/architectds/modeldock
 - **启动时自检新版本**：ModelDock 每次启动都会和 GitHub 上的最新发布版本比对，发现有新版时，仪表盘顶部会出现一个小小的绿色**更新**按钮。
 - **一键更新**：点一下按钮——自动下载新版本、自动重启，页面恢复后自动刷新。你的 token 和设置都会保留（它们存在本地配置文件里，不在程序本体内）。
 - 用**方法一**（git clone）装的？更新按钮会帮你执行 `git pull`，或者自己 pull 之后重启也一样。
+- **更新安全**：更新只从本仓库的 GitHub Releases 走 HTTPS 获取。安装前 ModelDock 会用发布版附带的 SHA256 校验和验证下载内容——损坏或被篡改的文件会被直接拒绝——并且永远不会把自己替换成更旧的版本。校验不通过时，当前版本继续照常运行。
 
 ## 它怎么工作（大白话版）
 
@@ -354,6 +360,7 @@ https://github.com/architectds/modeldock
 - **起動時のアップデート確認**: ModelDock は起動のたびに GitHub の最新リリースと自分を比較します。新しいバージョンがあると、ダッシュボード上部に小さな緑の**更新**ボタンが表示されます。
 - **ワンクリック更新**: ボタンを押すと、新バージョンのダウンロードと再起動が自動で行われ、復帰後にページも自動リロードされます。トークンや設定はローカルの設定ファイルに保存されているため、そのまま引き継がれます。
 - **方法 A**（git clone）でインストールした場合は、更新ボタンが `git pull` を実行します。手動で pull して再起動しても同じです。
+- **アップデートの安全性**: 更新は本リポジトリの GitHub Releases からのみ、HTTPS 経由で取得します。インストール前にリリース付属の SHA256 チェックサムで検証し、破損・改ざんされたファイルは拒否します。また、古いバージョンへ置き換わることはありません。検証に失敗した場合は、現行バージョンがそのまま動き続けます。
 
 ## 仕組み（やさしい説明）
 
