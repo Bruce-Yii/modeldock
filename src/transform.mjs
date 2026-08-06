@@ -335,7 +335,7 @@ function normalizeToolHistory(input, tools, mediaStore, imageRefs, { canonicaliz
     }
     if (item.type === "function_call_output" || item.type === "custom_tool_call_output") {
       const call = calls.get(item.call_id);
-      if (call?.name === "view_image") {
+      if (call?.name === "view_image" && replayableCallIds.has(item.call_id)) {
         const isCurrentTurn = index > latestUserIndex;
         if (isCurrentTurn) {
           return [{
@@ -581,7 +581,12 @@ export function transformResponsesRequest(source, { mediaStore, defaultModel, ta
   const currentImageRefs = [];
   const rewrittenInput = rewriteImages(normalizeInput(payload.input), mediaStore, imageRefs, currentImageRefs, { keepCurrentImages: directVision });
   const injectedHarnessTools = [];
-  if (webSearchTool && (blocked.tool_search > 0 || blocked.web_search > 0)) {
+  // Local search is resident for text models on the Go camp: Codex declares only
+  // tool_search (bridged to a plain function) and never web_search, so a blocked-count
+  // condition would never fire and the model would never see a search tool at all.
+  // Inject unconditionally for opencode-go; the DeepSeek official profile forwards
+  // hosted web_search natively and needs no local harness search.
+  if (webSearchTool && profile?.id === "opencode-go" && !payload.tools?.some((tool) => tool?.name === webSearchTool.name)) {
     if (!Array.isArray(payload.tools)) payload.tools = [];
     payload.tools.push(structuredClone(webSearchTool));
     injectedHarnessTools.push(webSearchTool.name);
