@@ -4,7 +4,7 @@ import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { createApp, createServices, codexModelCatalog, parseCheckVerdict } from "./server.mjs";
+import { createApp, createServices, codexModelCatalog } from "./server.mjs";
 import { OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE } from "./profiles.mjs";
 
 const TEST_PROFILE = { ...OPENCODE_GO_PROFILE, chatCampOverride: "responses" };
@@ -1265,21 +1265,15 @@ test("main model on DeepSeek with vision + harness on OpenCode Go: per-provider 
   assert.match(JSON.stringify(deepseekCalls[1].input ?? ""), /VISION_INSPECTION_COMPLETED/, "the Luna observation is fed back into the DeepSeek turn");
 });
 
-test("anti-breakpoint checker revives a plain-text turn when the task is not done", async (t) => {
+test("anti-breakpoint revival splices summary + last text + tools, no side API call", async (t) => {
   let mainCalls = 0;
-  let checkCalls = 0;
+  let upstreamRequests = 0;
   let secondMainInput = null;
   const upstream = createServer(async (req, res) => {
     const body = await jsonBody(req);
-    // The checker side-call is non-streaming (stream:false); the main relay streams.
-    if (body.stream === false) {
-      checkCalls += 1;
-      res.setHeader("content-type", "application/json");
-      res.end(JSON.stringify({
-        output: [{ type: "message", content: [{ type: "output_text", text: "no — wheels are not attached yet" }] }],
-      }));
-      return;
-    }
+    // No checker side-call may ever reach the upstream: the revival is local.
+    if (body.stream === false) throw new Error("checker must not make an API call");
+    upstreamRequests += 1;
     mainCalls += 1;
     if (mainCalls > 1) secondMainInput = body.input;
     res.setHeader("content-type", "text/event-stream");
@@ -1304,45 +1298,31 @@ test("anti-breakpoint checker revives a plain-text turn when the task is not don
       input: [
         { role: "user", content: [{ type: "input_text", text: "Assemble the car" }] },
       ],
+      tools: [{ type: "function", name: "shell_command", parameters: { type: "object", properties: {} } }],
     }),
   });
   const sse = await response.text();
   assert.equal(response.status, 200);
   assert.equal(mainCalls, 2, "the plain-text end was revived into a second upstream round");
-  assert.equal(checkCalls, 1, "one checker call, then the 30s rate limit applies");
-  assert.match(JSON.stringify(secondMainInput ?? ""), /session continuation/);
-  assert.match(JSON.stringify(secondMainInput ?? ""), /wheels are not attached yet/);
+  assert.equal(upstreamRequests, 2, "no side checker API call, only the two main rounds");
+  const revivalText = JSON.stringify(secondMainInput ?? "");
+  assert.match(revivalText, /session continuation/);
+  assert.match(revivalText, /YOUR LAST TEXT/);
+  assert.match(revivalText, /wheels done/, "this turn's own text is echoed back");
+  assert.match(revivalText, /AVAILABLE TOOLS/);
+  assert.match(revivalText, /shell_command/, "tool names are listed");
   assert.match(sse, /wheels done/);
   const check = instance.services.sessionChecks?.get("default");
-  assert.equal(check?.answer, "no — wheels are not attached yet");
   assert.equal(check?.state, "continue");
 });
 
-test("parseCheckVerdict maps checker replies to done/ask_user/continue", () => {
-  assert.deepEqual(parseCheckVerdict("DONE"), { state: "done", note: "DONE" });
-  assert.equal(parseCheckVerdict("Done - everything shipped").state, "done");
-  assert.equal(parseCheckVerdict("Yes, the task is complete.").state, "done");
-  assert.equal(parseCheckVerdict("").state, "done");
-  assert.equal(parseCheckVerdict("something unparseable").state, "done");
-  assert.equal(parseCheckVerdict("ASK_USER - waiting for a decision").state, "ask_user");
-  assert.equal(parseCheckVerdict("ask user: which option?").state, "ask_user");
-  const cont = parseCheckVerdict("CONTINUE: attach the wheels with shell_command");
-  assert.equal(cont.state, "continue");
-  assert.equal(cont.note, "attach the wheels with shell_command");
-  assert.equal(parseCheckVerdict("no, tests are still failing").state, "continue");
-});
-
-test("checker ASK_USER verdict ends the stream without revival", async (t) => {
+test("revival also fires on question-ending text (no verdict logic, upstream decides)", async (t) => {
   let mainCalls = 0;
+  let upstreamRequests = 0;
   const upstream = createServer(async (req, res) => {
     const body = await jsonBody(req);
-    if (body.stream === false) {
-      res.setHeader("content-type", "application/json");
-      res.end(JSON.stringify({
-        output: [{ type: "message", content: [{ type: "output_text", text: "ASK_USER - the assistant asked which color to paint the car" }] }],
-      }));
-      return;
-    }
+    if (body.stream === false) throw new Error("checker must not make an API call");
+    upstreamRequests += 1;
     mainCalls += 1;
     res.setHeader("content-type", "text/event-stream");
     sendSse(res, "response.output_text.delta", { id: "resp_ask", delta: "Which color do you want?", response: { id: "resp_ask", model: body.model } });
@@ -1368,29 +1348,20 @@ test("checker ASK_USER verdict ends the stream without revival", async (t) => {
   });
   await response.text();
   assert.equal(response.status, 200);
-  assert.equal(mainCalls, 1, "ASK_USER must not revive the turn");
-  assert.equal(instance.services.sessionChecks?.get("default")?.state, "ask_user");
+  assert.equal(mainCalls, 2, "question-ending text is revived once; the upstream decides whether to continue");
+  assert.equal(upstreamRequests, 2, "no side API call, just the revival round");
+  assert.equal(instance.services.sessionChecks?.get("default")?.state, "continue");
 });
 
-test("checker CONTINUE directive names the next step and sees the available tools", async (t) => {
+test("revival is rate-limited to once per session per 30s", async (t) => {
   let mainCalls = 0;
-  let checkerInput = null;
-  let secondMainInput = null;
   const upstream = createServer(async (req, res) => {
     const body = await jsonBody(req);
-    if (body.stream === false) {
-      checkerInput = body.input;
-      res.setHeader("content-type", "application/json");
-      res.end(JSON.stringify({
-        output: [{ type: "message", content: [{ type: "output_text", text: "CONTINUE: attach the wheels, then verify with shell_command" }] }],
-      }));
-      return;
-    }
+    if (body.stream === false) throw new Error("checker must not make an API call");
     mainCalls += 1;
-    if (mainCalls > 1) secondMainInput = body.input;
     res.setHeader("content-type", "text/event-stream");
-    sendSse(res, "response.output_text.delta", { id: "resp_cont", delta: "ok", response: { id: "resp_cont", model: body.model } });
-    sendSse(res, "response.completed", { id: "resp_cont", response: { id: "resp_cont", model: body.model, usage: { input_tokens: 5, output_tokens: 2 } } });
+    sendSse(res, "response.output_text.delta", { id: "resp_rl", delta: "still going", response: { id: "resp_rl", model: body.model } });
+    sendSse(res, "response.completed", { id: "resp_rl", response: { id: "resp_rl", model: body.model, usage: { input_tokens: 5, output_tokens: 2 } } });
     res.end("data: [DONE]\n\n");
   });
   const upstreamPort = await listen(upstream);
@@ -1402,25 +1373,19 @@ test("checker CONTINUE directive names the next step and sees the available tool
   });
   t.after(instance.stop);
 
-  const response = await fetch(`${instance.base}/v1/responses`, {
+  // First request revives; the second plain-text round hits the 30s window and ends.
+  const run = (i) => fetch(`${instance.base}/v1/responses`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
       stream: true,
-      input: [{ role: "user", content: [{ type: "input_text", text: "Assemble the car" }] }],
-      tools: [
-        { type: "function", name: "shell_command", parameters: { type: "object", properties: {} } },
-        { type: "function", name: "apply_patch", parameters: { type: "object", properties: {} } },
-      ],
+      input: [{ role: "user", content: [{ type: "input_text", text: `round ${i}` }] }],
     }),
-  });
-  await response.text();
-  assert.equal(response.status, 200);
-  assert.equal(mainCalls, 2, "CONTINUE revives the turn");
-  const checkerText = JSON.stringify(checkerInput ?? "");
-  assert.match(checkerText, /AVAILABLE TOOLS/, "checker prompt lists the tools section");
-  assert.match(checkerText, /shell_command/, "checker sees the actual tool names");
-  const revivalText = JSON.stringify(secondMainInput ?? "");
-  assert.match(revivalText, /session continuation/);
-  assert.match(revivalText, /attach the wheels, then verify with shell_command/, "the CONTINUE directive is spliced into the revival message");
+  }).then((r) => r.text());
+  await run(1);
+  assert.equal(mainCalls, 2, "first request revives once");
+  const state = instance.services.sessionChecks?.get("default");
+  assert.ok(state && Date.now() - state.at < 30_000, "check window is fresh");
+  await run(2);
+  assert.equal(mainCalls, 3, "second request's text turn is inside the 30s window, no second revival");
 });

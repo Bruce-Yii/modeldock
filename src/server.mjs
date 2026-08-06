@@ -653,24 +653,13 @@ async function relayLiveResponses(payload, res, services, signal) {
         services.routeAffinity.register(call.call_id, payload.model);
       }
       // Anti-breakpoint: a plain-text turn (no tool call) is the model about to end
-      // the session. Hold the stream, ask the completion checker; if it says the task
-      // is NOT done, splice the verdict + rolling summary back into the conversation
-      // as a user message and keep generating on the same SSE stream. Rate-limited to
-      // one checker call per session per 30s, so a model stuck in a loop can only be
-      // revived every 30s at most. OpenCode Go camp only (see the compaction guard).
+      // the session. Revive it locally (no side API call): splice the rolling summary
+      // + this turn's text + tool names back as a user message and keep generating on
+      // the same SSE stream. Rate-limited to once per session per 30s, so a model
+      // stuck in a loop can only be revived every 30s at most. OpenCode Go camp only.
       if (mode === "text" && services.config.profile?.id === "opencode-go" && !services.config.debug?.noSessionCheck) {
         const key = payload?.client_metadata?.session_id || payload?.client_metadata?.thread_id || "default";
-        // The keepalive timer stopped with the upstream read; keep the downstream SSE
-        // window open while the checker side-call runs (it can take up to 60s).
-        const holdalive = setInterval(() => {
-          if (!res.writableEnded) res.write(": session-check hold\n\n");
-        }, 15_000);
-        const stopHoldalive = () => clearInterval(holdalive);
-        const revive = await checkSessionCompletion(services, key, payload).catch((error) => {
-          debugLog(services, `session check failed: ${error.message}`);
-          return null;
-        });
-        stopHoldalive();
+        const revive = checkSessionCompletion(services, key, payload, writer.message?.text || "");
         if (revive) {
           currentPayload = { ...currentPayload, input: [...(currentPayload.input || []), revive], stream: true };
           mode = null;
@@ -1311,77 +1300,47 @@ async function callMainModelText(services, key, messages, { maxOutputTokens = 50
     .join("") || null;
 }
 
-// Lightweight anti-breakpoint checker: a plain-text turn (no tool calls) means the
-// model is about to end the session. Ask the main model whether the task is done,
-// using the rolling summary plus the latest messages. Rate-limited to once per
-// session per 30s so a model stuck in a loop cannot hammer the upstream. Returns a
-// user message that revives the conversation when the task is NOT done, else null.
+// Lightweight anti-breakpoint revival, purely local — no side API call, no verdict
+// logic. A plain-text turn (no tool calls) means the model is about to end the
+// session; splice the rolling summary + this turn's own last text + the available
+// tool names back into the conversation as a user message and let the upstream
+// decide whether to continue on the same stream. Rate-limited to once per session
+// per 30s so a stuck model can never loop faster than that.
 const SESSION_CHECK_INTERVAL_MS = 30_000;
-const SESSION_CHECK_TIMEOUT_MS = 60_000;
-const SESSION_CHECK_PROMPT = [
-  "You are the completion checker of a long-running coding session.",
-  "Read the session summary and the latest messages, then decide the session state.",
-  "Answer on the FIRST line with exactly one of:",
-  "DONE - the user's task is completed, or nothing remains that the assistant can do.",
-  "ASK_USER - the assistant is waiting for the user's answer or decision. Never push it to continue.",
-  "CONTINUE: <one short sentence naming the concrete next step, and which available tool to use when that helps>",
-].join("\n");
 
-// Parse the checker's reply into {state, note}. First-line token wins; free-form
-// replies fall back to leading yes/no. Anything unparseable fails open to "done"
-// so a confused checker can never trap the session in revival loops.
-export function parseCheckVerdict(answer) {
-  const text = String(answer || "").trim();
-  if (!text) return { state: "done", note: "" };
-  const first = text.split(/\r?\n/)[0].trim();
-  if (/^done\b/i.test(first)) return { state: "done", note: first };
-  if (/^ask[_\s-]?user\b/i.test(first)) return { state: "ask_user", note: first };
-  const cont = first.match(/^continue\b[:\s-]*(.*)$/i);
-  if (cont) return { state: "continue", note: cont[1].trim() || text.slice(0, 300) };
-  if (/^(yes|y|done|complete|completed|finished)\b/i.test(first)) return { state: "done", note: first };
-  if (/^(no|not)\b/i.test(first)) return { state: "continue", note: text.slice(0, 300) };
-  return { state: "done", note: first.slice(0, 200) };
-}
-
-async function checkSessionCompletion(services, key, payload) {
+function checkSessionCompletion(services, key, payload, currentTurnText = "") {
   const now = Date.now();
   const last = services.sessionChecks?.get(key);
   if (last && now - last.at < SESSION_CHECK_INTERVAL_MS) return null;
   const summary = services.sessionSummaries?.get(key)?.text || null;
   const input = Array.isArray(payload.input) ? payload.input : [];
-  const recent = input
-    .filter((item) => item?.role === "user" || item?.role === "assistant")
-    .slice(-4)
-    .map((item) => {
+  const lastText = currentTurnText.trim() || (() => {
+    for (let i = input.length - 1; i >= 0; i--) {
+      const item = input[i];
+      if (item?.role !== "assistant") continue;
       const text = Array.isArray(item.content) ? item.content.map((p) => p.text || "").join(" ") : item.content || "";
-      return text ? text.slice(0, 2_000) : "";
-    })
-    .filter(Boolean)
-    .join("\n---\n");
-  // Name the tools the main model actually has this turn, so a CONTINUE verdict can
-  // point at one ("run the tests with shell_command") instead of staying vague.
+      if (text.trim()) return text.trim().slice(0, 1_000);
+    }
+    return "";
+  })();
   const toolNames = (Array.isArray(payload.tools) ? payload.tools : [])
     .map((tool) => tool?.name || tool?.function?.name)
     .filter(Boolean)
     .slice(0, 40)
     .join(", ");
-  const target = `SESSION SUMMARY:\n${summary || "(none yet)"}\n\nLATEST MESSAGES:\n${recent || "(none)"}\n\nAVAILABLE TOOLS: ${toolNames || "(none)"}`;
-  const answer = await callMainModelText(services, key, [
-    { role: "developer", content: [{ type: "input_text", text: SESSION_CHECK_PROMPT }] },
-    { role: "user", content: [{ type: "input_text", text: target }] },
-  ], { maxOutputTokens: 2000, timeoutMs: SESSION_CHECK_TIMEOUT_MS });
-  const verdict = answer?.trim() ? answer.trim().slice(0, 300) : "DONE";
-  const { state, note } = parseCheckVerdict(verdict);
-  services.sessionChecks?.set(key, { at: now, answer: verdict, state });
-  debugLog(services, `session check (${key}): [${state}] ${verdict}`);
-  // done: the task is finished. ask_user: the model is waiting for the user's input —
-  // reviving it would force an answer nobody gave. Both end the stream normally.
-  if (state !== "continue") return null;
+  services.sessionChecks?.set(key, { at: now, answer: lastText.slice(0, 200) || "(no text)", state: "continue" });
+  debugLog(services, `session check (${key}): revive ${lastText.slice(0, 120)}`);
   return {
     role: "user",
     content: [{
       type: "input_text",
-      text: `[session continuation — the completion checker determined the task is not finished${note ? `: "${note}"` : ""} — continue working on it]\n\n${summary ? `ROLLING SUMMARY:\n${summary}\n` : ""}[end session continuation]`,
+      text: [
+        "[session continuation — continue working on the task]",
+        summary ? `ROLLING SUMMARY:\n${summary}` : "",
+        `YOUR LAST TEXT:\n${lastText}`,
+        `AVAILABLE TOOLS: ${toolNames || "(none)"}`,
+        "[end session continuation]",
+      ].filter(Boolean).join("\n\n"),
     }],
   };
 }
