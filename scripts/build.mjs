@@ -77,6 +77,11 @@ const result = await build({
   minify: false,
   logLevel: "info",
   plugins: [staticInlinePlugin],
+  // Optional, installed-on-demand dependencies: not in package.json, so esbuild cannot
+  // resolve them at bundle time. Leaving the dynamic import unresolved is exactly the
+  // desired behavior - it resolves from node_modules when the user has installed it
+  // (dashboard TTS tile) and throws a caught "not installed" error otherwise.
+  external: ["msedge-tts"],
   // Bake the version into the bundle so the updater knows what it is running even
   // without a package.json on disk.
   define: { "process.env.MODELDOCK_BUILD_VERSION": JSON.stringify(version) },
