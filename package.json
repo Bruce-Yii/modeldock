@@ -1,6 +1,6 @@
 {
   "name": "modeldock-opencode-go-gate",
-  "version": "0.2.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
   "description": "A narrow Codex Responses gate for OpenCode Go with monitored local web and vision tool loops.",
