@@ -83,6 +83,7 @@ const DEEPSEEK_REASONING_LEVELS = [
 // `workspace_dependencies` = codex_app.load_workspace_dependencies,
 // `computer_use` = desktop screen control, `browser_use` = Chrome control.
 import { NODE_REPL_MCP_TOOLS } from "./node-repl-tools.mjs";
+import { AUTO_FREE_MODEL_ID, AUTO_FREE_LABEL } from "./auto-route.mjs";
 export const EXPERIMENTAL_SUPPORTED_TOOLS = ["artifact", "tool_call_mcp_elicitation", "workspace_dependencies", "computer_use", "browser_use"];
 
 // One catalog entry. Codex's model picker lists whatever the active provider returns
@@ -139,7 +140,7 @@ function catalogEntry({ slug, displayName, description, compHash, inputModalitie
   };
 }
 
-function modelCatalogDefaults({ mainModel, displayName, description, compHash, inputModalities, supportsSearchTool, baseInstructions, defaultReasoningLevel = "high", supportedReasoningLevels = [ { effort: "low", description: "Fast responses with lighter reasoning" }, { effort: "high", description: "Deeper reasoning for complex work" }, { effort: "max", description: "Maximum reasoning depth" } ], availableModels = [] }) {
+function modelCatalogDefaults({ mainModel, displayName, description, compHash, inputModalities, supportsSearchTool, baseInstructions, defaultReasoningLevel = "high", supportedReasoningLevels = [ { effort: "low", description: "Fast responses with lighter reasoning" }, { effort: "high", description: "Deeper reasoning for complex work" }, { effort: "max", description: "Maximum reasoning depth" } ], availableModels = [], autoRouteEntry = null }) {
   const base = { compHash, supportsSearchTool, baseInstructions, defaultReasoningLevel, supportedReasoningLevels };
   // Every provider's models in one list, each labelled with its source, so the picker
   // can switch upstream as well as model. The bare id stays with the default profile so
@@ -165,6 +166,17 @@ function modelCatalogDefaults({ mainModel, displayName, description, compHash, i
   return {
     models: [
       catalogEntry({ ...base, slug: mainModel, displayName, description, inputModalities, priority: 1 }),
+      // Synthetic entry: not a real upstream model, it is the gate's free-first routing
+      // mode. Only Codex sees it - the dashboard keeps showing whichever model is
+      // actually serving.
+      ...(autoRouteEntry ? [catalogEntry({
+        ...base,
+        slug: autoRouteEntry.id,
+        displayName: autoRouteEntry.label,
+        description: "Free model first; falls back to the paid one automatically when the free upstream fails.",
+        inputModalities: ["text"],
+        priority: 2,
+      })] : []),
       ...rest.map((model, index) => catalogEntry({
         ...base,
         slug: model.slug,
@@ -173,7 +185,8 @@ function modelCatalogDefaults({ mainModel, displayName, description, compHash, i
         // Codex sends images only to models that declare the modality; the gate still
         // reroutes visual turns to the vision model for the text-only ones.
         inputModalities: model.supportsVision ? ["text", "image"] : ["text"],
-        priority: index + 2,
+        // 1 is the selected main model and 2 is the auto-route entry.
+        priority: index + (autoRouteEntry ? 3 : 2),
       })),
     ],
   };
@@ -257,6 +270,7 @@ const OPENCODE_GO_PROFILE = {
       // Publish the whole curated catalog so every model is selectable from Codex's
       // own picker, not just the one the dashboard has selected.
       availableModels: OPENCODE_GO_PROFILE.availableModels,
+      autoRouteEntry: { id: AUTO_FREE_MODEL_ID, label: AUTO_FREE_LABEL },
     });
   },
 };

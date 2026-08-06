@@ -10,7 +10,7 @@
   "scripts": {
     "start": "node src/server.mjs",
     "dev": "node --watch src/server.mjs",
-    "test": "node --test test/*.test.mjs src/config.test.mjs src/config-switcher.test.mjs src/media-store.test.mjs src/metrics.test.mjs src/router.test.mjs src/transform.test.mjs src/update.test.mjs src/upstreams.test.mjs src/server.test.mjs src/chat-bridge.test.mjs",
+    "test": "node --test test/*.test.mjs src/auto-route.test.mjs src/config.test.mjs src/config-switcher.test.mjs src/media-store.test.mjs src/metrics.test.mjs src/router.test.mjs src/transform.test.mjs src/update.test.mjs src/upstreams.test.mjs src/server.test.mjs src/chat-bridge.test.mjs",
     "probe:live": "node scripts/live-probe.mjs",
     "build": "node scripts/build.mjs"
   },

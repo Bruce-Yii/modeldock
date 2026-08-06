@@ -13,6 +13,7 @@ import { createMcpNodeHandler } from "./mcp.mjs";
 import { LiveResponsesWriter, parseSse } from "./live-responses.mjs";
 import { CodexConfigSwitcher } from "./config-switcher.mjs";
 import { createAutostart } from "./autostart.mjs";
+import { createAutoRoute, AUTO_FREE_MODEL_ID } from "./auto-route.mjs";
 import { createUpdater } from "./update.mjs";
 import { RouteAffinity, routeResponsesRequest } from "./router.mjs";
 import { profileOptions, profileById, providerForModel, tokenFor } from "./profiles.mjs";
@@ -159,7 +160,7 @@ function modelProviderOf(options, modelId) {
   return options.find((entry) => entry.id === modelId)?.provider || "other";
 }
 
-function statusPayload({ config, metrics, mediaStore, routeAffinity, modelSelection, autostart, updater, sessionChecks }) {
+function statusPayload({ config, metrics, mediaStore, routeAffinity, modelSelection, autostart, updater, autoRoute, sessionChecks }) {
   const selected = modelSelection || { mainModel: config.mainModel, visionModel: config.visionModel };
   const options = modelOptions(config);
   const visionOptions = options.filter((entry) => entry.supportsVision);
@@ -195,6 +196,7 @@ function statusPayload({ config, metrics, mediaStore, routeAffinity, modelSelect
       enabled: Boolean(autostart?.enabled?.()),
     },
     update: updater?.state?.() || null,
+    autoRoute: autoRoute?.state?.() || null,
   });
 }
 
@@ -587,7 +589,7 @@ function upstreamError(body, status) {
   return `Upstream returned ${status}`;
 }
 
-async function relayLiveResponses(payload, res, services, signal) {
+async function relayLiveResponses(payload, res, services, signal, { autoRoute = false } = {}) {
   const writer = new LiveResponsesWriter(res, payload);
   const customTools = new Set((payload.tools || []).filter((tool) => tool?.type === "custom").map((tool) => tool.name));
   let rounds = 0;
@@ -600,6 +602,19 @@ async function relayLiveResponses(payload, res, services, signal) {
       const body = Buffer.from(await upstream.arrayBuffer());
       const error = upstreamError(body, upstream.status);
       console.log(`[gate] upstream ${upstream.status} error=${error} body=${body.toString("utf8").slice(0, 800)}`);
+      // Free-first fallback. Nothing has reached the client yet (headers unsent), so
+      // retrying on the paid model is invisible apart from a slower first token. Any
+      // failure triggers it - the free tier's exhaustion response is not a documented
+      // shape - but only a 4xx parks the session there for the cooldown.
+      const fallback = autoRoute && !res.headersSent ? services.autoRoute.fallbackFor(currentPayload.model) : null;
+      if (fallback) {
+        const { sticky } = services.autoRoute.recordFailure({ status: upstream.status, error });
+        console.log(`[gate] auto free-first: ${currentPayload.model} -> ${fallback} (${sticky ? "sticky for the cooldown" : "this request only"})`);
+        currentPayload = { ...currentPayload, model: fallback };
+        // The dashboard shows the model actually serving, so move it with the downgrade.
+        if (services.modelSelection) services.modelSelection.mainModel = fallback;
+        continue;
+      }
       if (!res.headersSent) {
         res.status(upstream.status);
         copyUpstreamHeaders(upstream, res);
@@ -782,10 +797,16 @@ async function relayResponses(req, res, services) {
       // provider must not invalidate a model Codex is already using.
       knownModels: publishedModelIds(config),
     });
+    // "Auto - free first" is a routing mode, not an upstream model: resolve it to the
+    // model that will actually serve. The dashboard therefore keeps showing a real
+    // model; only Codex's picker shows the mode.
+    if (route.model === AUTO_FREE_MODEL_ID) {
+      route = { ...route, model: services.autoRoute.preferred(), reason: "auto_free_first", autoRoute: true };
+    }
     // Keep both pickers on the same model. Codex asserts its choice on every request, so
     // it wins for the main road; mirroring it into the dashboard selection stops the
     // dashboard from displaying a model that is not the one actually being used.
-    if (route.reason === "client_selected" && modelSelection.mainModel !== route.model) {
+    if ((route.reason === "client_selected" || route.autoRoute) && modelSelection.mainModel !== route.model) {
       modelSelection.mainModel = route.model;
     }
     services.setActiveSessionSeed?.(source?.client_metadata?.session_id || source?.client_metadata?.thread_id || null);
@@ -848,7 +869,7 @@ async function relayResponses(req, res, services) {
 
   if (streaming) {
     try {
-      const relay = await relayLiveResponses(transformed.payload, res, services, controller.signal);
+      const relay = await relayLiveResponses(transformed.payload, res, services, controller.signal, { autoRoute: Boolean(route.autoRoute) });
       if (relay.ok && route.directVision) routeAffinity.registerResponse(relay.response, route.model);
       metrics.recordResponseUsage({ bytesOut: relay.bytesOut, usage: relay.usage });
       finish({
@@ -1564,6 +1585,7 @@ export function createServices(config = loadConfig()) {
   });
   const autostart = createAutostart();
   autostart.refresh().catch(() => {});
+  const autoRoute = createAutoRoute();
   const updater = createUpdater();
   updater.check().catch(() => {});
   const routeAffinity = new RouteAffinity();
@@ -1591,7 +1613,7 @@ export function createServices(config = loadConfig()) {
     ? setInterval(refreshModelCatalog, refreshIntervalHours * 3_600_000)
     : null;
   if (modelRefreshTimer) modelRefreshTimer.unref();
-  return { config: mutableConfig, runtime, metrics, mediaStore, upstreams, configSwitcher, autostart, updater, routeAffinity, modelSelection, reasoningCache, rememberReasoning, reasoningFor, sessionSummaries, sessionChecks, refreshModelCatalog, modelRefreshTimer, setActiveSessionSeed: (seed) => { activeSessionSeed = seed; } };
+  return { config: mutableConfig, runtime, metrics, mediaStore, upstreams, configSwitcher, autostart, updater, autoRoute, routeAffinity, modelSelection, reasoningCache, rememberReasoning, reasoningFor, sessionSummaries, sessionChecks, refreshModelCatalog, modelRefreshTimer, setActiveSessionSeed: (seed) => { activeSessionSeed = seed; } };
 }
 
 export function createApp(services = createServices()) {
