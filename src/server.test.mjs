@@ -1265,6 +1265,34 @@ test("main model on DeepSeek with vision + harness on OpenCode Go: per-provider 
   assert.match(JSON.stringify(deepseekCalls[1].input ?? ""), /VISION_INSPECTION_COMPLETED/, "the Luna observation is fed back into the DeepSeek turn");
 });
 
+test("host guard rejects non-loopback Host headers (DNS rebinding)", async (t) => {
+  const instance = await startApp({});
+  t.after(instance.stop);
+
+  // fetch() strips Host overrides, so speak raw HTTP to actually spoof the header.
+  const { request } = await import("node:http");
+  const port = new URL(instance.base).port;
+  const spoofed = await new Promise((resolve, reject) => {
+    const req = request(
+      { host: "127.0.0.1", port, path: "/api/status", headers: { host: "evil.example.com" } },
+      (res) => {
+        let data = "";
+        res.on("data", (chunk) => { data += chunk; });
+        res.on("end", () => resolve({ status: res.statusCode, body: data }));
+      },
+    );
+    req.on("error", reject);
+    req.end();
+  });
+  // createMcpExpressApp({ host }) enforces this app-wide; keep it pinned by test so a
+  // framework upgrade cannot silently drop the DNS-rebinding protection.
+  assert.equal(spoofed.status, 403);
+  assert.match(spoofed.body, /Invalid Host/i);
+
+  const legit = await fetch(`${instance.base}/api/status`);
+  assert.equal(legit.status, 200);
+});
+
 test("anti-breakpoint revival splices summary + last text + tools, no side API call", async (t) => {
   let mainCalls = 0;
   let upstreamRequests = 0;

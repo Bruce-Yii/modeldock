@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { compareVersions, parseLatestRelease, localVersion, createUpdater } from "./update.mjs";
+import { compareVersions, parseLatestRelease, parseSumsFile, localVersion, createUpdater } from "./update.mjs";
 
 test("compareVersions orders dotted versions numerically", () => {
   assert.ok(compareVersions("0.2.0", "0.1.0") > 0);
@@ -15,13 +15,26 @@ test("parseLatestRelease flags newer releases with the bundle asset", () => {
   const release = {
     tag_name: "v0.2.0",
     html_url: "https://github.com/x/y/releases/tag/v0.2.0",
-    assets: [{ name: "modeldock.mjs", browser_download_url: "https://example.com/modeldock.mjs" }],
+    assets: [
+      { name: "modeldock.mjs", browser_download_url: "https://example.com/modeldock.mjs" },
+      { name: "SHA256SUMS", browser_download_url: "https://example.com/SHA256SUMS" },
+    ],
   };
   const parsed = parseLatestRelease(release, "0.1.0");
   assert.equal(parsed.available, true);
   assert.equal(parsed.latestVersion, "0.2.0");
   assert.equal(parsed.assetUrl, "https://example.com/modeldock.mjs");
+  assert.equal(parsed.sumsUrl, "https://example.com/SHA256SUMS");
   assert.equal(parsed.notesUrl, "https://github.com/x/y/releases/tag/v0.2.0");
+});
+
+test("parseSumsFile reads sha256sum output", () => {
+  const hex = "a".repeat(64);
+  const sums = parseSumsFile(`${hex}  modeldock.mjs\n${"b".repeat(64)} *other.bin\nnot a sums line\n`);
+  assert.equal(sums["modeldock.mjs"], hex);
+  assert.equal(sums["other.bin"], "b".repeat(64));
+  assert.equal(Object.keys(sums).length, 2);
+  assert.deepEqual(parseSumsFile(""), {});
 });
 
 test("parseLatestRelease is not available for same or older versions", () => {

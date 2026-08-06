@@ -9,6 +9,7 @@
 // free) and exit the current process.
 
 import { execFile, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
@@ -18,8 +19,10 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 const DEFAULT_REPO = "architectds/modeldock";
 const ASSET_NAME = "modeldock.mjs";
+const SUMS_NAME = "SHA256SUMS";
 const CHECK_TIMEOUT_MS = 10_000;
 const DOWNLOAD_TIMEOUT_MS = 120_000;
+const MAX_BUNDLE_BYTES = 64 * 1024 * 1024;
 
 // In the release bundle esbuild's `define` replaces this expression with the version
 // string literal; in a git checkout it is undefined and package.json is used.
@@ -49,13 +52,26 @@ export function compareVersions(a, b) {
 export function parseLatestRelease(release, current) {
   const tag = String(release?.tag_name || "").replace(/^v/, "");
   if (!tag) return { available: false };
-  const asset = (release?.assets || []).find((a) => a?.name === ASSET_NAME);
+  const assets = release?.assets || [];
+  const asset = assets.find((a) => a?.name === ASSET_NAME);
+  const sums = assets.find((a) => a?.name === SUMS_NAME);
   return {
     available: compareVersions(tag, current) > 0,
     latestVersion: tag,
     assetUrl: asset?.browser_download_url || "",
+    sumsUrl: sums?.browser_download_url || "",
     notesUrl: release?.html_url || "",
   };
+}
+
+// Parse a sha256sum-style file ("<hex>  <filename>" per line) into {filename: hex}.
+export function parseSumsFile(text) {
+  const sums = {};
+  for (const line of String(text || "").split(/\r?\n/)) {
+    const match = line.trim().match(/^([0-9a-f]{64})\s+\*?(.+)$/i);
+    if (match) sums[match[2].trim()] = match[1].toLowerCase();
+  }
+  return sums;
 }
 
 function updateRepo() {
@@ -75,15 +91,31 @@ function gitPull() {
   });
 }
 
-async function downloadBundle(assetUrl) {
-  const response = await fetch(assetUrl, {
+async function fetchAsset(url, maxBytes) {
+  const response = await fetch(url, {
     redirect: "follow",
     signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
     headers: { "user-agent": "modeldock-updater" },
   });
   if (!response.ok) throw new Error(`Download failed: HTTP ${response.status}`);
+  const declared = Number(response.headers.get("content-length") || 0);
+  if (declared > maxBytes) throw new Error(`Asset too large (${declared} bytes, limit ${maxBytes})`);
   const body = Buffer.from(await response.arrayBuffer());
+  if (body.length > maxBytes) throw new Error(`Asset too large (${body.length} bytes, limit ${maxBytes})`);
+  return body;
+}
+
+async function downloadBundle(assetUrl, sumsUrl) {
+  // Integrity: releases publish a SHA256SUMS asset (release.yml); refuse to install a
+  // bundle we cannot verify against it.
+  if (!sumsUrl) throw new Error("Release has no SHA256SUMS asset; refusing unverified update");
+  const sums = parseSumsFile((await fetchAsset(sumsUrl, 64 * 1024)).toString("utf8"));
+  const expected = sums[ASSET_NAME];
+  if (!expected) throw new Error(`SHA256SUMS has no entry for ${ASSET_NAME}`);
+  const body = await fetchAsset(assetUrl, MAX_BUNDLE_BYTES);
   if (body.length < 100_000) throw new Error(`Downloaded bundle suspiciously small (${body.length} bytes)`);
+  const actual = createHash("sha256").update(body).digest("hex");
+  if (actual !== expected) throw new Error(`Bundle checksum mismatch (expected ${expected.slice(0, 12)}..., got ${actual.slice(0, 12)}...)`);
   const target = path.join(root, "dist", ASSET_NAME);
   const tmp = `${target}.tmp`;
   writeFileSync(tmp, body);
@@ -96,14 +128,18 @@ async function downloadBundle(assetUrl) {
 function scheduleRestart() {
   if (process.platform === "win32") {
     const script = path.join(root, "scripts", "start-hidden.ps1");
-    spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", `Start-Sleep -Seconds 2; & '${script}'`], {
+    // Single quotes in the path (e.g. a user name with an apostrophe) are escaped by
+    // doubling, per PowerShell single-quoted string rules.
+    const quoted = script.replace(/'/g, "''");
+    spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", `Start-Sleep -Seconds 2; & '${quoted}'`], {
       detached: true,
       stdio: "ignore",
       windowsHide: true,
     }).unref();
   } else {
     const script = path.join(root, "scripts", "start-hidden.sh");
-    spawn("sh", ["-c", `sleep 2; "${script}"`], { detached: true, stdio: "ignore" }).unref();
+    const quoted = script.replace(/(["$`\\])/g, "\\$1");
+    spawn("sh", ["-c", `sleep 2; "${quoted}"`], { detached: true, stdio: "ignore" }).unref();
   }
   setTimeout(() => process.exit(0), 700).unref();
 }
@@ -119,6 +155,7 @@ export function createUpdater({ fetchImpl = fetch } = {}) {
     error: "",
   };
   let assetUrl = "";
+  let sumsUrl = "";
 
   async function check() {
     try {
@@ -133,6 +170,7 @@ export function createUpdater({ fetchImpl = fetch } = {}) {
       state.notesUrl = parsed.notesUrl || "";
       state.error = "";
       assetUrl = parsed.assetUrl || "";
+      sumsUrl = parsed.sumsUrl || "";
     } catch (error) {
       state.error = error.message;
     }
@@ -153,7 +191,7 @@ export function createUpdater({ fetchImpl = fetch } = {}) {
         mode = "bundle";
         if (!assetUrl) await check();
         if (!assetUrl) throw new Error("Release has no modeldock.mjs asset");
-        await downloadBundle(assetUrl);
+        await downloadBundle(assetUrl, sumsUrl);
       }
       scheduleRestart();
       return { ok: true, mode, latestVersion: state.latestVersion, restarting: true };

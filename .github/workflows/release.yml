@@ -27,10 +27,12 @@ jobs:
             echo "Tag v$TAG does not match package.json version $PKG" >&2
             exit 1
           fi
+      - name: Generate checksums
+        run: cd dist && sha256sum modeldock.mjs > SHA256SUMS && cat SHA256SUMS
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/modeldock.mjs scripts/install.ps1 scripts/install.sh \
+          gh release create "$GITHUB_REF_NAME" dist/modeldock.mjs dist/SHA256SUMS scripts/install.ps1 scripts/install.sh \
             --title "ModelDock $GITHUB_REF_NAME" \
             --generate-notes
