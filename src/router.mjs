@@ -65,7 +65,7 @@ export class RouteAffinity {
   }
 }
 
-export function routeResponsesRequest(source, { mainModel, visionModel, affinity }) {
+export function routeResponsesRequest(source, { mainModel, visionModel, affinity, knownModels }) {
   const current = currentTurnItems(source?.input);
   const pinned = affinity?.consumeFrom(current);
   if (pinned) {
@@ -77,9 +77,15 @@ export function routeResponsesRequest(source, { mainModel, visionModel, affinity
   if (hasImage(current)) {
     return { model: visionModel, reason: "current_turn_image", directVision: true };
   }
-  // The dashboard selection is authoritative for the main road: Codex re-sends its own
-  // configured model id on every request, so trusting source.model would silently veto
-  // the user's main-model choice (e.g. switching to Luna would still hit DeepSeek).
+  // Codex's own model picker is populated from the catalog this gate publishes, so a
+  // model id we recognise is a deliberate choice by the user in that picker - honour it
+  // and let the caller sync the dashboard to match. Anything unrecognised (a stale id, a
+  // provider default) falls back to the dashboard selection rather than being forwarded
+  // to an upstream that would reject it.
+  const requested = source?.model;
+  if (requested && requested !== mainModel && knownModels?.has(requested)) {
+    return { model: requested, reason: "client_selected", directVision: false };
+  }
   return { model: mainModel, reason: "default_main", directVision: false };
 }
 

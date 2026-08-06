@@ -85,11 +85,12 @@ const DEEPSEEK_REASONING_LEVELS = [
 import { NODE_REPL_MCP_TOOLS } from "./node-repl-tools.mjs";
 export const EXPERIMENTAL_SUPPORTED_TOOLS = ["artifact", "tool_call_mcp_elicitation", "workspace_dependencies", "computer_use", "browser_use"];
 
-function modelCatalogDefaults({ mainModel, displayName, description, compHash, inputModalities, supportsSearchTool, baseInstructions, defaultReasoningLevel = "high", supportedReasoningLevels = [ { effort: "low", description: "Fast responses with lighter reasoning" }, { effort: "high", description: "Deeper reasoning for complex work" }, { effort: "max", description: "Maximum reasoning depth" } ] }) {
+// One catalog entry. Codex's model picker lists whatever the active provider returns
+// from /v1/models, so emitting an entry per available model is what makes them all
+// selectable at runtime - no config rewrite, no restart.
+function catalogEntry({ slug, displayName, description, compHash, inputModalities, supportsSearchTool, baseInstructions, defaultReasoningLevel, supportedReasoningLevels, priority }) {
   return {
-    models: [
-      {
-        slug: mainModel,
+        slug,
         display_name: displayName,
         description,
         prefer_websockets: false,
@@ -121,7 +122,7 @@ function modelCatalogDefaults({ mainModel, displayName, description, compHash, i
         supported_in_api: true,
         availability_nux: null,
         upgrade: null,
-        priority: 1,
+        priority,
         experimental_supported_tools: EXPERIMENTAL_SUPPORTED_TOOLS,
         supports_search_tool: supportsSearchTool,
         default_service_tier: null,
@@ -135,7 +136,29 @@ function modelCatalogDefaults({ mainModel, displayName, description, compHash, i
             personality_pragmatic: "",
           },
         },
-      },
+  };
+}
+
+function modelCatalogDefaults({ mainModel, displayName, description, compHash, inputModalities, supportsSearchTool, baseInstructions, defaultReasoningLevel = "high", supportedReasoningLevels = [ { effort: "low", description: "Fast responses with lighter reasoning" }, { effort: "high", description: "Deeper reasoning for complex work" }, { effort: "max", description: "Maximum reasoning depth" } ], availableModels = [] }) {
+  const base = { compHash, supportsSearchTool, baseInstructions, defaultReasoningLevel, supportedReasoningLevels };
+  // The selected main model leads the list; the rest of the curated catalog follows in
+  // its existing order so the picker mirrors the dashboard.
+  const rest = availableModels.filter((model) => model?.id && model.id !== mainModel && model.status !== "unavailable");
+  return {
+    models: [
+      catalogEntry({ ...base, slug: mainModel, displayName, description, inputModalities, priority: 1 }),
+      ...rest.map((model, index) => catalogEntry({
+        ...base,
+        slug: model.id,
+        displayName: model.label || model.id,
+        description: model.supportsVision
+          ? "Vision-capable model through the local ModelDock gate."
+          : "Text model through the local ModelDock gate.",
+        // Codex sends images only to models that declare the modality; the gate still
+        // reroutes visual turns to the vision model for the text-only ones.
+        inputModalities: model.supportsVision ? ["text", "image"] : ["text"],
+        priority: index + 2,
+      })),
     ],
   };
 }
@@ -209,12 +232,15 @@ const OPENCODE_GO_PROFILE = {
   modelCatalog({ mainModel, visionModel, baseInstructions }) {
     return modelCatalogDefaults({
       mainModel,
-      displayName: "DeepSeek V4 Flash (OpenCode Go)",
+      displayName: `${OPENCODE_GO_PROFILE.availableModels.find((m) => m.id === mainModel)?.label || mainModel} (OpenCode Go)`,
       description: "OpenCode Go through the local ModelDock Responses gate.",
       compHash: "modeldock-opencode-go-v1",
       inputModalities: ["text", "image"],
       supportsSearchTool: true,
       baseInstructions,
+      // Publish the whole curated catalog so every model is selectable from Codex's
+      // own picker, not just the one the dashboard has selected.
+      availableModels: OPENCODE_GO_PROFILE.availableModels,
     });
   },
 };

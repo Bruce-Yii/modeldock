@@ -1,4 +1,5 @@
 import path from "node:path";
+import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { randomUUID, createHash } from "node:crypto";
 import express from "express";
@@ -766,7 +767,14 @@ async function relayResponses(req, res, services) {
       mainModel: modelSelection.mainModel,
       visionModel: modelSelection.visionModel,
       affinity: routeAffinity,
+      knownModels: new Set((config.profile?.availableModels || []).map((model) => model.id)),
     });
+    // Keep both pickers on the same model. Codex asserts its choice on every request, so
+    // it wins for the main road; mirroring it into the dashboard selection stops the
+    // dashboard from displaying a model that is not the one actually being used.
+    if (route.reason === "client_selected" && modelSelection.mainModel !== route.model) {
+      modelSelection.mainModel = route.model;
+    }
     services.setActiveSessionSeed?.(source?.client_metadata?.session_id || source?.client_metadata?.thread_id || null);
     transformed = transformResponsesRequest(source, {
       mediaStore,
@@ -1475,27 +1483,28 @@ export function createServices(config = loadConfig()) {
   // was observed to stall the upstream (and cascade into client disconnect + retry
   // loops).
   const sessionSummaries = new Map();
+  // Path is configurable so tests can point it at a temp dir instead of the real
+  // ~/.modeldock/summaries.json (npm test was polluting the live persisted file).
+  const summariesFile = config.summariesFile || path.join(os.homedir(), ".modeldock", "summaries.json");
   let summariesSaveTimer = null;
   const saveSummaries = () => {
     if (summariesSaveTimer) return;
     summariesSaveTimer = setTimeout(() => {
       summariesSaveTimer = null;
-      Promise.all([import("node:fs"), import("node:os")]).then(([{ mkdirSync, writeFileSync }, os]) => {
-        const file = path.join(os.homedir(), ".modeldock", "summaries.json");
+      import("node:fs").then(({ mkdirSync, writeFileSync }) => {
         try {
-          mkdirSync(path.dirname(file), { recursive: true });
-          writeFileSync(file, JSON.stringify(Object.fromEntries(sessionSummaries)), "utf8");
+          mkdirSync(path.dirname(summariesFile), { recursive: true });
+          writeFileSync(summariesFile, JSON.stringify(Object.fromEntries(sessionSummaries)), "utf8");
         } catch (error) {
           console.log(`[gate] summaries save failed: ${error.message}`);
         }
       });
     }, 5_000);
   };
-  Promise.all([import("node:fs"), import("node:os")]).then(([{ readFileSync, existsSync }, os]) => {
-    const file = path.join(os.homedir(), ".modeldock", "summaries.json");
+  import("node:fs").then(({ readFileSync, existsSync }) => {
     try {
-      if (existsSync(file)) {
-        const parsed = JSON.parse(readFileSync(file, "utf8"));
+      if (existsSync(summariesFile)) {
+        const parsed = JSON.parse(readFileSync(summariesFile, "utf8"));
         for (const [k, v] of Object.entries(parsed)) {
           if (v && typeof v.text === "string" && v.text.trim()) sessionSummaries.set(k, v);
         }

@@ -92,3 +92,34 @@ test("registerResponse records standard and custom tool calls", () => {
   ] }, "gpt-5.6-luna");
   assert.equal(affinity.snapshot().activeCallIds, 2);
 });
+
+test("a model the client picked from our catalog is honoured and reported as such", () => {
+  const known = new Set(["deepseek-v4-flash", "glm-5.2", "kimi-k2.6"]);
+  const route = routeResponsesRequest(
+    { model: "glm-5.2", input: [{ role: "user", content: [{ type: "input_text", text: "hi" }] }] },
+    { mainModel: "deepseek-v4-flash", visionModel: "gpt-5.6-luna", knownModels: known },
+  );
+  assert.equal(route.model, "glm-5.2", "Codex's picker selection wins on the main road");
+  assert.equal(route.reason, "client_selected");
+  assert.equal(route.directVision, false);
+});
+
+test("an unknown client model falls back to the dashboard selection", () => {
+  const known = new Set(["deepseek-v4-flash", "glm-5.2"]);
+  const route = routeResponsesRequest(
+    { model: "gpt-5.6-sol", input: [{ role: "user", content: [{ type: "input_text", text: "hi" }] }] },
+    { mainModel: "deepseek-v4-flash", visionModel: "gpt-5.6-luna", knownModels: known },
+  );
+  assert.equal(route.model, "deepseek-v4-flash", "a model we cannot serve never reaches an upstream");
+  assert.equal(route.reason, "default_main");
+});
+
+test("a picked model still yields to an image in the current turn", () => {
+  const known = new Set(["deepseek-v4-flash", "glm-5.2"]);
+  const route = routeResponsesRequest(
+    { model: "glm-5.2", input: [{ role: "user", content: [{ type: "input_image", image_url: "data:image/png;base64,AAAA" }] }] },
+    { mainModel: "deepseek-v4-flash", visionModel: "gpt-5.6-luna", knownModels: known },
+  );
+  assert.equal(route.model, "gpt-5.6-luna", "vision routing outranks the picker");
+  assert.equal(route.reason, "current_turn_image");
+});
