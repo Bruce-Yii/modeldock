@@ -27,6 +27,7 @@ function baseConfig() {
     exaMcpUrl: "https://mcp.exa.ai/mcp",
     exaApiKey: "",
     recentLimit: 50,
+    debug: { noSessionCheck: true },
   };
 }
 
@@ -1262,4 +1263,56 @@ test("main model on DeepSeek with vision + harness on OpenCode Go: per-provider 
   assert.equal(deepseekCalls[0].tools.includes("harness_web_search"), false, "no Exa harness search is injected when hosted schemas pass through");
   assert.ok(deepseekCalls[0].tools.includes("shell_command"), "function-type Codex local tools are forwarded to DeepSeek");
   assert.match(JSON.stringify(deepseekCalls[1].input ?? ""), /VISION_INSPECTION_COMPLETED/, "the Luna observation is fed back into the DeepSeek turn");
+});
+
+test("anti-breakpoint checker revives a plain-text turn when the task is not done", async (t) => {
+  let mainCalls = 0;
+  let checkCalls = 0;
+  let secondMainInput = null;
+  const upstream = createServer(async (req, res) => {
+    const body = await jsonBody(req);
+    // The checker side-call is non-streaming (stream:false); the main relay streams.
+    if (body.stream === false) {
+      checkCalls += 1;
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({
+        output: [{ type: "message", content: [{ type: "output_text", text: "no — wheels are not attached yet" }] }],
+      }));
+      return;
+    }
+    mainCalls += 1;
+    if (mainCalls > 1) secondMainInput = body.input;
+    res.setHeader("content-type", "text/event-stream");
+    sendSse(res, "response.output_text.delta", { id: "resp_check", delta: "wheels done", response: { id: "resp_check", model: body.model } });
+    sendSse(res, "response.completed", { id: "resp_check", response: { id: "resp_check", model: body.model, usage: { input_tokens: 9, output_tokens: 4 } } });
+    res.end("data: [DONE]\n\n");
+  });
+  const upstreamPort = await listen(upstream);
+  t.after(() => upstream.close());
+
+  const instance = await startApp({
+    goBaseUrl: `http://127.0.0.1:${upstreamPort}`,
+    debug: { noSessionCheck: false },
+  });
+  t.after(instance.stop);
+
+  const response = await fetch(`${instance.base}/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      stream: true,
+      input: [
+        { role: "user", content: [{ type: "input_text", text: "Assemble the car" }] },
+      ],
+    }),
+  });
+  const sse = await response.text();
+  assert.equal(response.status, 200);
+  assert.equal(mainCalls, 2, "the plain-text end was revived into a second upstream round");
+  assert.equal(checkCalls, 1, "one checker call, then the 30s rate limit applies");
+  assert.match(JSON.stringify(secondMainInput ?? ""), /session continuation/);
+  assert.match(JSON.stringify(secondMainInput ?? ""), /wheels are not attached yet/);
+  assert.match(sse, /wheels done/);
+  const check = instance.services.sessionChecks?.get("default");
+  assert.equal(check?.answer, "no — wheels are not attached yet");
 });

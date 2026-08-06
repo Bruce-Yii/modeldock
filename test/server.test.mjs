@@ -47,6 +47,7 @@ test("proxies Responses while filtering unsupported hosted tool schemas", async 
     goBaseUrl: `http://127.0.0.1:${upstreamPort}`,
     opencodeBaseUrl: `http://127.0.0.1:${upstreamPort}`,
     profile: { ...base.profile, chatCampOverride: "responses" },
+    debug: { ...base.debug, noSessionCheck: true },
   };
   const instance = createApp(createServices(config));
   const server = instance.app.listen(0, "127.0.0.1");

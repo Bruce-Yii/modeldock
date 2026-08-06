@@ -652,15 +652,35 @@ async function relayLiveResponses(payload, res, services, signal) {
       if (call?.call_id && payload.model === services.modelSelection.visionModel) {
         services.routeAffinity.register(call.call_id, payload.model);
       }
+      // Anti-breakpoint: a plain-text turn (no tool call) is the model about to end
+      // the session. Hold the stream, ask the completion checker; if it says the task
+      // is NOT done, splice the verdict + rolling summary back into the conversation
+      // as a user message and keep generating on the same SSE stream. Rate-limited to
+      // one checker call per session per 30s, so a model stuck in a loop can only be
+      // revived every 30s at most. OpenCode Go camp only (see the compaction guard).
+      if (mode === "text" && services.config.profile?.id === "opencode-go" && !services.config.debug?.noSessionCheck) {
+        const key = payload?.client_metadata?.session_id || payload?.client_metadata?.thread_id || "default";
+        // The keepalive timer stopped with the upstream read; keep the downstream SSE
+        // window open while the checker side-call runs (it can take up to 60s).
+        const holdalive = setInterval(() => {
+          if (!res.writableEnded) res.write(": session-check hold\n\n");
+        }, 15_000);
+        const stopHoldalive = () => clearInterval(holdalive);
+        const revive = await checkSessionCompletion(services, key, payload).catch((error) => {
+          debugLog(services, `session check failed: ${error.message}`);
+          return null;
+        });
+        stopHoldalive();
+        if (revive) {
+          currentPayload = { ...currentPayload, input: [...(currentPayload.input || []), revive], stream: true };
+          mode = null;
+          call = null;
+          argumentsText = "";
+          continue;
+        }
+      }
       const response = writer.finish(usage);
       rememberReasoningItems(services, response);
-      // A plain-text turn (no tool call) ends the session's reply; ask the main model
-      // whether the task is done, fire-and-forget, rate-limited per session. OpenCode
-      // Go camp only (see the summary compaction guard).
-      if (mode === "text" && services.config.profile?.id === "opencode-go") {
-        const key = payload?.client_metadata?.session_id || payload?.client_metadata?.thread_id || "default";
-        checkSessionCompletion(services, key, payload).catch(() => {});
-      }
       return { ok: true, httpStatus: 200, bytesOut: writer.bytes, usage, rounds, response };
     }
 
@@ -747,21 +767,6 @@ async function relayResponses(req, res, services) {
     // only; the DeepSeek official profile is a direct relay and needs none of it.
     if (config.profile?.id === "opencode-go") {
       const summaryKey = source?.client_metadata?.session_id || source?.client_metadata?.thread_id || "default";
-      // Splice a pending completion-check verdict into the conversation so the main
-      // model continues from where the checker left off (e.g. "I need to verify the
-      // state of the commit") instead of the verdict vanishing after the check.
-      const check = services.sessionChecks?.get(summaryKey);
-      if (check && !check.injected && check.answer && Array.isArray(transformed.payload.input)) {
-        transformed.payload.input = [
-          ...transformed.payload.input,
-          {
-            role: "user",
-            content: [{ type: "input_text", text: `[completion check from your last turn: "${check.answer}" — continue from here]` }],
-          },
-        ];
-        check.injected = true;
-        debugLog(services, `spliced check verdict into session ${summaryKey}`);
-      }
       const existing = services.sessionSummaries?.get(summaryKey) || null;
       const existingSummary = existing?.text || null;
       // Debounce: one compaction per session per 5 minutes keeps us from re-summarizing
@@ -1306,10 +1311,11 @@ async function callMainModelText(services, key, messages, { maxOutputTokens = 50
     .join("") || null;
 }
 
-// Lightweight completion checker: when a turn ends with a plain text message (no tool
-// calls), ask the main model whether the session's task is done, using the rolling
-// summary plus the latest messages. Rate-limited to once per session per 30s so a
-// model stuck in a tool loop cannot hammer the upstream.
+// Lightweight anti-breakpoint checker: a plain-text turn (no tool calls) means the
+// model is about to end the session. Ask the main model whether the task is done,
+// using the rolling summary plus the latest messages. Rate-limited to once per
+// session per 30s so a model stuck in a loop cannot hammer the upstream. Returns a
+// user message that revives the conversation when the task is NOT done, else null.
 const SESSION_CHECK_INTERVAL_MS = 30_000;
 const SESSION_CHECK_TIMEOUT_MS = 60_000;
 const SESSION_CHECK_PROMPT = [
@@ -1322,7 +1328,7 @@ const SESSION_CHECK_PROMPT = [
 async function checkSessionCompletion(services, key, payload) {
   const now = Date.now();
   const last = services.sessionChecks?.get(key);
-  if (last && now - last.at < SESSION_CHECK_INTERVAL_MS) return;
+  if (last && now - last.at < SESSION_CHECK_INTERVAL_MS) return null;
   const summary = services.sessionSummaries?.get(key)?.text || null;
   const input = Array.isArray(payload.input) ? payload.input : [];
   const recent = input
@@ -1342,10 +1348,18 @@ async function checkSessionCompletion(services, key, payload) {
   // No text back means the model could not produce a verdict — treat that as
   // "done" rather than blocking the session end on an unresponsive side call.
   const verdict = answer?.trim() ? answer.trim().slice(0, 200) : "yes";
-  // `injected` flips when the verdict is spliced into the main conversation on the
-  // next request, so the main model can continue from where the check left off.
-  services.sessionChecks?.set(key, { at: now, answer: verdict, injected: false });
+  services.sessionChecks?.set(key, { at: now, answer: verdict });
   debugLog(services, `session check (${key}): ${verdict}`);
+  const done = /^(yes|y|done|complete|completed|finished)$/i.test(verdict);
+  if (done) return null;
+  // Not done: revive the conversation so the model continues instead of breaking.
+  return {
+    role: "user",
+    content: [{
+      type: "input_text",
+      text: `[session continuation — the completion checker determined the task is not finished: "${verdict}" — continue working on it]\n\n${summary ? `ROLLING SUMMARY:\n${summary}\n` : ""}[end session continuation]`,
+    }],
+  };
 }
 
 async function summarizeHistory(services, key, payload, existingSummary) {
