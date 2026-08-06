@@ -10,6 +10,12 @@ ModelDock.lnk
 # Dashboard screenshots (generated, not source)
 test/dashboard*.png
 
+# Local scratch files: ad-hoc scripts and probe/tool output that land in the repo root
+# during debugging (probe-tmp.png, test-tts.webm, _make_pptx.py, ...)
+_*.py
+probe-*.png
+*.webm
+
 # Local long-horizon task test area (rendered pages, screenshots, its own static server)
 voxel/
 
