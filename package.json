@@ -11,7 +11,8 @@
     "start": "node src/server.mjs",
     "dev": "node --watch src/server.mjs",
     "test": "node --test test/*.test.mjs src/config.test.mjs src/config-switcher.test.mjs src/media-store.test.mjs src/metrics.test.mjs src/router.test.mjs src/transform.test.mjs src/upstreams.test.mjs src/server.test.mjs src/chat-bridge.test.mjs",
-    "probe:live": "node scripts/live-probe.mjs"
+    "probe:live": "node scripts/live-probe.mjs",
+    "build": "node scripts/build.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/express": "2.0.0",
@@ -21,9 +22,13 @@
     "zod": "4.4.3"
   },
   "devDependencies": {
-    "@modelcontextprotocol/client": "2.0.0"
+    "@modelcontextprotocol/client": "2.0.0",
+    "esbuild": "^0.28.1"
   },
   "overrides": {
     "@hono/node-server": "2.0.12"
+  },
+  "allowScripts": {
+    "esbuild@0.28.1": true
   }
 }

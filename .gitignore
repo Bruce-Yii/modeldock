@@ -12,3 +12,6 @@ test/dashboard*.png
 
 # Local long-horizon task test area (rendered pages, screenshots, its own static server)
 voxel/
+
+# Release build output
+dist/

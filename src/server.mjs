@@ -990,9 +990,10 @@ function modelEndpoint(modelId) {
 // Image used to probe whether an upstream model can actually see images. In the release
 // bundle this is the inlined dashboard.png; in dev it falls back to a tiny 32x24 RGB-bar
 // data URL so the probe needs no on-disk asset and works from any layout.
-const VISION_PROBE_IMAGE =
-  (hasInlineStatic && staticFiles.assets?.["dashboard.png"]) ||
-  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAYCAIAAAAUMWhjAAAALElEQVR4nGP47+CAHzkcSCCACv7jQQyjFoxaMGrBqAWjFoxaMGrBqAVDwwIALqWKRWv2VpsAAAAASUVORK5CYII=";
+const inlineDashboardPng = hasInlineStatic ? staticFiles.assets?.["dashboard.png"] : null;
+const VISION_PROBE_IMAGE = inlineDashboardPng
+  ? `data:image/png;base64,${Buffer.from(inlineDashboardPng).toString("base64")}`
+  : "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAYCAIAAAAUMWhjAAAALElEQVR4nGP47+CAHzkcSCCACv7jQQyjFoxaMGrBqAWjFoxaMGrBqAVDwwIALqWKRWv2VpsAAAAASUVORK5CYII=";
 
 function visionProbeUrlAndBody(modelId, config, imageUrl) {
   const provider = providerForModel(config, modelId);
