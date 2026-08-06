@@ -64,6 +64,8 @@ const staticInlinePlugin = {
 
 mkdirSync(path.dirname(outfile), { recursive: true });
 
+const version = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8")).version;
+
 const result = await build({
   entryPoints: [path.join(root, "src", "server.mjs")],
   outfile,
@@ -75,6 +77,9 @@ const result = await build({
   minify: false,
   logLevel: "info",
   plugins: [staticInlinePlugin],
+  // Bake the version into the bundle so the updater knows what it is running even
+  // without a package.json on disk.
+  define: { "process.env.MODELDOCK_BUILD_VERSION": JSON.stringify(version) },
   // CJS dependencies (express) use dynamic require internally; give the ESM bundle a
   // real require implementation.
   banner: {

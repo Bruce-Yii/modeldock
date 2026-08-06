@@ -12,6 +12,7 @@ import { createMcpNodeHandler } from "./mcp.mjs";
 import { LiveResponsesWriter, parseSse } from "./live-responses.mjs";
 import { CodexConfigSwitcher } from "./config-switcher.mjs";
 import { createAutostart } from "./autostart.mjs";
+import { createUpdater } from "./update.mjs";
 import { RouteAffinity, routeResponsesRequest } from "./router.mjs";
 import { profileOptions, profileById, providerForModel, tokenFor } from "./profiles.mjs";
 import { chatEndpointFor, chatChunkToResponsesEvents, responsesToChatRequest } from "./chat-bridge.mjs";
@@ -146,7 +147,7 @@ function modelProviderOf(options, modelId) {
   return options.find((entry) => entry.id === modelId)?.provider || "other";
 }
 
-function statusPayload({ config, metrics, mediaStore, routeAffinity, modelSelection, autostart, sessionChecks }) {
+function statusPayload({ config, metrics, mediaStore, routeAffinity, modelSelection, autostart, updater, sessionChecks }) {
   const selected = modelSelection || { mainModel: config.mainModel, visionModel: config.visionModel };
   const options = modelOptions(config);
   const visionOptions = options.filter((entry) => entry.supportsVision);
@@ -170,6 +171,7 @@ function statusPayload({ config, metrics, mediaStore, routeAffinity, modelSelect
       supported: Boolean(autostart?.supported?.()),
       enabled: Boolean(autostart?.enabled?.()),
     },
+    update: updater?.state?.() || null,
   });
 }
 
@@ -1211,7 +1213,7 @@ async function refreshProfileModels(profile, config) {
 // summary plus the new delta, keeping the block bounded while preserving task state
 // (goal, done, decisions, status, todo) — the antidote to local-optimum loops.
 const SUMMARY_TRIGGER_BYTES = 200_000; // assistant text beyond this triggers compaction
-const SUMMARY_WINDOW_ITEMS = 40; // most recent messages stay verbatim
+const SUMMARY_WINDOW_TURNS = 10; // most recent complete user turns stay verbatim
 const SUMMARY_PROMPT = [
   "You are the memory keeper of a long-running coding session. Your ONLY job is to summarize the provided conversation history.",
   "Produce a compact structured summary in this exact format:",
@@ -1323,10 +1325,26 @@ async function summarizeHistory(services, key, payload, existingSummary) {
       if (text) assistants.push(text);
     }
     const total = assistants.reduce((acc, t) => acc + t.length, 0);
-    if (total <= SUMMARY_TRIGGER_BYTES || assistants.length <= SUMMARY_WINDOW_ITEMS) return null;
-
-    const keepCount = SUMMARY_WINDOW_ITEMS;
-    let oldText = assistants.slice(0, Math.max(1, assistants.length - keepCount)).join("\n\n");
+    // Window = the last N complete user turns (a "turn" is one user message and every
+    // assistant item after it), not a flat item count: one turn can span many small
+    // assistant items, so a 40-item window covered only ~2 turns of real work.
+    let turnStart = -1;
+    let turns = 0;
+    for (let i = input.length - 1; i >= 0; i--) {
+      if (input[i]?.role !== "user") continue;
+      turns += 1;
+      if (turns === SUMMARY_WINDOW_TURNS) { turnStart = i; break; }
+    }
+    if (turnStart < 0) return null;
+    const keepCount = input.slice(turnStart).filter((item) => {
+      if (item?.role !== "assistant") return false;
+      const text = Array.isArray(item.content) ? item.content.map((p) => p.text || "").join(" ") : item.content || "";
+      return Boolean(text);
+    }).length;
+    // Nothing outside the window to compact, or history too small to bother.
+    if (keepCount >= assistants.length || total <= SUMMARY_TRIGGER_BYTES) return null;
+    const oldCount = assistants.length - keepCount;
+    let oldText = assistants.slice(0, oldCount).join("\n\n");
     // Bound the summarizer input; the summary only needs the gist of old work, not
     // every byte (a 300KB+ history would make the summary call itself slow/timeout).
     const SUMMARY_INPUT_LIMIT = 100_000;
@@ -1346,7 +1364,6 @@ async function summarizeHistory(services, key, payload, existingSummary) {
 
     // Replace the summarized old assistants with the summary block, keep the recent
     // window verbatim. Summary goes right after the leading developer/L1 block.
-    const oldCount = Math.max(1, assistants.length - keepCount);
     let removed = 0;
     const newInput = input.filter((item) => {
       if (item?.role !== "assistant") return true;
@@ -1402,6 +1419,8 @@ export function createServices(config = loadConfig()) {
   });
   const autostart = createAutostart();
   autostart.refresh().catch(() => {});
+  const updater = createUpdater();
+  updater.check().catch(() => {});
   const routeAffinity = new RouteAffinity();
   // Reasoning cache: call_id -> the reasoning text the model produced before that tool
   // call. Codex drops reasoning from its re-posted history, but Go's chat camp (thinking
@@ -1427,7 +1446,7 @@ export function createServices(config = loadConfig()) {
     ? setInterval(refreshModelCatalog, refreshIntervalHours * 3_600_000)
     : null;
   if (modelRefreshTimer) modelRefreshTimer.unref();
-  return { config: mutableConfig, runtime, metrics, mediaStore, upstreams, configSwitcher, autostart, routeAffinity, modelSelection, reasoningCache, rememberReasoning, reasoningFor, sessionSummaries, sessionChecks, refreshModelCatalog, modelRefreshTimer, setActiveSessionSeed: (seed) => { activeSessionSeed = seed; } };
+  return { config: mutableConfig, runtime, metrics, mediaStore, upstreams, configSwitcher, autostart, updater, routeAffinity, modelSelection, reasoningCache, rememberReasoning, reasoningFor, sessionSummaries, sessionChecks, refreshModelCatalog, modelRefreshTimer, setActiveSessionSeed: (seed) => { activeSessionSeed = seed; } };
 }
 
 export function createApp(services = createServices()) {
@@ -1525,6 +1544,16 @@ export function createApp(services = createServices()) {
     } catch (error) {
       recordConfigAction(metrics, `autostart_${enabled ? "on" : "off"}`, { ok: false, error: error.message });
       return res.status(500).json({ error: { type: "autostart_failed", message: error.message } });
+    }
+  });
+  app.post("/api/update", mutateConfig, async (req, res) => {
+    try {
+      const result = await services.updater.apply();
+      recordConfigAction(metrics, "update_apply", { ok: true });
+      return res.json(result);
+    } catch (error) {
+      recordConfigAction(metrics, "update_apply", { ok: false, error: error.message });
+      return res.status(500).json({ error: { type: "update_failed", message: error.message } });
     }
   });
   app.get("/api/settings", (req, res) => res.json(settingsPayload(services)));

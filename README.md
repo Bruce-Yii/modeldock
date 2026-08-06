@@ -83,7 +83,9 @@ On Windows, you can also run `powershell -ExecutionPolicy Bypass -File scripts/c
 4. Pick the ModelDock model in Codex — done
 
 Tip: the dashboard also has a **Start at login** toggle (Windows/macOS) so ModelDock
-launches in the background automatically — no terminal window needed.
+launches in the background automatically — no terminal window needed. When a new
+version is released, a small **Update** button appears in the dashboard header —
+one click updates and restarts ModelDock.
 
 **Option B: Let your AI do it**
 
@@ -176,7 +178,7 @@ Windows 用户也可以运行 `powershell -ExecutionPolicy Bypass -File scripts/
 3. **完全退出并重启 Codex**
 4. Codex 里选择 ModelDock 模型 —— 完成
 
-小提示：仪表盘上还有一个**开机自启**开关（Windows/macOS），打开后 ModelDock 会在登录时自动后台运行，不需要终端窗口。
+小提示：仪表盘上还有一个**开机自启**开关（Windows/macOS），打开后 ModelDock 会在登录时自动后台运行，不需要终端窗口。有新版本发布时，仪表盘顶部会出现一个小小的**更新**按钮，点一下就能自动更新并重启。
 
 **方法二：让 AI 帮你装**
 
@@ -269,7 +271,7 @@ Windows では `powershell -ExecutionPolicy Bypass -File scripts/create-shortcut
 3. **Codex を完全に終了して再起動**
 4. Codex で ModelDock モデルを選択 — 完了
 
-ヒント: ダッシュボードには**ログイン時に自動起動**のトグル（Windows/macOS）もあります。オンにすると ModelDock がバックグラウンドで自動起動し、ターミナルは不要になります。
+ヒント: ダッシュボードには**ログイン時に自動起動**のトグル（Windows/macOS）もあります。オンにすると ModelDock がバックグラウンドで自動起動し、ターミナルは不要になります。新しいバージョンが公開されると、ダッシュボード上部に小さな**更新**ボタンが表示され、ワンクリックで更新・再起動できます。
 
 **方法 B: AI にやってもらう**
 

@@ -206,3 +206,26 @@ td.empty { text-align: center; color: var(--muted); padding: 42px; }
 }
 .settings-actions button:disabled { opacity: .5; cursor: wait; }
 .settings-actions #settings-status { font-size: 12px; color: var(--muted, #8b90a0); }
+
+/* --- Update button (small, but gently glowing so it gets noticed) --- */
+.topbar-buttons { display: flex; gap: 8px; align-items: center; justify-content: flex-end; margin-top: 8px; }
+.topbar-buttons .settings-open { margin-top: 0; }
+.update-button {
+  appearance: none;
+  border: 1px solid rgba(72,214,160,.55);
+  background: rgba(72,214,160,.08);
+  color: var(--green, #48d6a0);
+  font: 700 11px ui-monospace, monospace;
+  padding: 7px 12px;
+  border-radius: 10px;
+  cursor: pointer;
+  animation: update-glow 2.4s ease-in-out infinite;
+  transition: background .15s, transform .1s;
+}
+.update-button:hover { background: rgba(72,214,160,.16); }
+.update-button:active { transform: scale(.98); }
+.update-button:disabled { opacity: .6; cursor: wait; animation: none; }
+@keyframes update-glow {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(72,214,160,0); }
+  50% { box-shadow: 0 0 10px 1px rgba(72,214,160,.35); }
+}

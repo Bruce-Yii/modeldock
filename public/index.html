@@ -18,7 +18,10 @@
         <div class="status-stack">
           <div id="live-status" class="status-pill waiting"><span></span><strong>Connecting</strong></div>
           <p id="uptime">Uptime —</p>
-          <button id="settings-open" type="button" class="settings-open">Settings</button>
+          <div class="topbar-buttons">
+            <button id="update-button" type="button" class="update-button" hidden>Update</button>
+            <button id="settings-open" type="button" class="settings-open">Settings</button>
+          </div>
         </div>
       </header>
 
@@ -103,45 +106,6 @@
           <strong class="metric-value" id="bytes-total">0 B</strong>
           <div class="split-stats"><span><b id="bytes-in">0 B</b> in</span><span><b id="bytes-out">0 B</b> out</span></div>
           <p><span id="stream-count">0</span> streamed responses</p>
-        </article>
-      </section>
-
-      <section class="tool-grid">
-        <article class="tool-card">
-          <div class="tool-icon search">⌕</div>
-          <div class="tool-copy">
-            <div><h2>Exa Web Search</h2><span id="web-health" class="mini-pill">idle</span></div>
-            <p>Hosted MCP routed through the local meter.</p>
-          </div>
-          <dl>
-            <div><dt>Calls</dt><dd id="web-total">0</dd></div>
-            <div><dt>Errors</dt><dd id="web-errors">0</dd></div>
-            <div><dt>Average</dt><dd id="web-latency">0 ms</dd></div>
-          </dl>
-        </article>
-        <article class="tool-card">
-          <div class="tool-icon vision">◉</div>
-          <div class="tool-copy">
-            <div><h2>Vision Inspect</h2><span id="vision-health" class="mini-pill">idle</span></div>
-            <p><span id="vision-model">gpt-5.6-luna</span> with Kimi fallback.</p>
-          </div>
-          <dl>
-            <div><dt>Calls</dt><dd id="vision-total">0</dd></div>
-            <div><dt>Fallbacks</dt><dd id="vision-fallback">0</dd></div>
-            <div><dt>Average</dt><dd id="vision-latency">0 ms</dd></div>
-          </dl>
-        </article>
-        <article class="tool-card compact">
-          <div class="tool-icon media">▧</div>
-          <div class="tool-copy">
-            <div><h2>Media cache</h2><span class="mini-pill">memory</span></div>
-            <p>Opaque, TTL-bound image references.</p>
-          </div>
-          <dl>
-            <div><dt>Images</dt><dd id="media-entries">0</dd></div>
-            <div><dt>Bytes</dt><dd id="media-bytes">0 B</dd></div>
-            <div><dt>Attached</dt><dd id="media-attached">0</dd></div>
-          </dl>
         </article>
       </section>
 

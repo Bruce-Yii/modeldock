@@ -88,6 +88,7 @@ Codex ──POST /v1/responses──> ModelDock gate (Express, loopback only)
 | `src/config.mjs` | Resolve + load the user `.env` (dev cwd or installed `~/.modeldock`), comment-preserving write-back for the settings API, and (for the Codex bridge) the OpenCode Go API token |
 | `src/autostart.mjs` | Cross-platform start-at-login: HKCU Run key (Windows) / per-user LaunchAgent (macOS), launched via `scripts/start-hidden.*` |
 | `src/static-inline.mjs` | Placeholder (null) in a git checkout; the release build replaces it with inlined frontend assets for single-file distribution |
+| `src/update.mjs` | Startup release check against GitHub (MODELDOCK_UPDATE_REPO) + one-click apply: `git pull --ff-only` in a checkout, download the release bundle otherwise, then relaunch via `scripts/start-hidden.*` |
 | `src/config-switcher.mjs` | Back up / rewrite / restore Codex's `config.toml` to point at ModelDock, with drift detection |
 | `src/metrics.mjs` | Per-kind request metrics, usage extraction, event emitter feeding the dashboard |
 | `src/media-store.mjs` | In-memory cache mapping `img_<hash>` refs to image blobs (data-URL or HTTPS) for the vision harness |
@@ -428,6 +429,7 @@ the file drifted). Drifted === a hash+signature check that refuses ambiguous res
 | POST | `/api/debug` | Toggle verbose gateway debug logging on/off (API-only; no dashboard switch) |
 | POST | `/api/autostart` | Enable/disable start-at-login (dashboard toggle) |
 | GET / POST | `/api/settings` | Read settings summary / save provider tokens into the user `.env` (applied live) |
+| POST | `/api/update` | Apply a pending update (git pull or bundle download) and restart; state lives in `/api/status` `update` |
 | GET | `/api/events` | SSE stream pushing a status snapshot |
 | POST | `/mcp` (Streamable HTTP) | MCP tools: `web_search_exa`, `vision_inspect` |
 | GET | `/` (+ `*.html`) | Static dashboard from `public/` (no cache) |
@@ -453,6 +455,7 @@ debug switch is now the autostart toggle).
 | Var | Default | Purpose |
 | --- | --- | --- |
 | `MODELDOCK_ENV_FILE` / `MODELDOCK_CONFIG_DIR` | — | Override the user `.env` location (default: `~/.modeldock/.env` when installed, `<cwd>/.env` in dev) |
+| `MODELDOCK_UPDATE_REPO` | `architectds/modeldock` | GitHub repo checked for new releases at startup |
 | `MODELDOCK_PROFILE` | `opencode-go` | Which profile drives tool policy + catalog |
 | `MODELDOCK_UPSTREAM_BASE_URL` | `https://opencode.ai/zen/go/v1` | Override the OpenCode Go camp base URL; zen-free camp is fixed |
 | `MODELDOCK_DEEPSEEK_BASE_URL` | `https://api.deepseek.com` | Override the DeepSeek camp base URL |

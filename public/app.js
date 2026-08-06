@@ -33,13 +33,6 @@ function percent(ok, total) {
   return total ? Math.round((ok / total) * 100) : 0;
 }
 
-function health(id, bucket) {
-  const node = $(id);
-  const text = bucket.active ? `${bucket.active} active` : bucket.errors ? `${bucket.errors} errors` : bucket.total ? "healthy" : "idle";
-  node.textContent = text;
-  node.style.color = bucket.active ? "var(--amber)" : bucket.errors ? "#ff7b7b" : bucket.total ? "var(--green)" : "var(--muted)";
-}
-
 function showTrace(item) {
   const detail = $("trace-detail");
   detail.hidden = false;
@@ -135,19 +128,6 @@ function render(data) {
   set("bytes-out", bytes(responses.bytesOut));
   set("stream-count", number(responses.streaming));
 
-  health("web-health", data.web);
-  health("vision-health", data.vision);
-  set("web-total", number(data.web.total));
-  set("web-errors", number(data.web.errors));
-  set("web-latency", duration(data.web.averageLatencyMs));
-  set("vision-model", data.config.visionModel);
-  set("vision-total", number(data.vision.total));
-  set("vision-fallback", number(data.vision.fallback));
-  set("vision-latency", duration(data.vision.averageLatencyMs));
-  set("media-entries", number(data.media.entries));
-  set("media-bytes", bytes(data.media.bytes));
-  set("media-attached", number(responses.imageAttachments));
-
   set("cfg-bind", data.config.bind);
   set("cfg-go", data.config.goBaseUrl);
   set("cfg-main", data.config.mainModel);
@@ -155,6 +135,7 @@ function render(data) {
   set("cfg-fallback", data.config.visionFallbackModel);
   set("cfg-exa", data.config.exaMcpUrl);
   renderAutostart(data);
+  renderUpdate(data);
   maybePromptSettings(data.config);
   renderRecent(data.recent || []);
 }
@@ -267,6 +248,62 @@ async function setAutostartEnabled(enabled) {
     autostartBusy = false;
     $("autostart-toggle").disabled = false;
   }
+}
+
+let updateBusy = false;
+
+function renderUpdate(data) {
+  const button = $("update-button");
+  if (!button || updateBusy) return;
+  const update = data.update;
+  if (update?.available) {
+    button.hidden = false;
+    button.textContent = `Update v${update.latestVersion}`;
+    button.title = `New version available (current v${update.currentVersion}). One click to update and restart.`;
+  } else {
+    button.hidden = true;
+  }
+}
+
+async function applyUpdate() {
+  if (updateBusy) return;
+  updateBusy = true;
+  const button = $("update-button");
+  button.disabled = true;
+  button.textContent = "Updating...";
+  try {
+    const response = await fetch("/api/update", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.error?.message || `Update ${response.status}`);
+    button.textContent = "Restarting...";
+    awaitRestartThenReload();
+  } catch (error) {
+    updateBusy = false;
+    button.disabled = false;
+    button.textContent = "Update";
+    window.alert(error.message);
+  }
+}
+
+// The old process exits ~1s after responding and the relauncher waits 2s before
+// starting the new one, so begin probing after 4s and reload on the first answer.
+function awaitRestartThenReload() {
+  const started = Date.now();
+  setTimeout(function probe() {
+    fetch("/api/status", { cache: "no-store" })
+      .then((response) => {
+        if (response.ok) window.location.reload();
+        else throw new Error("not ready");
+      })
+      .catch(() => {
+        if (Date.now() - started > 120_000) window.location.reload();
+        else setTimeout(probe, 2_000);
+      });
+  }, 4_000);
 }
 
 let switchBusy = false;
@@ -461,3 +498,4 @@ async function saveSettings() {
 $("settings-open")?.addEventListener("click", openSettings);
 $("settings-close")?.addEventListener("click", closeSettings);
 $("settings-save")?.addEventListener("click", saveSettings);
+$("update-button")?.addEventListener("click", applyUpdate);
