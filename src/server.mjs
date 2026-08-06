@@ -1470,7 +1470,46 @@ export function createServices(config = loadConfig()) {
   const modelSelection = { mainModel: mutableConfig.mainModel, visionModel: mutableConfig.visionModel };
   // L2: rolling per-session summaries (session_id -> { text, at }). Grows monotonically
   // with the conversation; each compaction folds the new delta into the old summary.
+  // Persisted to disk so a gate restart does not lose the summaries: without them the
+  // next request carries the full un-compacted history, which balloons the payload and
+  // was observed to stall the upstream (and cascade into client disconnect + retry
+  // loops).
   const sessionSummaries = new Map();
+  let summariesSaveTimer = null;
+  const saveSummaries = () => {
+    if (summariesSaveTimer) return;
+    summariesSaveTimer = setTimeout(() => {
+      summariesSaveTimer = null;
+      Promise.all([import("node:fs"), import("node:os")]).then(([{ mkdirSync, writeFileSync }, os]) => {
+        const file = path.join(os.homedir(), ".modeldock", "summaries.json");
+        try {
+          mkdirSync(path.dirname(file), { recursive: true });
+          writeFileSync(file, JSON.stringify(Object.fromEntries(sessionSummaries)), "utf8");
+        } catch (error) {
+          console.log(`[gate] summaries save failed: ${error.message}`);
+        }
+      });
+    }, 5_000);
+  };
+  Promise.all([import("node:fs"), import("node:os")]).then(([{ readFileSync, existsSync }, os]) => {
+    const file = path.join(os.homedir(), ".modeldock", "summaries.json");
+    try {
+      if (existsSync(file)) {
+        const parsed = JSON.parse(readFileSync(file, "utf8"));
+        for (const [k, v] of Object.entries(parsed)) {
+          if (v && typeof v.text === "string" && v.text.trim()) sessionSummaries.set(k, v);
+        }
+        console.log(`[gate] loaded ${sessionSummaries.size} persisted summaries`);
+      }
+    } catch (error) {
+      console.log(`[gate] summaries load failed: ${error.message}`);
+    }
+  });
+  const origSet = sessionSummaries.set.bind(sessionSummaries);
+  sessionSummaries.set = (key, value) => {
+    origSet(key, value);
+    saveSummaries();
+  };
   // Session completion checker state: session_id -> { at, answer }. Fire-and-forget
   // model calls asked at most once per session per 30s.
   const sessionChecks = new Map();
