@@ -1275,7 +1275,7 @@ async function refreshProfileModels(profile, config) {
 // summary plus the new delta, keeping the block bounded while preserving task state
 // (goal, done, decisions, status, todo) — the antidote to local-optimum loops.
 const SUMMARY_TRIGGER_BYTES = 200_000; // assistant text beyond this triggers compaction
-const SUMMARY_WINDOW_ITEMS = 100; // sliding window: assistant messages kept verbatim
+const SUMMARY_WINDOW_ITEMS = 200; // sliding window: assistant messages kept verbatim
 const SUMMARY_PROMPT = [
   "You are the memory keeper of a long-running coding session. Your ONLY job is to summarize the provided conversation history.",
   "Produce a compact structured summary in this exact format:",
