@@ -786,14 +786,23 @@ async function relayResponses(req, res, services) {
       const existing = services.sessionSummaries?.get(summaryKey) || null;
       const existingSummary = existing?.text || null;
       // Always apply the stored summary on every request (local, no API call) so the
-      // upstream payload stays bounded even between fresh summary generations.
-      if (existingSummary) applySummaryToPayload(transformed.payload, existingSummary);
+      // upstream payload stays bounded even between fresh summary generations. The
+      // boundary is the last summary point: work after it stays verbatim.
+      if (existingSummary) applySummaryToPayload(transformed.payload, existingSummary, existing?.index || 0);
       // Debounce: one fresh summary per session per 5 minutes keeps us from calling the
       // model to re-summarize on every request while a long turn is still generating.
       const SUMMARY_DEBOUNCE_MS = 5 * 60_000;
       if (!existing || Date.now() - existing.at > SUMMARY_DEBOUNCE_MS) {
+        const assistantsBefore = (Array.isArray(transformed.payload.input) ? transformed.payload.input : [])
+          .filter((item) => item?.role === "assistant")
+          .filter((item) => {
+            const text = Array.isArray(item.content) ? item.content.map((p) => p.text || "").join(" ") : item.content || "";
+            return Boolean(text);
+          }).length;
         const newSummary = await summarizeHistory(services, summaryKey, transformed.payload, existingSummary);
-        if (newSummary) services.sessionSummaries?.set(summaryKey, { text: newSummary, at: Date.now() });
+        if (newSummary) {
+          services.sessionSummaries?.set(summaryKey, { text: newSummary, at: Date.now(), index: assistantsBefore });
+        }
       }
     }
   } catch (error) {
@@ -1381,10 +1390,12 @@ function checkSessionCompletion(services, key, payload, currentTurnText = "") {
   };
 }
 
-// Local-only: replace the old assistant history (outside the keep window) with the
-// given summary block. No API call — runs on every request so the upstream always
-// sees a bounded payload, not just right after a fresh summary was generated.
-function applySummaryToPayload(payload, summaryText) {
+// Local-only: replace the old assistant history with the given summary block. The
+// boundary is the last summary point (kept on the cache entry), NOT a fixed window:
+// everything after the last summary is recent work and stays verbatim, everything
+// before it collapses into the summary. No API call — runs on every request so the
+// upstream always sees a bounded payload, not just right after a fresh summary.
+function applySummaryToPayload(payload, summaryText, lastSummaryIndex = 0) {
   const input = Array.isArray(payload.input) ? payload.input : [];
   const assistants = [];
   for (const item of input) {
@@ -1394,23 +1405,14 @@ function applySummaryToPayload(payload, summaryText) {
   }
   const total = assistants.reduce((acc, t) => acc + t.length, 0);
   if (total <= SUMMARY_TRIGGER_BYTES) return false;
-  // Window = the last N complete user turns; tool-loop sessions (<N turns) fall back
-  // to a flat item window so a long tool chain never dodges compaction.
-  let turnStart = -1;
-  let turns = 0;
-  for (let i = input.length - 1; i >= 0; i--) {
-    if (input[i]?.role !== "user") continue;
-    turns += 1;
-    if (turns === SUMMARY_WINDOW_TURNS) { turnStart = i; break; }
-  }
+  // Remove assistant items that fall before the summary boundary. Guard against the
+  // boundary drifting out of sync (e.g. a fresh Codex thread with a shorter history):
+  // keep at least the most recent flat window so the tail always survives.
   const FLAT_WINDOW_ITEMS = 100;
-  const keepCount = turnStart >= 0
-    ? input.slice(turnStart).filter((item) => {
-        if (item?.role !== "assistant") return false;
-        const text = Array.isArray(item.content) ? item.content.map((p) => p.text || "").join(" ") : item.content || "";
-        return Boolean(text);
-      }).length
-    : Math.min(FLAT_WINDOW_ITEMS, assistants.length);
+  const keepCount = Math.min(
+    assistants.length,
+    Math.max(FLAT_WINDOW_ITEMS, assistants.length - lastSummaryIndex),
+  );
   if (keepCount >= assistants.length) return false;
   const oldCount = assistants.length - keepCount;
   let removed = 0;
