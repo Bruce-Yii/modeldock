@@ -749,7 +749,6 @@ function refreshDynamicText() {
 
 const langSelect = $("settings-lang");
 if (langSelect) {
-  langSelect.value = getLang();
   langSelect.addEventListener("change", (event) => {
     setLang(event.target.value);
     refreshDynamicText();
@@ -757,3 +756,6 @@ if (langSelect) {
 }
 
 initI18n();
+// After initI18n, not before: it resolves the stored/browser language, so reading it
+// earlier would leave the picker on "English" while the page renders in another one.
+if (langSelect) langSelect.value = getLang();

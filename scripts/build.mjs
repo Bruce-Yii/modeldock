@@ -76,6 +76,10 @@ const result = await build({
   sourcemap: false,
   minify: false,
   logLevel: "info",
+  // esbuild defaults to charset:"ascii", which re-escapes every translated string as
+  // \uXXXX - correct but unreadable and 2x the bytes for CJK. The bundle is served as
+  // UTF-8, so keep the text as text.
+  charset: "utf8",
   plugins: [staticInlinePlugin],
   // Optional, installed-on-demand dependencies: not in package.json, so esbuild cannot
   // resolve them at bundle time. Leaving the dynamic import unresolved is exactly the
