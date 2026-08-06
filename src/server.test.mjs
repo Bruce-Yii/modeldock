@@ -1417,3 +1417,16 @@ test("revival is rate-limited to once per session per 30s", async (t) => {
   await run(2);
   assert.equal(mainCalls, 3, "second request's text turn is inside the 30s window, no second revival");
 });
+
+test("session summaries are bounded and evict the least recently summarized", async (t) => {
+  const instance = await startApp({});
+  t.after(instance.stop);
+  const summaries = instance.services.sessionSummaries;
+
+  for (let i = 0; i < 260; i += 1) {
+    summaries.set(`ses_${i}`, { text: `summary ${i}`, at: 1_000 + i });
+  }
+  assert.ok(summaries.size <= 200, `expected the map to stay bounded, got ${summaries.size}`);
+  assert.equal(summaries.has("ses_0"), false, "the oldest entry is evicted");
+  assert.equal(summaries.has("ses_259"), true, "the newest entry survives");
+});

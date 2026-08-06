@@ -1,3 +1,5 @@
+import { t, getLang, setLang, initI18n, applyStaticI18n } from "./i18n.js";
+
 const $ = (id) => document.getElementById(id);
 
 function number(value) {
@@ -21,7 +23,9 @@ function uptime(value) {
   const seconds = Math.floor((value || 0) / 1_000);
   const hours = Math.floor(seconds / 3_600);
   const minutes = Math.floor((seconds % 3_600) / 60);
-  return hours ? `${hours}h ${minutes}m` : `${minutes}m ${seconds % 60}s`;
+  return hours
+    ? `${hours}${t("unit.h")} ${minutes}${t("unit.m")}`
+    : `${minutes}${t("unit.m")} ${seconds % 60}${t("unit.s")}`;
 }
 
 function set(id, value) {
@@ -36,7 +40,7 @@ function percent(ok, total) {
 function showTrace(item) {
   const detail = $("trace-detail");
   detail.hidden = false;
-  set("trace-detail-title", `${item.kind || "request"} · ${item.id || "unknown"}`);
+  set("trace-detail-title", t("traceDetail.titleFormat", { kind: item.kind || "request", id: item.id || "unknown" }));
   $("trace-detail-json").textContent = JSON.stringify(item, null, 2);
   detail.scrollIntoView({ block: "nearest", behavior: "smooth" });
 }
@@ -49,7 +53,7 @@ function renderRecent(items) {
     const cell = document.createElement("td");
     cell.colSpan = 5;
     cell.className = "empty";
-    cell.textContent = "No requests yet.";
+    cell.textContent = t("recent.empty");
     row.append(cell);
     body.append(row);
     return;
@@ -59,7 +63,7 @@ function renderRecent(items) {
     const row = document.createElement("tr");
     row.className = "trace-row";
     row.tabIndex = 0;
-    row.title = "Open sanitized request evidence";
+    row.title = t("recent.openTitle");
     row.addEventListener("click", () => showTrace(item));
     row.addEventListener("keydown", (event) => {
       if (event.key === "Enter" || event.key === " ") showTrace(item);
@@ -69,11 +73,11 @@ function renderRecent(items) {
       item.error ||
       item.query ||
       (item.harnessToolRounds
-        ? `${item.harnessToolRounds} internal tool round${item.harnessToolRounds === 1 ? "" : "s"}`
+        ? t("detail.toolRound", { n: item.harnessToolRounds })
         : item.filteredTools
-          ? `${item.filteredTools} special tools replaced`
+          ? t("detail.filteredTools", { n: item.filteredTools })
           : item.imageRefs?.length
-            ? `${item.imageRefs.length} image ref`
+            ? t("detail.imageRef", { n: item.imageRefs.length })
             : "—");
     const values = [item.kind, target, item.status, duration(item.latencyMs), detail];
     values.forEach((value, index) => {
@@ -98,26 +102,33 @@ function renderRecent(items) {
 // buffer lives in the browser so the wave persists and grows across SSE updates.
 const waveHistory = [];
 const WAVE_MAX_POINTS = 180;
+let waveHover = -1;
+let wavePeak = 0;
+let wavePoints = [];
 
 function renderContextWave(recent) {
   const canvas = $("context-wave");
   if (!canvas) return;
   const seen = new Set(waveHistory.map((point) => point.id));
   for (const item of recent) {
-    if (item.kind !== "responses" || seen.has(item.id)) continue;
+    // Only sample completed responses. In-flight (active) records carry no usage
+    // yet and would otherwise pin the newest sample at 0; skipping them here means
+    // a record is first added when it finishes with a real input-token count.
+    if (item.kind !== "responses" || item.status !== "ok" || seen.has(item.id)) continue;
     waveHistory.push({ id: item.id, t: item.startedAt || 0, v: Number(item.inputTokens) || 0 });
   }
   waveHistory.sort((a, b) => a.t - b.t);
   if (waveHistory.length > WAVE_MAX_POINTS) waveHistory.splice(0, waveHistory.length - WAVE_MAX_POINTS);
   const last = waveHistory.length ? waveHistory[waveHistory.length - 1].v : 0;
   const peak = waveHistory.reduce((max, point) => Math.max(max, point.v), 0);
+  wavePeak = peak;
   set("wave-last", number(last));
   set("wave-peak", number(peak));
   set("wave-count", number(waveHistory.length));
-  drawWave(canvas, waveHistory, peak);
+  drawWave(canvas, waveHistory, peak, waveHover);
 }
 
-function drawWave(canvas, history, peak) {
+function drawWave(canvas, history, peak, hoverIndex = -1) {
   const ctx = canvas.getContext("2d");
   const dpr = window.devicePixelRatio || 1;
   const width = canvas.clientWidth || canvas.width;
@@ -134,6 +145,7 @@ function drawWave(canvas, history, peak) {
   const plotH = height - pad * 2;
   const max = peak || 1;
   const n = history.length;
+  wavePoints = [];
 
   // Gridlines (3 horizontal ticks).
   ctx.strokeStyle = "rgba(247,185,85,0.08)";
@@ -157,6 +169,7 @@ function drawWave(canvas, history, peak) {
   history.forEach((point, index) => {
     const x = pad + (n === 1 ? plotW / 2 : (plotW * index) / (n - 1));
     const y = pad + plotH - Math.min(1, point.v / max) * plotH;
+    wavePoints.push({ x, y, v: point.v, t: point.t });
     ctx.lineTo(x, y);
   });
   ctx.lineTo(width - pad, pad + plotH);
@@ -179,6 +192,28 @@ function drawWave(canvas, history, peak) {
   ctx.stroke();
   ctx.shadowBlur = 0;
 
+  // Hover guide: vertical rule + highlighted sample.
+  if (hoverIndex >= 0 && wavePoints[hoverIndex]) {
+    const p = wavePoints[hoverIndex];
+    ctx.strokeStyle = "rgba(247,185,85,0.55)";
+    ctx.lineWidth = 1;
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath();
+    ctx.moveTo(p.x, pad);
+    ctx.lineTo(p.x, pad + plotH);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
+    ctx.fillStyle = "#f7b955";
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
+    ctx.strokeStyle = "rgba(8,16,24,.8)";
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  }
+
   // Peak marker dot.
   if (n > 0 && peak > 0) {
     let peakIndex = 0;
@@ -192,20 +227,68 @@ function drawWave(canvas, history, peak) {
   }
 }
 
+function attachWaveHover() {
+  const canvas = $("context-wave");
+  const tooltip = $("wave-tooltip");
+  if (!canvas || !tooltip) return;
+
+  canvas.addEventListener("mousemove", (event) => {
+    const rect = canvas.getBoundingClientRect();
+    const x = event.clientX - rect.left;
+    let nearest = -1;
+    let best = Infinity;
+    wavePoints.forEach((point, index) => {
+      const distance = Math.abs(point.x - x);
+      if (distance < best) {
+        best = distance;
+        nearest = index;
+      }
+    });
+    if (nearest !== waveHover) {
+      waveHover = nearest;
+      drawWave(canvas, waveHistory, wavePeak, waveHover);
+    }
+    if (nearest >= 0) {
+      const point = wavePoints[nearest];
+      const percentX = Math.max(0, Math.min(rect.width, point.x)) / rect.width;
+      tooltip.style.left = `${(point.x / rect.width) * 100}%`;
+      tooltip.style.transform = `translateX(${percentX < 0.08 ? "0%" : percentX > 0.92 ? "-100%" : "-50%"})`;
+      tooltip.innerHTML = `<b>${number(point.v)}</b><small>${formatWaveTime(point.t)}</small>`;
+      tooltip.hidden = false;
+    } else {
+      tooltip.hidden = true;
+    }
+  });
+
+  canvas.addEventListener("mouseleave", () => {
+    waveHover = -1;
+    tooltip.hidden = true;
+    drawWave(canvas, waveHistory, wavePeak, waveHover);
+  });
+}
+
+function formatWaveTime(timestamp) {
+  if (!timestamp) return "";
+  return new Date(timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+let lastData = null;
+
 function render(data) {
+  lastData = data;
   const ready = data.ready;
   const status = $("live-status");
   status.className = `status-pill ${ready ? "ready" : "error"}`;
-  status.querySelector("strong").textContent = ready ? "Gate ready" : "Token missing";
+  status.querySelector("strong").textContent = ready ? t("status.ready") : t("status.tokenMissing");
   renderModelOptions(data);
-  set("uptime", `Uptime ${uptime(data.uptimeMs)}`);
+  set("uptime", `${t("status.uptime")} ${uptime(data.uptimeMs)}`);
   set("main-model", data.config.mainModel);
   if (data.config.mainProviderLabel) set("route-provider", data.config.mainProviderLabel);
   if (data.config.mainWire) set("route-wire", data.config.mainWire === "chat" ? "chat/completions" : "responses");
 
   const responses = data.responses;
   const success = percent(responses.ok, responses.total);
-  set("active-requests", `${responses.active} active`);
+  set("active-requests", `${responses.active} ${t("metric.active")}`);
   set("requests-total", number(responses.total));
   set("requests-success", `${success}%`);
   set("requests-latency", duration(responses.averageLatencyMs));
@@ -233,7 +316,7 @@ function render(data) {
   set("cfg-main", data.config.mainModel);
   set("cfg-vision", data.config.visionModel);
   const visionDd = $("cfg-vision");
-  if (visionDd && data.config.visionUpstreamUrl) visionDd.title = `via ${data.config.visionUpstreamUrl}`;
+  if (visionDd && data.config.visionUpstreamUrl) visionDd.title = t("runtime.via", { url: data.config.visionUpstreamUrl });
   set("cfg-fallback", data.config.visionFallbackModel);
   set("cfg-exa", data.config.exaMcpUrl);
   renderAutostart(data);
@@ -255,18 +338,18 @@ async function renderSpeech(data) {
     const body = await res.json();
     const tts = body.tts || {};
     const stt = body.stt || {};
-    ttsStatus.textContent = tts.installed ? "TTS On" : "TTS Off";
+    ttsStatus.textContent = tts.installed ? t("speech.ttsOn") : t("speech.ttsOff");
     ttsStatus.style.color = tts.installed ? green : red;
     sttStatus.textContent = stt.available
-      ? `STT On · ${stt.cultures.join(" / ")}`
-      : "STT Off";
+      ? `${t("speech.sttOn")} · ${stt.cultures.join(" / ")}`
+      : t("speech.sttOff");
     sttStatus.style.color = stt.available ? green : red;
     installBtn.hidden = tts.installed;
     installBtn.disabled = false;
   } catch {
-    ttsStatus.textContent = "TTS Off";
+    ttsStatus.textContent = t("speech.ttsOff");
     ttsStatus.style.color = red;
-    sttStatus.textContent = "STT Off";
+    sttStatus.textContent = t("speech.sttOff");
     sttStatus.style.color = red;
   }
 }
@@ -356,8 +439,8 @@ function renderAutostart(data) {
   $("autostart-off-label").classList.toggle("active", !autostartEnabled);
   $("autostart-on-label").classList.toggle("active", autostartEnabled);
   toggle.title = supported
-    ? (autostartEnabled ? "Start at login: on" : "Start at login: off")
-    : "Autostart is not supported on this platform";
+    ? (autostartEnabled ? t("autostart.titleOn") : t("autostart.titleOff"))
+    : t("autostart.unsupported");
 }
 
 async function setAutostartEnabled(enabled) {
@@ -389,8 +472,8 @@ function renderUpdate(data) {
   const update = data.update;
   if (update?.available) {
     button.hidden = false;
-    button.textContent = `Update v${update.latestVersion}`;
-    button.title = `New version available (current v${update.currentVersion}). One click to update and restart.`;
+    button.textContent = t("update.available", { n: update.latestVersion });
+    button.title = t("update.title", { current: update.currentVersion });
   } else {
     button.hidden = true;
   }
@@ -401,7 +484,7 @@ async function applyUpdate() {
   updateBusy = true;
   const button = $("update-button");
   button.disabled = true;
-  button.textContent = "Updating...";
+  button.textContent = t("update.updating");
   try {
     const response = await fetch("/api/update", {
       method: "POST",
@@ -410,12 +493,12 @@ async function applyUpdate() {
     });
     const body = await response.json();
     if (!response.ok) throw new Error(body.error?.message || `Update ${response.status}`);
-    button.textContent = "Restarting...";
+    button.textContent = t("update.restarting");
     awaitRestartThenReload();
   } catch (error) {
     updateBusy = false;
     button.disabled = false;
-    button.textContent = "Update";
+    button.textContent = t("button.update");
     window.alert(error.message);
   }
 }
@@ -445,22 +528,22 @@ function renderConfigSwitch(data) {
   const toggle = $("proxy-toggle");
   toggle.checked = Boolean(data.enabled);
   toggle.disabled = switchBusy;
-  set("switch-label", data.enabled ? "On" : "Off");
+  set("switch-label", data.enabled ? t("switch.on") : t("switch.off"));
   set(
     "switch-description",
     data.enabled
-      ? "Codex is configured to use other APIs through the local ModelDock bridge."
-      : "Codex is using its own configuration. Enabling backs it up and selects the local ModelDock provider.",
+      ? t("switch.descEnabled")
+      : t("switch.descDisabled"),
   );
   const message = $("switch-message");
   message.className = "";
   if (data.stateError) {
-    message.textContent = `State error: ${data.stateError}`;
+    message.textContent = t("switch.stateError", { msg: data.stateError });
     message.className = "error";
   } else if (data.externallyRestored) {
-    message.textContent = "Codex config is already restored; ModelDock state will reconcile on the next action.";
+    message.textContent = t("switch.restored");
   } else {
-    message.textContent = data.enabled ? "Backup ready · provider active" : "Default remains off";
+    message.textContent = data.enabled ? t("switch.backupReady") : t("switch.defaultOff");
   }
   $("restart-banner").hidden = !data.restartRequired;
 }
@@ -474,7 +557,7 @@ async function pollConfig() {
 async function configAction(action) {
   switchBusy = true;
   $("proxy-toggle").disabled = true;
-  set("switch-message", "Updating Codex config…");
+  set("switch-message", t("switch.updating"));
   try {
     const response = await fetch(`/api/config/${action}`, {
       method: "POST",
@@ -502,14 +585,16 @@ async function poll() {
 }
 
 const events = new EventSource("/api/events");
-events.onopen = () => set("event-connection", "SSE connected");
+events.onopen = () => set("event-connection", t("event.connected"));
 events.onmessage = (event) => render(JSON.parse(event.data));
 events.onerror = () => {
-  set("event-connection", "SSE reconnecting");
+  set("event-connection", t("event.reconnecting"));
   poll().catch(() => {});
-};
+  };
 
-poll().catch(() => set("event-connection", "Status unavailable"));
+attachWaveHover();
+
+poll().catch(() => set("event-connection", t("event.unavailable")));
 pollConfig().catch((error) => {
   const message = $("switch-message");
   message.textContent = error.message;
@@ -521,8 +606,8 @@ setInterval(() => pollConfig().catch(() => {}), 15_000);
 $("proxy-toggle").addEventListener("change", async (event) => {
   const enabling = event.target.checked;
   const prompt = enabling
-    ? "Enable other APIs for Codex? ModelDock will back up the current user config, replace the active model/provider settings, and require a full Codex restart."
-    : "Disable other APIs and restore the backed-up Codex config? A full Codex restart will be required.";
+    ? t("confirm.enable")
+    : t("confirm.disable");
   if (!window.confirm(prompt)) {
     event.target.checked = !enabling;
     return;
@@ -558,21 +643,21 @@ const ttsInstallBtn = $("speech-tts-install");
 if (ttsInstallBtn) {
   ttsInstallBtn.addEventListener("click", async () => {
     ttsInstallBtn.disabled = true;
-    ttsInstallBtn.textContent = "Installing…";
+    ttsInstallBtn.textContent = t("speech.installing");
     try {
       const res = await fetch("/api/speech/install", { method: "POST", headers: { accept: "application/json" } });
       const body = await res.json();
       if (res.ok && body.installed) {
-        $("speech-tts-status").textContent = "TTS On";
+        $("speech-tts-status").textContent = t("speech.ttsOn");
         $("speech-tts-status").style.color = "var(--green)";
         ttsInstallBtn.hidden = true;
       } else {
-        $("speech-tts-status").textContent = `TTS Off (${body.error?.message || "install failed"})`;
+        $("speech-tts-status").textContent = `${t("speech.ttsOff")} (${body.error?.message || t("speech.ttsOff")})`;
       }
     } catch {
-      $("speech-tts-status").textContent = "TTS Off";
+      $("speech-tts-status").textContent = t("speech.ttsOff");
     }
-    ttsInstallBtn.textContent = "Install";
+    ttsInstallBtn.textContent = t("speech.install");
     ttsInstallBtn.disabled = false;
   });
 }
@@ -601,8 +686,8 @@ async function openSettings() {
     const dsInput = $("settings-deepseek-token");
     goInput.value = "";
     dsInput.value = "";
-    goInput.placeholder = go?.tokenConfigured ? "configured - leave blank to keep" : "sk-... (required)";
-    dsInput.placeholder = ds?.tokenConfigured ? "configured - leave blank to keep" : "sk-... (optional)";
+    goInput.placeholder = go?.tokenConfigured ? t("settings.configured") : t("settings.required");
+    dsInput.placeholder = ds?.tokenConfigured ? t("settings.configured") : t("settings.optional");
     $("settings-status").textContent = "";
     $("settings-envfile").textContent = data.envFile || "";
     if (typeof dialog.showModal === "function") dialog.showModal();
@@ -622,7 +707,7 @@ async function saveSettings() {
   const saveBtn = $("settings-save");
   saveBtn.disabled = true;
   const status = $("settings-status");
-  status.textContent = "Saving...";
+  status.textContent = t("settings.saving");
   try {
     const body = {};
     const go = $("settings-go-token").value.trim();
@@ -640,7 +725,7 @@ async function saveSettings() {
     });
     const data = await response.json();
     if (!response.ok) throw new Error(data.error?.message || `Save ${response.status}`);
-    status.textContent = "Saved - active now";
+    status.textContent = t("settings.saved");
     closeSettings();
     poll().catch(() => {});
   } catch (error) {
@@ -654,3 +739,21 @@ $("settings-open")?.addEventListener("click", openSettings);
 $("settings-close")?.addEventListener("click", closeSettings);
 $("settings-save")?.addEventListener("click", saveSettings);
 $("update-button")?.addEventListener("click", applyUpdate);
+
+// Language selector: re-apply static text and refresh dynamic text in place.
+function refreshDynamicText() {
+  applyStaticI18n();
+  if (typeof lastData !== "undefined" && lastData) render(lastData);
+  pollConfig().catch(() => {});
+}
+
+const langSelect = $("settings-lang");
+if (langSelect) {
+  langSelect.value = getLang();
+  langSelect.addEventListener("change", (event) => {
+    setLang(event.target.value);
+    refreshDynamicText();
+  });
+}
+
+initI18n();

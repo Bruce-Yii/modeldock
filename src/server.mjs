@@ -1505,9 +1505,20 @@ export function createServices(config = loadConfig()) {
       console.log(`[gate] summaries load failed: ${error.message}`);
     }
   });
+  // Bounded like the other per-session caches (reasoning: 256 entries, media: TTL+LRU).
+  // Without this the map gains one entry per session forever, is persisted in full on
+  // every write and reloaded at boot - it only ever grows.
+  const MAX_SESSION_SUMMARIES = 200;
   const origSet = sessionSummaries.set.bind(sessionSummaries);
   sessionSummaries.set = (key, value) => {
     origSet(key, value);
+    if (sessionSummaries.size > MAX_SESSION_SUMMARIES) {
+      // Drop the least recently summarized sessions.
+      const oldest = [...sessionSummaries.entries()]
+        .sort((a, b) => (a[1]?.at || 0) - (b[1]?.at || 0))
+        .slice(0, sessionSummaries.size - MAX_SESSION_SUMMARIES);
+      for (const [staleKey] of oldest) sessionSummaries.delete(staleKey);
+    }
     saveSummaries();
   };
   // Session completion checker state: session_id -> { at, answer }. Fire-and-forget

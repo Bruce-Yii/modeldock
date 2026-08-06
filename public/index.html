@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -13,22 +13,22 @@
         <div>
           <p class="eyebrow">CODEX HARNESS BRIDGE</p>
           <h1>API Bridge</h1>
-          <p class="subtitle">Responses forwarding, Exa search and vision sharing in one local process.</p>
+          <p class="subtitle" data-i18n="app.subtitle">Responses forwarding, Exa search and vision sharing in one local process.</p>
         </div>
         <div class="status-stack">
-          <div id="live-status" class="status-pill waiting"><span></span><strong>Connecting</strong></div>
-          <p id="uptime">Uptime —</p>
+          <div id="live-status" class="status-pill waiting"><span></span><strong data-i18n="status.connecting">Connecting</strong></div>
+          <p id="uptime" data-i18n="status.uptime">Uptime</p>
           <div class="topbar-buttons">
-            <button id="update-button" type="button" class="update-button" hidden>Update</button>
-            <button id="settings-open" type="button" class="settings-open">Settings</button>
+            <button id="update-button" type="button" class="update-button" hidden data-i18n="button.update">Update</button>
+            <button id="settings-open" type="button" class="settings-open" data-i18n="button.settings">Settings</button>
           </div>
         </div>
       </header>
 
       <section class="route-card">
-        <div class="route-node codex"><span>01</span><strong>Codex</strong><small>Responses client</small></div>
+        <div class="route-node codex"><span>01</span><strong data-i18n="route.codex">Codex</strong><small data-i18n="route.codexSmall">Responses client</small></div>
         <div class="route-line"><i></i><em>/v1/responses</em></div>
-        <div class="route-node gate"><span>02</span><strong>Gate</strong><small>filter · meter · stream</small></div>
+        <div class="route-node gate"><span>02</span><strong data-i18n="route.gate">Gate</strong><small data-i18n="route.gateSmall">filter · meter · stream</small></div>
         <div class="route-line"><i></i><em id="route-wire">Responses façade</em></div>
         <div class="route-node go"><span>03</span><strong id="route-provider">OpenCode Go</strong><small id="main-model">deepseek-v4-flash</small></div>
       </section>
@@ -36,8 +36,8 @@
       <section class="service-control">
         <div class="control-main">
           <div class="control-copy">
-            <p class="eyebrow">CODEX CONFIG SWITCH</p>
-            <div class="control-title"><h2>Use other API in Codex</h2><span id="switch-default" class="default-pill">DEFAULT · OFF</span></div>
+            <p class="eyebrow" data-i18n="cfg.eyebrow">CODEX CONFIG SWITCH</p>
+            <div class="control-title"><h2 data-i18n="switch.title">Use other API in Codex</h2><span id="switch-default" class="default-pill" data-i18n="switch.defaultPill">DEFAULT · OFF</span></div>
             <p id="switch-description">Codex is using its own configuration. Enabling backs it up and selects the local ModelDock provider.</p>
           </div>
           <label class="toggle" for="proxy-toggle">
@@ -48,21 +48,21 @@
         </div>
         <div class="control-defaults" aria-label="API Bridge defaults">
           <div>
-            <span>Provider</span>
+            <span data-i18n="defaults.provider">Provider</span>
             <div class="select-pair">
               <select id="main-provider-select" class="model-select" aria-label="Provider"></select>
               <select id="main-model-select" class="model-select" aria-label="Main model"></select>
             </div>
           </div>
           <div>
-            <span>Vision</span>
+            <span data-i18n="defaults.vision">Vision</span>
             <div class="select-pair">
               <select id="vision-provider-select" class="model-select" aria-label="Vision provider"></select>
               <select id="vision-model-select" class="model-select" aria-label="Vision model"></select>
             </div>
           </div>
           <div>
-            <span>TTS · STT</span>
+            <span data-i18n="defaults.tts">TTS · STT</span>
             <div class="select-pair speech-pair">
               <strong id="speech-tts-status" class="speech-status">checking…</strong>
               <strong id="speech-stt-status" class="speech-status">checking…</strong>
@@ -70,12 +70,12 @@
             </div>
           </div>
           <div class="debug-default">
-            <span>AUTOSTART</span>
+            <span data-i18n="defaults.autostart">AUTOSTART</span>
             <label class="mode-toggle" for="autostart-toggle">
-              <b id="autostart-off-label">Off</b>
+              <b id="autostart-off-label" data-i18n="autostart.off">Off</b>
               <input id="autostart-toggle" type="checkbox" role="switch" aria-label="Start ModelDock at login" />
               <span class="mode-track"><i></i></span>
-              <b id="autostart-on-label">On</b>
+              <b id="autostart-on-label" data-i18n="autostart.on">On</b>
             </label>
           </div>
         </div>
@@ -85,67 +85,70 @@
       </section>
 
       <section id="restart-banner" class="restart-banner" hidden>
-        <div><span>RESTART REQUIRED</span><strong>Codex configuration changed. Fully restart Codex before starting another task.</strong></div>
-        <button id="restart-ack" type="button">I restarted Codex</button>
+        <div><span data-i18n="restart.eyebrow">RESTART REQUIRED</span><strong data-i18n="restart.message">Codex configuration changed. Fully restart Codex before starting another task.</strong></div>
+        <button id="restart-ack" type="button" data-i18n="restart.ack">I restarted Codex</button>
       </section>
 
       <section class="metric-grid">
         <article class="metric-card accent-blue">
-          <div class="metric-head"><span>Requests</span><b id="active-requests">0 active</b></div>
+          <div class="metric-head"><span data-i18n="metric.requests">Requests</span><b id="active-requests">0 active</b></div>
           <strong class="metric-value" id="requests-total">0</strong>
           <div class="meter"><i id="requests-success-meter"></i></div>
-          <p><span id="requests-success">0%</span> successful · <span id="requests-latency">0 ms</span> avg</p>
+          <p><span id="requests-success">0%</span> <span data-i18n="metric.successful">successful</span> · <span id="requests-latency">0 ms</span> <span data-i18n="metric.avg">avg</span></p>
         </article>
         <article class="metric-card accent-violet">
-          <div class="metric-head"><span>Tokens</span><b>forwarded</b></div>
+          <div class="metric-head"><span data-i18n="metric.tokens">Tokens</span><b data-i18n="metric.forwarded">forwarded</b></div>
           <strong class="metric-value" id="tokens-total">0</strong>
-          <div class="split-stats"><span><i class="dot input"></i><b id="tokens-input">0</b> input</span><span><i class="dot output"></i><b id="tokens-output">0</b> output</span></div>
+          <div class="split-stats"><span><i class="dot input"></i><b id="tokens-input">0</b> <span data-i18n="metric.input">input</span></span><span><i class="dot output"></i><b id="tokens-output">0</b> <span data-i18n="metric.output">output</span></span></div>
           <div class="meter token"><i id="token-meter-input"></i></div>
         </article>
         <article class="metric-card accent-amber wave-card">
-          <div class="metric-head"><span>Context tokens</span><b>per call · live</b></div>
-          <div class="wave-stats"><span><b id="wave-last">0</b> last</span><span><b id="wave-peak">0</b> peak</span></div>
-          <canvas id="context-wave" width="340" height="92"></canvas>
-          <p><span id="wave-count">0</span> calls observed</p>
+          <div class="metric-head"><span data-i18n="metric.context">Context tokens</span><b data-i18n="metric.perCall">per call · live</b></div>
+          <div class="wave-stats"><span><b id="wave-last">0</b> <span data-i18n="metric.last">last</span></span><span><b id="wave-peak">0</b> <span data-i18n="metric.peak">peak</span></span></div>
+          <div class="wave-wrap">
+            <canvas id="context-wave" width="340" height="92"></canvas>
+            <div id="wave-tooltip" class="wave-tooltip" hidden></div>
+          </div>
+          <p><span id="wave-count">0</span> <span data-i18n="metric.callsObserved">calls observed</span></p>
         </article>
         <article class="metric-card accent-green">
-          <div class="metric-head"><span>Transfer</span><b>SSE + JSON</b></div>
+          <div class="metric-head"><span data-i18n="metric.transfer">Transfer</span><b data-i18n="metric.sse">SSE + JSON</b></div>
           <strong class="metric-value" id="bytes-total">0 B</strong>
-          <div class="split-stats"><span><b id="bytes-in">0 B</b> in</span><span><b id="bytes-out">0 B</b> out</span></div>
-          <p><span id="stream-count">0</span> streamed responses</p>
+          <div class="split-stats"><span><b id="bytes-in">0 B</b> <span data-i18n="metric.in">in</span></span><span><b id="bytes-out">0 B</b> <span data-i18n="metric.out">out</span></span></div>
+          <p><span id="stream-count">0</span> <span data-i18n="metric.streamed">streamed responses</span></p>
         </article>
       </section>
 
       <section class="lower-grid">
         <article class="panel recent-panel">
           <div class="panel-head">
-            <div><p class="eyebrow">LIVE TRACE</p><h2>Recent activity</h2></div>
+            <div><p class="eyebrow" data-i18n="trace.eyebrow">LIVE TRACE</p><h2 data-i18n="trace.title">Recent activity</h2></div>
             <span id="event-connection">SSE connecting</span>
           </div>
           <div class="table-wrap">
             <table>
-              <thead><tr><th>Type</th><th>Target</th><th>Status</th><th>Latency</th><th>Detail</th></tr></thead>
+              <thead><tr><th data-i18n="table.type">Type</th><th data-i18n="table.target">Target</th><th data-i18n="table.status">Status</th><th data-i18n="table.latency">Latency</th><th data-i18n="table.detail">Detail</th></tr></thead>
               <tbody id="recent-body"><tr><td colspan="5" class="empty">No requests yet.</td></tr></tbody>
             </table>
           </div>
           <section id="trace-detail" class="trace-detail" hidden>
-            <div><strong id="trace-detail-title">Request evidence</strong><button id="trace-detail-close" type="button" aria-label="Close trace detail">Close</button></div>
-            <p>Sanitized transport evidence only. Prompt text, tool output, image data, and credentials are excluded.</p>
+            <div><strong id="trace-detail-title">Request evidence</strong><button id="trace-detail-close" type="button" aria-label="Close trace detail" data-i18n="traceDetail.close">Close</button></div>
+            <p data-i18n="traceDetail.note">Sanitized transport evidence only. Prompt text, tool output, image data, and credentials are excluded.</p>
             <pre id="trace-detail-json"></pre>
           </section>
         </article>
 
         <aside class="panel config-panel">
-          <div class="panel-head"><div><p class="eyebrow">RUNTIME</p><h2>Forwarding map</h2></div></div>
+          <div class="panel-head"><div><p class="eyebrow" data-i18n="runtime.eyebrow">RUNTIME</p><h2 data-i18n="runtime.title">Forwarding map</h2></div></div>
           <dl class="config-list">
-            <div><dt>Bind</dt><dd id="cfg-bind">—</dd></div>
-            <div><dt>Upstream</dt><dd id="cfg-go">—</dd></div>
-            <div><dt>Main model</dt><dd id="cfg-main">—</dd></div>
-            <div><dt>Vision</dt><dd id="cfg-vision">—</dd></div>
-            <div><dt>Fallback</dt><dd id="cfg-fallback">—</dd></div>
-            <div><dt>Exa MCP</dt><dd id="cfg-exa">—</dd></div>
+            <div><dt data-i18n="runtime.bind">Bind</dt><dd id="cfg-bind">—</dd></div>
+            <div><dt data-i18n="runtime.upstream">Upstream</dt><dd id="cfg-go">—</dd></div>
+            <div><dt data-i18n="runtime.main">Main model</dt><dd id="cfg-main">—</dd></div>
+            <div><dt data-i18n="runtime.vision">Vision</dt><dd id="cfg-vision">—</dd></div>
+            <div><dt data-i18n="runtime.fallback">Fallback</dt><dd id="cfg-fallback">—</dd></div>
+            <div><dt data-i18n="runtime.exa">Exa MCP</dt><dd id="cfg-exa">—</dd></div>
           </dl>
-          <div class="security-note"><span>LOCAL</span><p>Loopback-only. Prompts, images and bearer tokens are never rendered here.</p></div>
+          <div class="security-note"><span data-i18n="security.local">LOCAL</span><p data-i18n="security.note">Loopback-only. Prompts, images and bearer tokens are never rendered here.</p></div>
         </aside>
       </section>
     </main>
@@ -153,26 +156,35 @@
     <dialog id="settings-dialog" class="settings-dialog">
       <div class="settings-card">
         <div class="settings-head">
-          <div><p class="eyebrow">SETTINGS</p><h2>Connection</h2></div>
-          <button id="settings-close" type="button" class="settings-close" aria-label="Close settings">Close</button>
+          <div><p class="eyebrow" data-i18n="settings.eyebrow">SETTINGS</p><h2 data-i18n="settings.title">Connection</h2></div>
+          <button id="settings-close" type="button" class="settings-close" aria-label="Close settings" data-i18n="settings.close">Close</button>
         </div>
-        <p class="settings-path">Config file: <code id="settings-envfile"></code></p>
+        <p class="settings-path"><span data-i18n="settings.path">Config file:</span> <code id="settings-envfile"></code></p>
         <label class="field">
           <div class="field-head">
-            <span>OpenCode Go token</span>
-            <a href="https://opencode.ai/go?ref=P2133HRY5J" target="_blank" rel="noopener noreferrer">No key? Apply here.</a>
+            <span data-i18n="settings.goLabel">OpenCode Go token</span>
+            <a href="https://opencode.ai/go?ref=P2133HRY5J" target="_blank" rel="noopener noreferrer" data-i18n="settings.apply">No key? Apply here.</a>
           </div>
           <input id="settings-go-token" type="password" placeholder="sk-..." autocomplete="off" spellcheck="false" />
         </label>
         <label class="field">
           <div class="field-head">
-            <span>DeepSeek API key</span>
-            <a href="https://platform.deepseek.com/" target="_blank" rel="noopener noreferrer">No key? Apply here.</a>
+            <span data-i18n="settings.dsLabel">DeepSeek API key</span>
+            <a href="https://platform.deepseek.com/" target="_blank" rel="noopener noreferrer" data-i18n="settings.apply">No key? Apply here.</a>
           </div>
           <input id="settings-deepseek-token" type="password" placeholder="sk-..." autocomplete="off" spellcheck="false" />
         </label>
+        <label class="field">
+          <div class="field-head">
+            <span data-i18n="settings.language">Interface language</span>
+          </div>
+          <select id="settings-lang" class="lang-select" aria-label="Interface language">
+            <option value="en">English</option>
+            <option value="zh">简体中文</option>
+          </select>
+        </label>
         <div class="settings-actions">
-          <button id="settings-save" type="button">Save</button>
+          <button id="settings-save" type="button" data-i18n="settings.save">Save</button>
           <span id="settings-status" aria-live="polite"></span>
         </div>
       </div>
