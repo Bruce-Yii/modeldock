@@ -93,6 +93,105 @@ function renderRecent(items) {
   }
 }
 
+// Context-token waveform: plots per-call input tokens from the responses metric
+// records (chronological, sessions interleaved) onto a small canvas. The history
+// buffer lives in the browser so the wave persists and grows across SSE updates.
+const waveHistory = [];
+const WAVE_MAX_POINTS = 180;
+
+function renderContextWave(recent) {
+  const canvas = $("context-wave");
+  if (!canvas) return;
+  const seen = new Set(waveHistory.map((point) => point.id));
+  for (const item of recent) {
+    if (item.kind !== "responses" || seen.has(item.id)) continue;
+    waveHistory.push({ id: item.id, t: item.startedAt || 0, v: Number(item.inputTokens) || 0 });
+  }
+  waveHistory.sort((a, b) => a.t - b.t);
+  if (waveHistory.length > WAVE_MAX_POINTS) waveHistory.splice(0, waveHistory.length - WAVE_MAX_POINTS);
+  const last = waveHistory.length ? waveHistory[waveHistory.length - 1].v : 0;
+  const peak = waveHistory.reduce((max, point) => Math.max(max, point.v), 0);
+  set("wave-last", number(last));
+  set("wave-peak", number(peak));
+  set("wave-count", number(waveHistory.length));
+  drawWave(canvas, waveHistory, peak);
+}
+
+function drawWave(canvas, history, peak) {
+  const ctx = canvas.getContext("2d");
+  const dpr = window.devicePixelRatio || 1;
+  const width = canvas.clientWidth || canvas.width;
+  const height = canvas.clientHeight || canvas.height;
+  if (canvas.width !== Math.round(width * dpr) || canvas.height !== Math.round(height * dpr)) {
+    canvas.width = Math.round(width * dpr);
+    canvas.height = Math.round(height * dpr);
+  }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+
+  const pad = 4;
+  const plotW = width - pad * 2;
+  const plotH = height - pad * 2;
+  const max = peak || 1;
+  const n = history.length;
+
+  // Gridlines (3 horizontal ticks).
+  ctx.strokeStyle = "rgba(247,185,85,0.08)";
+  ctx.lineWidth = 1;
+  for (let i = 1; i <= 3; i += 1) {
+    const y = pad + (plotH / 3) * i;
+    ctx.beginPath();
+    ctx.moveTo(pad, y);
+    ctx.lineTo(width - pad, y);
+    ctx.stroke();
+  }
+
+  if (n === 0) return;
+
+  // Area fill under the curve.
+  const gradient = ctx.createLinearGradient(0, pad, 0, pad + plotH);
+  gradient.addColorStop(0, "rgba(247,185,85,0.35)");
+  gradient.addColorStop(1, "rgba(247,185,85,0)");
+  ctx.beginPath();
+  ctx.moveTo(pad, pad + plotH);
+  history.forEach((point, index) => {
+    const x = pad + (n === 1 ? plotW / 2 : (plotW * index) / (n - 1));
+    const y = pad + plotH - Math.min(1, point.v / max) * plotH;
+    ctx.lineTo(x, y);
+  });
+  ctx.lineTo(width - pad, pad + plotH);
+  ctx.closePath();
+  ctx.fillStyle = gradient;
+  ctx.fill();
+
+  // Line with a soft glow.
+  ctx.beginPath();
+  history.forEach((point, index) => {
+    const x = pad + (n === 1 ? plotW / 2 : (plotW * index) / (n - 1));
+    const y = pad + plotH - Math.min(1, point.v / max) * plotH;
+    if (index === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  });
+  ctx.strokeStyle = "rgba(247,185,85,0.9)";
+  ctx.lineWidth = 2;
+  ctx.shadowColor = "rgba(247,185,85,0.5)";
+  ctx.shadowBlur = 8;
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+
+  // Peak marker dot.
+  if (n > 0 && peak > 0) {
+    let peakIndex = 0;
+    history.forEach((point, index) => { if (point.v >= history[peakIndex].v) peakIndex = index; });
+    const px = pad + (n === 1 ? plotW / 2 : (plotW * peakIndex) / (n - 1));
+    const py = pad + plotH - (history[peakIndex].v / max) * plotH;
+    ctx.beginPath();
+    ctx.arc(px, py, 2.5, 0, Math.PI * 2);
+    ctx.fillStyle = "#f7b955";
+    ctx.fill();
+  }
+}
+
 function render(data) {
   const ready = data.ready;
   const status = $("live-status");
@@ -120,11 +219,7 @@ function render(data) {
   set("tokens-output", number(outputTokens));
   $("token-meter-input").style.width = `${tokens ? Math.round((inputTokens / tokens) * 100) : 0}%`;
 
-  const filtered = responses.filteredToolSearch + responses.filteredWebSearch;
-  set("filtered-total", number(filtered));
-  set("filtered-tool", number(responses.filteredToolSearch));
-  set("filtered-web", number(responses.filteredWebSearch));
-  set("rewritten-choice", number(responses.rewrittenToolChoice));
+  renderContextWave(data.recent || []);
   set("bytes-total", bytes(responses.bytesIn + responses.bytesOut));
   set("bytes-in", bytes(responses.bytesIn));
   set("bytes-out", bytes(responses.bytesOut));
@@ -487,7 +582,8 @@ let settingsPrompted = false;
 function maybePromptSettings(config) {
   if (settingsPrompted) return;
   settingsPrompted = true;
-  if (config && !config.tokenConfigured) {
+  const openRequested = new URLSearchParams(location.search).get("settings") === "1";
+  if (openRequested || (config && !config.tokenConfigured)) {
     openSettings();
   }
 }

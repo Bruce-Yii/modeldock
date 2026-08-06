@@ -102,11 +102,11 @@
           <div class="split-stats"><span><i class="dot input"></i><b id="tokens-input">0</b> input</span><span><i class="dot output"></i><b id="tokens-output">0</b> output</span></div>
           <div class="meter token"><i id="token-meter-input"></i></div>
         </article>
-        <article class="metric-card accent-amber">
-          <div class="metric-head"><span>Schema shield</span><b>Go 400 prevention</b></div>
-          <strong class="metric-value" id="filtered-total">0</strong>
-          <div class="split-stats"><span><b id="filtered-tool">0</b> tool_search</span><span><b id="filtered-web">0</b> web_search</span></div>
-          <p><span id="rewritten-choice">0</span> required → auto rewrites</p>
+        <article class="metric-card accent-amber wave-card">
+          <div class="metric-head"><span>Context tokens</span><b>per call · live</b></div>
+          <div class="wave-stats"><span><b id="wave-last">0</b> last</span><span><b id="wave-peak">0</b> peak</span></div>
+          <canvas id="context-wave" width="340" height="92"></canvas>
+          <p><span id="wave-count">0</span> calls observed</p>
         </article>
         <article class="metric-card accent-green">
           <div class="metric-head"><span>Transfer</span><b>SSE + JSON</b></div>
@@ -158,11 +158,17 @@
         </div>
         <p class="settings-path">Config file: <code id="settings-envfile"></code></p>
         <label class="field">
-          <span>OpenCode Go token</span>
+          <div class="field-head">
+            <span>OpenCode Go token</span>
+            <a href="https://opencode.ai/go?ref=P2133HRY5J" target="_blank" rel="noopener noreferrer">No key? Apply here.</a>
+          </div>
           <input id="settings-go-token" type="password" placeholder="sk-..." autocomplete="off" spellcheck="false" />
         </label>
         <label class="field">
-          <span>DeepSeek API key</span>
+          <div class="field-head">
+            <span>DeepSeek API key</span>
+            <a href="https://platform.deepseek.com/" target="_blank" rel="noopener noreferrer">No key? Apply here.</a>
+          </div>
           <input id="settings-deepseek-token" type="password" placeholder="sk-..." autocomplete="off" spellcheck="false" />
         </label>
         <div class="settings-actions">
