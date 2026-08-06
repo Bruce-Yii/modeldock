@@ -30,6 +30,36 @@ const HARNESS_VISION_TOOL = {
   },
 };
 
+const HARNESS_TTS_TOOL = {
+  type: "function",
+  name: "speak",
+  description: "Synthesize the given text into a local speech audio file (Microsoft Edge neural voice, no API key; works on Windows/macOS/Linux — the npm package calls Microsoft's endpoint). Returns the absolute file path of the generated audio (webm/opus) so it can be surfaced in the conversation or used by other tools.",
+  parameters: {
+    type: "object",
+    properties: {
+      text: { type: "string", description: "The text to speak aloud. Use short paragraphs for the best result." },
+      voice: { type: "string", description: "Voice name, e.g. zh-CN-XiaoxiaoNeural (Chinese female), en-US-AriaNeural (English female), ja-JP-NanamiNeural (Japanese female). Defaults to zh-CN-XiaoxiaoNeural." },
+      output: { type: "string", description: "Optional absolute file path for the generated audio. Defaults to a temp file." },
+    },
+    required: ["text"],
+  },
+};
+
+const HARNESS_STT_TOOL = {
+  type: "function",
+  name: "hear",
+  description: "Transcribe a local audio file into text using the Windows built-in speech recognizer (System.Speech, offline, no API key; Windows only — requires the target language recognizer and ffmpeg for non-WAV input). Returns the recognized text and a confidence score.",
+  parameters: {
+    type: "object",
+    properties: {
+      file: { type: "string", description: "Absolute local file path of the audio file to transcribe (mp3, wav, webm/opus, m4a)." },
+      language: { type: "string", description: "Optional language hint, e.g. zh-CN, en-US. Defaults to the installed Chinese recognizer." },
+      output: { type: "string", description: "Optional absolute file path for the intermediate WAV." },
+    },
+    required: ["file"],
+  },
+};
+
 const CONTEXT_WINDOW = 1_048_576;
 const AUTO_COMPACT_PERCENT = 0.8;
 const AUTO_COMPACT_TOKEN_LIMIT = Math.floor(CONTEXT_WINDOW * AUTO_COMPACT_PERCENT);
@@ -52,6 +82,7 @@ const DEEPSEEK_REASONING_LEVELS = [
 // `tool_call_mcp_elicitation` = let the model request MCP tool schemas it does not have,
 // `workspace_dependencies` = codex_app.load_workspace_dependencies,
 // `computer_use` = desktop screen control, `browser_use` = Chrome control.
+import { NODE_REPL_MCP_TOOLS } from "./node-repl-tools.mjs";
 export const EXPERIMENTAL_SUPPORTED_TOOLS = ["artifact", "tool_call_mcp_elicitation", "workspace_dependencies", "computer_use", "browser_use"];
 
 function modelCatalogDefaults({ mainModel, displayName, description, compHash, inputModalities, supportsSearchTool, baseInstructions, defaultReasoningLevel = "high", supportedReasoningLevels = [ { effort: "low", description: "Fast responses with lighter reasoning" }, { effort: "high", description: "Deeper reasoning for complex work" }, { effort: "max", description: "Maximum reasoning depth" } ] }) {
@@ -119,6 +150,11 @@ const OPENCODE_GO_PROFILE = {
   // tool_search is Codex's client-side MCP-tool elicitation tool: the hosted schema 400s
   // on the Go camp, so the transform bridges it to a function tool with the same name.
   toolSearchAsFunction: true,
+  // When the session's tool list is missing the lazy-loaded MCP tools (Codex drops them
+  // when the node_repl server restarts, and re-elicitation via tool_search is not
+  // guaranteed), always inject the node_repl JavaScript tools so the model keeps a
+  // working Computer Use / browser automation entry point (`js` session + @oai/sky).
+  guaranteedMcpTools: NODE_REPL_MCP_TOOLS,
   // Forward every Codex tool except view_image: it hands the model base64 it cannot
   // interpret (text-only main model) and caused pixel-decode loops. vision_inspect is
   // the single visual path — it analyzes AND surfaces the image into the conversation.
@@ -136,8 +172,10 @@ const OPENCODE_GO_PROFILE = {
   harnessTools: {
     webSearch: HARNESS_WEB_SEARCH_TOOL,
     vision: HARNESS_VISION_TOOL,
+    tts: HARNESS_TTS_TOOL,
+    stt: HARNESS_STT_TOOL,
   },
-  harnessToolNames: new Set(["harness_web_search", "vision_inspect"]),
+  harnessToolNames: new Set(["harness_web_search", "vision_inspect", "speak", "hear"]),
   availableModels: [
     { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash", endpoint: "responses", supportsVision: false, status: "available" },
     { id: "deepseek-v4-flash-free", label: "DeepSeek V4 Flash Free", endpoint: "responses", free: true, supportsVision: false, quota5h: 100000, status: "available" },
@@ -199,8 +237,10 @@ const DEEPSEEK_OFFICIAL_PROFILE = {
   harnessTools: {
     webSearch: HARNESS_WEB_SEARCH_TOOL,
     vision: HARNESS_VISION_TOOL,
+    tts: HARNESS_TTS_TOOL,
+    stt: HARNESS_STT_TOOL,
   },
-  harnessToolNames: new Set(["harness_web_search", "vision_inspect"]),
+  harnessToolNames: new Set(["harness_web_search", "vision_inspect", "speak", "hear"]),
   // Verified live (2026-08-04) against the real Codex tool set: the official Responses
   // API accepts every Codex local tool as long as it is declared type "function"
   // (shell_command, update_plan, mcp resources, request_user_input, view_image) and

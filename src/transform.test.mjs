@@ -42,12 +42,13 @@ test("keeps a plain request intact and adds the resident vision tool on the main
       mediaStore: fakeStore(), defaultModel: "deepseek-v4-flash" });
   assert.equal(payload.model, "deepseek-v4-flash");
   assert.equal(payload.stream, true);
-  // vision_inspect is resident on DeepSeek turns so it can always request a Luna observation.
-  assert.deepEqual(payload.tools.map((t) => t.name), ["shell_command", "vision_inspect"]);
+  // vision_inspect is resident on DeepSeek turns; the node_repl tools are guaranteed so
+  // the Computer Use entry point never disappears from the session.
+  assert.deepEqual(payload.tools.map((t) => t.name), ["shell_command", "mcp__node_repl__js", "mcp__node_repl__js_add_node_module_dir", "mcp__node_repl__js_reset", "vision_inspect", "speak", "hear"]);
   assert.deepEqual(report.blocked, { tool_search: 0, web_search: 0 });
   assert.equal(report.originalToolCount, 1);
-  assert.equal(report.forwardedToolCount, 2);
-  assert.deepEqual(report.injectedHarnessTools, ["vision_inspect"]);
+  assert.equal(report.forwardedToolCount, 7);
+  assert.deepEqual(report.injectedHarnessTools, ["vision_inspect", "speak", "hear"]);
   assert.equal(report.toolChoiceRewritten, false);
   assert.deepEqual(report.imageRefs, []);
 });
@@ -260,9 +261,9 @@ test("handles a missing tools array by creating one for the resident vision tool
   const { payload, report } = transformResponsesRequest(source, {
       profile: UNFILTERED_GO_PROFILE,
       mediaStore: fakeStore(), defaultModel: "d" });
-  assert.deepEqual((payload.tools || []).map((t) => t.name), ["vision_inspect"]);
+  assert.deepEqual((payload.tools || []).map((t) => t.name), ["vision_inspect", "speak", "hear"]);
   assert.equal(report.originalToolCount, 0);
-  assert.equal(report.forwardedToolCount, 1);
+  assert.equal(report.forwardedToolCount, 3);
   assert.deepEqual(report.blocked, { tool_search: 0, web_search: 0 });
 });
 

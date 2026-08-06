@@ -326,6 +326,27 @@ async function executeHarnessCall(call, upstreams, { services } = {}) {
       "Do not call vision_inspect again for the same image unless a new, narrower visual question is genuinely unresolved.",
     ].join("\n");
   }
+  if (call.name === "speak") {
+    const { ttsSpeak } = await import("./tts.mjs");
+    const result = await ttsSpeak(args);
+    return [
+      "TTS_SPEECH_GENERATED",
+      `file: ${result.file}`,
+      `bytes: ${result.bytes}`,
+      `voice: ${result.voice}`,
+      `text: ${result.text}`,
+    ].join("\n");
+  }
+  if (call.name === "hear") {
+    const { sttTranscribe } = await import("./stt.mjs");
+    const result = await sttTranscribe(args);
+    return [
+      "STT_TRANSCRIPTION_COMPLETED",
+      `text: ${result.text}`,
+      `confidence: ${result.confidence.toFixed(3)}`,
+      `language: ${result.language}`,
+    ].join("\n");
+  }
   throw new Error(`Unknown harness tool: ${call.name}`);
 }
 
@@ -1520,6 +1541,25 @@ export function createApp(services = createServices()) {
     return res.status(tokenReady ? 200 : 503).json({ ok: tokenReady });
   });
   app.get("/api/status", (req, res) => res.json(statusPayload(services)));
+  app.get("/api/speech", async (req, res) => {
+    try {
+      const { ttsStatus } = await import("./tts.mjs");
+      const { sttStatus } = await import("./stt.mjs");
+      const [tts, stt] = await Promise.all([ttsStatus(), sttStatus()]);
+      return res.json({ tts, stt });
+    } catch (error) {
+      return res.status(500).json({ error: { type: "speech_status_error", message: error.message } });
+    }
+  });
+  app.post("/api/speech/install", async (req, res) => {
+    try {
+      const { ttsInstall } = await import("./tts.mjs");
+      const installed = await ttsInstall();
+      return res.json({ installed });
+    } catch (error) {
+      return res.status(500).json({ error: { type: "tts_install_error", message: error.message } });
+    }
+  });
   app.get("/api/config", async (req, res) => {
     try {
       return res.json(await configSwitcher.status());

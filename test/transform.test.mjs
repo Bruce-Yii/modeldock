@@ -26,8 +26,8 @@ test("filters Codex hosted tools and normalizes required tool choice", () => {
   assert.equal(result.payload.tool_choice, "auto");
   assert.equal(result.payload.parallel_tool_calls, false);
   // tool_search is bridged to a function tool (client-side MCP elicitation), web_search is
-  // blocked and replaced by the harness.
-  assert.deepEqual(result.payload.tools.map((tool) => tool.name), ["shell_command", "tool_search", "harness_web_search", "vision_inspect"]);
+  // blocked and replaced by the harness; the node_repl tools are guaranteed.
+  assert.deepEqual(result.payload.tools.map((tool) => tool.name), ["shell_command", "tool_search", "mcp__node_repl__js", "mcp__node_repl__js_add_node_module_dir", "mcp__node_repl__js_reset", "harness_web_search", "vision_inspect", "speak", "hear"]);
   assert.equal(result.payload.input[0].content[0].text, "hello");
   assert.deepEqual(result.report.blocked, { tool_search: 0, web_search: 1 });
 });

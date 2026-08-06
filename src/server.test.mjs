@@ -158,7 +158,7 @@ test("non-streaming relay: forwards normalized body with auth and parses usage",
   assert.equal(received.model, "deepseek-v4-flash");
   assert.equal(received.parallel_tool_calls, false);
   assert.deepEqual(received.input, [{ role: "user", content: [{ type: "input_text", text: "hello" }] }]);
-  assert.deepEqual(received.tools.map((tool) => tool.name), ["harness_web_search", "vision_inspect"]);
+  assert.deepEqual(received.tools.map((tool) => tool.name), ["mcp__node_repl__js", "mcp__node_repl__js_add_node_module_dir", "mcp__node_repl__js_reset", "harness_web_search", "vision_inspect", "speak", "hear"]);
 
   const snap = instance.services.metrics.snapshot();
   assert.equal(snap.responses.total, 1);

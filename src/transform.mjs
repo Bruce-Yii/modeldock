@@ -22,10 +22,12 @@ function resolveProfileOptions(profile) {
   const blockedToolTypes = profile?.blockedToolTypes || DEFAULT_BLOCKED_TOOL_TYPES;
   const webSearchTool = profile?.harnessTools?.webSearch || null;
   const visionTool = profile?.harnessTools?.vision || null;
+  const ttsTool = profile?.harnessTools?.tts || null;
+  const sttTool = profile?.harnessTools?.stt || null;
   // Blacklist-style tool policy: every named tool is forwarded EXCEPT those the
   // profile cannot use (hiddenToolNames). Namespaced tools are kept wholesale.
   const hiddenToolNames = profile?.hiddenToolNames || new Set();
-  return { blockedToolTypes, webSearchTool, visionTool, hiddenToolNames };
+  return { blockedToolTypes, webSearchTool, visionTool, ttsTool, sttTool, hiddenToolNames };
 }
 
 function selectForwardedTools(tools, { hiddenToolNames }) {
@@ -458,7 +460,7 @@ export function transformResponsesRequest(source, { mediaStore, defaultModel, ta
     throw new Error("Responses request body must be a JSON object");
   }
 
-  const { blockedToolTypes, webSearchTool, visionTool, hiddenToolNames } = resolveProfileOptions(profile);
+  const { blockedToolTypes, webSearchTool, visionTool, ttsTool, sttTool, hiddenToolNames } = resolveProfileOptions(profile);
   // Tools follow the MODEL, not the provider: view_image is useful only to vision-capable
   // models (they can read the base64 it returns). When the target model supports vision,
   // view_image is kept; for text models it is hidden and vision_inspect is the visual path.
@@ -552,6 +554,19 @@ export function transformResponsesRequest(source, { mediaStore, defaultModel, ta
     payload.tools = selectForwardedTools(payload.tools, { hiddenToolNames: effectiveHidden });
   }
   payload.tools = flattenMcpNamespaces(payload.tools);
+  // Guarantee the session's automation entry point: when Codex's lazy-loaded MCP tools
+  // are absent (node_repl restart, no re-elicitation), inject the node_repl JavaScript
+  // tools (Computer Use / browser automation) so the model is never left without them.
+  const guaranteedTools = Array.isArray(profile?.guaranteedMcpTools) ? profile.guaranteedMcpTools : [];
+  if (guaranteedTools.length > 0 && Array.isArray(payload.tools)) {
+    const present = new Set(payload.tools.map((tool) => tool?.name).filter(Boolean));
+    for (const tool of guaranteedTools) {
+      if (tool?.name && !present.has(tool.name)) {
+        payload.tools.push(structuredClone(tool));
+        present.add(tool.name);
+      }
+    }
+  }
 
   let toolChoiceRewritten = false;
   if (payload.tool_choice === "required") {
@@ -579,6 +594,15 @@ export function transformResponsesRequest(source, { mediaStore, defaultModel, ta
     payload.tools.push(structuredClone(visionTool));
     injectedHarnessTools.push(visionTool.name);
   }
+  // Local speech tools are resident for every text model: they read/write files on
+  // this machine and never leave the conversation, so any model can use them.
+  for (const tool of [ttsTool, sttTool]) {
+    if (tool && !payload.tools?.some((existing) => existing?.name === tool.name)) {
+      if (!Array.isArray(payload.tools)) payload.tools = [];
+      payload.tools.push(structuredClone(tool));
+      injectedHarnessTools.push(tool.name);
+    }
+  }
   const toolHistory = normalizeToolHistory(rewrittenInput, payload.tools, mediaStore, imageRefs, { canonicalizeCallIds: shouldCanonicalizeCallIds, receiptRole, keepToolOutputImages: targetSupportsVision });
   const compactedHistory = shouldCompactCompletedToolHistory ? compactCompletedToolHistory(toolHistory.input, mediaStore, imageRefs, receiptRole, chatBridgeActive ? RECENT_TOOL_PAIRS : 0) : { input: toolHistory.input, compacted: 0, outputBytes: 0 };
   const stringifiedAssistantMessages = Array.isArray(compactedHistory.input)
@@ -602,6 +626,20 @@ export function transformResponsesRequest(source, { mediaStore, defaultModel, ta
       "Return your visual conclusions in your assistant response so the next main-model turn receives them in conversation history.",
     ].join(" ");
     payload.instructions = [payload.instructions, routeInstruction].filter((value) => typeof value === "string" && value.trim()).join("\n\n");
+  }
+  // MCP servers (node_repl JavaScript + Computer Use, app MCP servers, docs) are
+  // lazy-loaded: their tools only appear after the model calls the client-side
+  // `tool_search` tool. When tool_search is available but no MCP tool is loaded yet,
+  // nudge the model to elicit them instead of improvising with shell scripts.
+  const hasMcpTool = Array.isArray(payload.tools) && payload.tools.some((tool) => (tool?.name || "").startsWith("mcp__"));
+  const hasToolSearch = Array.isArray(payload.tools) && payload.tools.some((tool) => tool?.name === "tool_search");
+  if (hasToolSearch && !hasMcpTool) {
+    const elicitationInstruction = [
+      "[TOOL ELICITATION] When the session has no Computer Use or Browser Use tools (screen control, clicking, typing, browser tabs, screenshots) and no MCP tools are loaded, they are lazy-loaded rather than listed up front:",
+      "Call the tool_search tool with a query describing the capability you need; its output lists the matching tool names (for example node_repl js for Computer Use and browser automation), which become available in subsequent turns.",
+      "Do not improvise Windows or browser automation with shell scripts, screenshots, or window-enumeration scripts before loading the node_repl MCP tools via tool_search.",
+    ].join(" ");
+    payload.instructions = [payload.instructions, elicitationInstruction].filter((value) => typeof value === "string" && value.trim()).join("\n\n");
   }
 
   return {

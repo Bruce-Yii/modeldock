@@ -142,9 +142,35 @@ function render(data) {
   set("cfg-fallback", data.config.visionFallbackModel);
   set("cfg-exa", data.config.exaMcpUrl);
   renderAutostart(data);
+  renderSpeech(data);
   renderUpdate(data);
   maybePromptSettings(data.config);
   renderRecent(data.recent || []);
+}
+
+async function renderSpeech(data) {
+  const ttsStatus = $("speech-tts-status");
+  const sttStatus = $("speech-stt-status");
+  const installBtn = $("speech-tts-install");
+  if (!ttsStatus || !sttStatus) return;
+  try {
+    const res = await fetch("/api/speech", { headers: { accept: "application/json" } });
+    const body = await res.json();
+    const tts = body.tts || {};
+    const stt = body.stt || {};
+    ttsStatus.textContent = tts.installed ? "TTS: msedge-tts" : "TTS: not installed";
+    ttsStatus.style.color = tts.installed ? "var(--green)" : "var(--amber)";
+    const sttText = stt.available
+      ? `STT: SAPI ${stt.cultures.join(" / ")}${stt.ffmpeg ? "" : " (needs ffmpeg)"}`
+      : "STT: not available (Windows only)";
+    sttStatus.textContent = sttText;
+    sttStatus.style.color = stt.available ? "var(--green)" : "var(--muted)";
+    installBtn.hidden = tts.installed;
+    installBtn.disabled = false;
+  } catch {
+    ttsStatus.textContent = "TTS: unavailable";
+    sttStatus.textContent = "STT: unavailable";
+  }
 }
 
 function renderModelOptions(data) {
@@ -429,6 +455,29 @@ $("vision-provider-select").addEventListener("change", () => {
 
 $("restart-ack").addEventListener("click", () => configAction("restart-ack"));
 $("trace-detail-close").addEventListener("click", () => { $("trace-detail").hidden = true; });
+
+const ttsInstallBtn = $("speech-tts-install");
+if (ttsInstallBtn) {
+  ttsInstallBtn.addEventListener("click", async () => {
+    ttsInstallBtn.disabled = true;
+    ttsInstallBtn.textContent = "Installing…";
+    try {
+      const res = await fetch("/api/speech/install", { method: "POST", headers: { accept: "application/json" } });
+      const body = await res.json();
+      if (res.ok && body.installed) {
+        $("speech-tts-status").textContent = "TTS: msedge-tts";
+        $("speech-tts-status").style.color = "var(--green)";
+        ttsInstallBtn.hidden = true;
+      } else {
+        $("speech-tts-status").textContent = `TTS: install failed (${body.error?.message || "unknown"})`;
+      }
+    } catch {
+      $("speech-tts-status").textContent = "TTS: install failed";
+    }
+    ttsInstallBtn.textContent = "Install edge-tts";
+    ttsInstallBtn.disabled = false;
+  });
+}
 
 let settingsPrompted = false;
 

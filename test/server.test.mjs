@@ -71,8 +71,8 @@ test("proxies Responses while filtering unsupported hosted tool schemas", async 
   assert.equal(received.model, "deepseek-v4-flash");
   assert.equal(received.tool_choice, "auto");
   // tool_search is bridged to a function tool (client-side MCP elicitation); web_search is
-  // blocked and replaced by the harness.
-  assert.deepEqual(received.tools.map((tool) => tool.name), ["tool_search", "shell_command", "harness_web_search", "vision_inspect"]);
+  // blocked and replaced by the harness; the node_repl tools are guaranteed.
+  assert.deepEqual(received.tools.map((tool) => tool.name), ["tool_search", "shell_command", "mcp__node_repl__js", "mcp__node_repl__js_add_node_module_dir", "mcp__node_repl__js_reset", "harness_web_search", "vision_inspect", "speak", "hear"]);
 
   const status = await (await fetch(`http://127.0.0.1:${port}/api/status`)).json();
   assert.equal(status.responses.filteredToolSearch, 0);

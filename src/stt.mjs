@@ -1,0 +1,109 @@
+// Local STT (WINDOWS ONLY): transcribe an audio file using the Windows SAPI dictation
+// engine (System.Speech, ships with Windows — no install). The audio must be converted
+// to 16kHz mono PCM WAV first; ffmpeg is used when present, otherwise the tool reports
+// that transcription needs ffmpeg. Chinese and English are the primary targets; any
+// installed SAPI recognizer culture works. Non-Windows platforms get available:false.
+
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
+const run = promisify(execFile);
+
+const CHECK_TTL_MS = 10_000;
+let sapiCache = null;
+let sapiCheckedAt = 0;
+
+async function probeSapi() {
+  if (process.platform !== "win32") return [];
+  const now = Date.now();
+  if (sapiCache !== null && now - sapiCheckedAt < CHECK_TTL_MS) return sapiCache;
+  const script = "Add-Type -AssemblyName System.Speech; [System.Speech.Recognition.SpeechRecognitionEngine]::InstalledRecognizers() | ForEach-Object { $_.Culture.Name }";
+  try {
+    const raw = await runPowerShell(script);
+    console.error(`[stt] probe raw: ${JSON.stringify(raw)}`);
+    sapiCache = String(raw || "").split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  } catch (error) {
+    console.error(`[stt] probe failed: ${error.message}`);
+    sapiCache = [];
+  }
+  sapiCheckedAt = now;
+  return sapiCache;
+}
+
+export async function sttStatus() {
+  const cultures = await probeSapi();
+  const ffmpeg = await findFfmpeg();
+  return {
+    available: cultures.length > 0,
+    cultures,
+    ffmpeg,
+  };
+}
+
+async function findFfmpeg() {
+  try {
+    await run(process.platform === "win32" ? "where.exe" : "which", ["ffmpeg"], { timeout: 10_000, windowsHide: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function runPowerShell(script) {
+  const encoded = Buffer.from(script, "utf16le").toString("base64");
+  return new Promise((resolve, reject) => {
+    execFile("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded], {
+      timeout: 120_000,
+      windowsHide: true,
+      maxBuffer: 16 * 1024 * 1024,
+    }, (error, stdout, stderr) => {
+      if (error) return reject(new Error(`${error.message} | stderr: ${(stderr || "").slice(0, 200)}`));
+      resolve(String(stdout || "").trim());
+    });
+  });
+}
+
+export async function sttTranscribe({ file = "", language = "auto", output = "" } = {}) {
+  if (!file) throw new Error("hear requires a file path");
+  if (!existsSync(file)) throw new Error(`audio file not found: ${file}`);
+  const cultures = await probeSapi();
+  if (!cultures.length) throw new Error("no Windows SAPI recognizer available");
+  const culture = language !== "auto"
+    ? cultures.find((c) => c.toLowerCase().startsWith(language.toLowerCase())) || language
+    : cultures.includes("zh-CN") ? "zh-CN" : cultures[0];
+  const hasFfmpeg = await findFfmpeg();
+  const wav = output || path.join(tmpdir(), `stt-input-${Date.now()}.wav`);
+  if (!hasFfmpeg) {
+    // SAPI needs PCM WAV; without ffmpeg we can only try direct (rarely works for mp3/webm).
+  } else {
+    const ffmpeg = (await findFfmpegPath()) || "ffmpeg";
+    await run(ffmpeg, ["-y", "-i", file, "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wav], { timeout: 120_000, windowsHide: true });
+  }
+  const script = [
+    "Add-Type -AssemblyName System.Speech",
+    `$ci = [System.Globalization.CultureInfo]::GetCultureInfo("${culture}")`,
+    "$engine = New-Object System.Speech.Recognition.SpeechRecognitionEngine($ci)",
+    '$grammar = New-Object System.Speech.Recognition.DictationGrammar("grammar:dictation")',
+    "$engine.LoadGrammar($grammar)",
+    `$engine.SetInputToWaveFile("${wav.replace(/\\/g, "\\\\")}")`,
+    "$result = $engine.Recognize()",
+    'if ($result) { Write-Output ("TEXT:" + $result.Text); Write-Output ("CONF:" + $result.Confidence) } else { Write-Output "TEXT:" }',
+    "$engine.Dispose()",
+  ].join("; ");
+  const out = await runPowerShell(script);
+  const text = (out.match(/TEXT:(.*)/) || [])[1]?.trim() || "";
+  const conf = parseFloat((out.match(/CONF:(.*)/) || [])[1] || "0");
+  return { text, confidence: conf, language: culture };
+}
+
+async function findFfmpegPath() {
+  try {
+    const { stdout } = await run("where.exe", ["ffmpeg"], { timeout: 10_000, windowsHide: true });
+    return stdout.split(/\r?\n/)[0].trim() || null;
+  } catch {
+    return null;
+  }
+}

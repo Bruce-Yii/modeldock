@@ -220,3 +220,11 @@ td.empty { text-align: center; color: var(--muted); padding: 42px; }
   0%, 100% { box-shadow: 0 0 0 0 rgba(72,214,160,0); }
   50% { box-shadow: 0 0 10px 1px rgba(72,214,160,.35); }
 }
+.speech-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.speech-row + .speech-row { margin-top: 6px; }
+.speech-row > span { font-size: 11px; letter-spacing: .06em; color: var(--muted, #89a0af); text-transform: uppercase; }
+.speech-cell { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.speech-cell strong { font-size: 12px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mini-button { appearance: none; border: 1px solid var(--line, #233747); background: var(--panel-2, #132331); color: var(--text, #ecf4f8); font: 600 11px ui-monospace, monospace; padding: 4px 10px; border-radius: 6px; cursor: pointer; white-space: nowrap; }
+.mini-button:hover:not(:disabled) { border-color: var(--blue, #50b7ff); }
+.mini-button:disabled { opacity: .5; cursor: default; }

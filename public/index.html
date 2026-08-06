@@ -61,7 +61,19 @@
               <select id="vision-model-select" class="model-select" aria-label="Vision model"></select>
             </div>
           </div>
-          <div><span>Web</span><strong>Exa hosted MCP</strong></div>
+          <div class="speech-row">
+            <span>TTS</span>
+            <div class="speech-cell">
+              <strong id="speech-tts-status">checking…</strong>
+              <button id="speech-tts-install" type="button" class="mini-button" hidden>Install edge-tts</button>
+            </div>
+          </div>
+          <div class="speech-row">
+            <span>STT</span>
+            <div class="speech-cell">
+              <strong id="speech-stt-status">checking…</strong>
+            </div>
+          </div>
           <div class="debug-default">
             <span>AUTOSTART</span>
             <label class="mode-toggle" for="autostart-toggle">
