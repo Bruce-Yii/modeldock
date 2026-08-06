@@ -141,19 +141,35 @@ function catalogEntry({ slug, displayName, description, compHash, inputModalitie
 
 function modelCatalogDefaults({ mainModel, displayName, description, compHash, inputModalities, supportsSearchTool, baseInstructions, defaultReasoningLevel = "high", supportedReasoningLevels = [ { effort: "low", description: "Fast responses with lighter reasoning" }, { effort: "high", description: "Deeper reasoning for complex work" }, { effort: "max", description: "Maximum reasoning depth" } ], availableModels = [] }) {
   const base = { compHash, supportsSearchTool, baseInstructions, defaultReasoningLevel, supportedReasoningLevels };
-  // The selected main model leads the list; the rest of the curated catalog follows in
-  // its existing order so the picker mirrors the dashboard.
-  const rest = availableModels.filter((model) => model?.id && model.id !== mainModel && model.status !== "unavailable");
+  // Every provider's models in one list, each labelled with its source, so the picker
+  // can switch upstream as well as model. The bare id stays with the default profile so
+  // existing Codex configs keep resolving; another provider's copy of the same id is
+  // published under an explicit owner suffix.
+  const rest = [];
+  for (const entry of profileOptions()) {
+    const profile = profileById(entry.id);
+    for (const model of profile.availableModels || []) {
+      if (!model?.id || model.status === "unavailable") continue;
+      const owned = entry.id !== DEFAULT_PROFILE_ID
+        && (profileById(DEFAULT_PROFILE_ID).availableModels || []).some((m) => m.id === model.id);
+      const slug = owned ? `${model.id}${PROVIDER_SEPARATOR}${entry.id}` : model.id;
+      if (slug === mainModel || rest.some((m) => m.slug === slug)) continue;
+      rest.push({
+        slug,
+        displayName: `${entry.label} - ${model.label || model.id}`,
+        supportsVision: Boolean(model.supportsVision),
+        providerLabel: entry.label,
+      });
+    }
+  }
   return {
     models: [
       catalogEntry({ ...base, slug: mainModel, displayName, description, inputModalities, priority: 1 }),
       ...rest.map((model, index) => catalogEntry({
         ...base,
-        slug: model.id,
-        displayName: model.label || model.id,
-        description: model.supportsVision
-          ? "Vision-capable model through the local ModelDock gate."
-          : "Text model through the local ModelDock gate.",
+        slug: model.slug,
+        displayName: model.displayName,
+        description: `${model.providerLabel} through the local ModelDock gate.`,
         // Codex sends images only to models that declare the modality; the gate still
         // reroutes visual turns to the vision model for the text-only ones.
         inputModalities: model.supportsVision ? ["text", "image"] : ["text"],
@@ -313,9 +329,36 @@ export function profileOptions() {
 // Resolve which provider owns a model id. The currently active profile wins, then any
 // profile whose curated catalog lists the model. Used to route per-model upstream calls
 // (main model on DeepSeek, vision on OpenCode Go) to the right base URL and token.
+// A few ids (deepseek-v4-flash, deepseek-v4-pro) exist in more than one catalog, so the
+// published slug carries its owner when the bare id would be ambiguous:
+// "deepseek-v4-flash@deepseek-official". The suffix is a routing address only - it is
+// stripped before the id reaches an upstream.
+export const PROVIDER_SEPARATOR = "@";
+// The profile whose ids are published bare, so ids already written into Codex configs
+// keep resolving without a suffix.
+const DEFAULT_PROFILE_ID = "opencode-go";
+
+export function bareModelId(model) {
+  const at = String(model || "").lastIndexOf(PROVIDER_SEPARATOR);
+  return at > 0 ? String(model).slice(0, at) : model;
+}
+
 export function providerForModel(config, model) {
   if (!model) return config?.profileId || "opencode-go";
-  const current = config?.profile || (config?.profileId ? profileById(config.profileId) : null);
+  // An explicit owner in the slug outranks every heuristic below.
+  const at = String(model).lastIndexOf(PROVIDER_SEPARATOR);
+  if (at > 0) {
+    const tagged = String(model).slice(at + 1);
+    if (PROFILES[tagged]) return tagged;
+  }
+  // Resolve the active profile by id when the caller passed a partial object: several
+  // ids (deepseek-v4-flash, deepseek-v4-pro) exist in more than one catalog, and the
+  // active profile is what breaks the tie - a stub without availableModels would
+  // silently lose that tie-break and hand the model to the wrong provider.
+  const passed = config?.profile;
+  const current = passed?.availableModels
+    ? passed
+    : profileById(passed?.id || config?.profileId || "") || passed || null;
   if (current?.availableModels?.some((entry) => entry.id === model)) return current.id;
   for (const entry of profileOptions()) {
     const candidate = profileById(entry.id);

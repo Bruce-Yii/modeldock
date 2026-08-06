@@ -12,6 +12,7 @@
 // history (assistant.tool_calls + role:"tool") on round 2 with no 400s.
 
 import { randomUUID } from "node:crypto";
+import { providerForModel, profileById, bareModelId } from "./profiles.mjs";
 
 const RESPONSES_MODELS = new Set(["gpt-5.6-luna", "grok-4.5"]);
 const ZEN_FREE_BASE = "https://opencode.ai/zen/v1/chat/completions";
@@ -25,10 +26,14 @@ export function chatCampForModel(model) {
 export function chatCampForRequest(model, config) {
   const override = config?.profile?.chatCampOverride;
   if (override === "responses" || override === "chat") return override;
-  // Chat bridge applies to the OpenCode Go camp only. Other providers (e.g.
-  // deepseek-official) speak Responses natively and must never be converted.
-  if (config?.profile?.id !== "opencode-go") return "responses";
-  return chatCampForModel(model);
+  // Resolve by the model's owning provider, not by whichever profile happens to be
+  // active: the catalog offers every provider's models at once, so a request can name
+  // an OpenCode model while the dashboard sits on deepseek-official. Provider ownership
+  // already decides the token (tokenFor), and it has to decide the wire too - otherwise
+  // the right key is sent to the wrong door.
+  if (providerForModel(config, model) !== "opencode-go") return "responses";
+  // The camp is decided by the real model name; the owner suffix is not part of it.
+  return chatCampForModel(bareModelId(model));
 }
 
 function chatBaseFor(goBaseUrl) {
@@ -183,7 +188,12 @@ export function responsesToChatRequest(payload, { reasoningLookup = null } = {})
 export function chatEndpointFor(model, config) {
   const camp = chatCampForRequest(model, config);
   if (camp === "responses") {
-    return { url: `${config.goBaseUrl.replace(/\/$/, "")}/responses`, style: "responses" };
+    // DeepSeek's own API is a different host from the Go camp; pick the base by owner
+    // so a deepseek-official model never gets posted to opencode.ai and vice versa.
+    const base = providerForModel(config, model) === "deepseek-official"
+      ? (config.deepseekBaseUrl || profileById("deepseek-official").baseUrl)
+      : config.goBaseUrl;
+    return { url: `${base.replace(/\/$/, "")}/responses`, style: "responses" };
   }
   if (camp === "zen-free") return { url: ZEN_FREE_BASE, style: "chat" };
   return { url: chatBaseFor(config.goBaseUrl), style: "chat" };

@@ -1,3 +1,4 @@
+import { bareModelId } from "./profiles.mjs";
 const DEFAULT_BLOCKED_TOOL_TYPES = new Set(["tool_search", "web_search"]);
 
 // Bridge schema for Codex's client-side tool_search (MCP-tool elicitation): the hosted
@@ -641,7 +642,9 @@ export function transformResponsesRequest(source, { mediaStore, defaultModel, ta
   const droppedAssistantMessages = assistantMessagesBefore - assistantMessagesAfter;
   const withIds = ensureItemIds(normalizedInput);
   payload.input = shouldStripReasoningPlaceholder ? removeSyntheticReasoningPlaceholder(withIds) : withIds;
-  payload.model = targetModel || payload.model || defaultModel;
+  // Strip any provider suffix: it is our routing address, not something an upstream
+  // would recognise as a model name.
+  payload.model = bareModelId(targetModel || payload.model || defaultModel);
   if (directVision) {
     const routeInstruction = [
       "ModelDock visual route: you are the active vision-capable model for this complete turn.",

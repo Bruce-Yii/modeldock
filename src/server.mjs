@@ -102,6 +102,17 @@ function withTierLabel(model) {
   return decorated;
 }
 
+// The slugs the Codex catalog publishes: every provider's models, with the owner suffix
+// where a bare id would be ambiguous. Used to decide whether a client-chosen model is
+// one this gate can actually serve.
+function publishedModelIds(config) {
+  const ids = new Set();
+  for (const model of codexModelCatalog(config).models || []) {
+    if (model?.slug) ids.add(model.slug);
+  }
+  return ids;
+}
+
 function modelOptions(config, profileId) {
   const all = [];
   for (const entry of profileOptions()) {
@@ -767,7 +778,9 @@ async function relayResponses(req, res, services) {
       mainModel: modelSelection.mainModel,
       visionModel: modelSelection.visionModel,
       affinity: routeAffinity,
-      knownModels: new Set((config.profile?.availableModels || []).map((model) => model.id)),
+      // Every slug the catalog publishes, across providers - switching the dashboard
+      // provider must not invalidate a model Codex is already using.
+      knownModels: publishedModelIds(config),
     });
     // Keep both pickers on the same model. Codex asserts its choice on every request, so
     // it wins for the main road; mirroring it into the dashboard selection stops the

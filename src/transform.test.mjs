@@ -628,3 +628,12 @@ test("oversized reasoning items are dropped oldest-first to fit the byte budget"
   const bytes = kept.reduce((sum, item) => sum + JSON.stringify(item).length, 0);
   assert.ok(bytes <= 50 * 1024, "surviving reasoning fits the budget");
 });
+
+test("a provider-suffixed model id is stripped before it reaches the upstream", () => {
+  const source = { model: "deepseek-v4-flash@deepseek-official", input: [{ role: "user", content: [{ type: "input_text", text: "hi" }] }] };
+  const { payload } = transformResponsesRequest(source, {
+      profile: UNFILTERED_GO_PROFILE,
+      mediaStore: fakeStore(), defaultModel: "deepseek-v4-flash",
+      targetModel: "deepseek-v4-flash@deepseek-official" });
+  assert.equal(payload.model, "deepseek-v4-flash", "the owner suffix is a routing address, not a model name");
+});

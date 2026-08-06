@@ -6,6 +6,7 @@ import {
   chatCampForRequest,
   chatEndpointFor,
 } from "./chat-bridge.mjs";
+import { profileById, tokenFor } from "./profiles.mjs";
 
 const GO_CONFIG = {
   goBaseUrl: "https://opencode.ai/zen/go/v1",
@@ -149,4 +150,43 @@ test("responsesToChatRequest replays recorded reasoning via reasoningLookup", ()
   const chatFallback = responsesToChatRequest(payload);
   const tcFallback = chatFallback.messages.find((m) => m.tool_calls);
   assert.match(tcFallback.reasoning_content, /Continuing the task/);
+});
+
+test("wire and base follow the model's owner, not the active profile", () => {
+  const config = {
+    profile: profileById("deepseek-official"),
+    profileId: "deepseek-official",
+    goBaseUrl: "https://opencode.ai/zen/go/v1",
+    deepseekBaseUrl: "https://api.deepseek.com",
+  };
+  // The dashboard sits on deepseek-official, but Codex is still on an OpenCode model:
+  // it must keep its chat wire and its own base, or the right token hits the wrong door.
+  const glm = chatEndpointFor("glm-5.2", config);
+  assert.equal(glm.style, "chat");
+  assert.equal(glm.url, "https://opencode.ai/zen/go/v1/chat/completions");
+
+  const free = chatEndpointFor("deepseek-v4-flash-free", config);
+  assert.equal(free.url, "https://opencode.ai/zen/v1/chat/completions");
+
+  const luna = chatEndpointFor("gpt-5.6-luna", config);
+  assert.equal(luna.style, "responses");
+  assert.equal(luna.url, "https://opencode.ai/zen/go/v1/responses");
+});
+
+test("an owner-suffixed slug pins the provider regardless of the active profile", () => {
+  const onGo = {
+    profile: profileById("opencode-go"),
+    profileId: "opencode-go",
+    goBaseUrl: "https://opencode.ai/zen/go/v1",
+    deepseekBaseUrl: "https://api.deepseek.com",
+    tokens: { "opencode-go": "GO", "deepseek-official": "DS" },
+  };
+  const pinned = chatEndpointFor("deepseek-v4-flash@deepseek-official", onGo);
+  assert.equal(pinned.style, "responses");
+  assert.equal(pinned.url, "https://api.deepseek.com/responses", "the suffix wins over the active profile");
+  assert.equal(tokenFor(onGo, "deepseek-v4-flash@deepseek-official"), "DS", "and picks that provider's token");
+
+  const bare = chatEndpointFor("deepseek-v4-flash", onGo);
+  assert.equal(bare.url, "https://opencode.ai/zen/go/v1/chat/completions", "the bare id still follows the active profile");
+  assert.equal(tokenFor(onGo, "deepseek-v4-flash"), "GO");
 });
