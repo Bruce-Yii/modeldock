@@ -589,3 +589,42 @@ test("drops assistant messages with string empty content", () => {
       mediaStore: fakeStore(), defaultModel: "d" });
   assert.deepEqual(payload.input.map((item) => item.role), ["user"]);
 });
+
+test("reasoning history is capped by item count and by a byte budget", () => {
+  const small = (i) => ({ type: "reasoning", id: `r${i}`, summary: [`step ${i}`] });
+  // Ten small reasoning items: only the count limit applies, the budget is untouched.
+  const source = {
+    input: [
+      { role: "user", content: [{ type: "input_text", text: "go" }] },
+      ...Array.from({ length: 10 }, (_, i) => small(i)),
+    ],
+  };
+  const { payload, report } = transformResponsesRequest(source, {
+      profile: UNFILTERED_GO_PROFILE,
+      mediaStore: fakeStore(), defaultModel: "d" });
+  const kept = payload.input.filter((item) => item.type === "reasoning");
+  assert.equal(kept.length, 6, "keeps the six most recent reasoning items");
+  assert.deepEqual(kept.map((item) => item.id), ["r4", "r5", "r6", "r7", "r8", "r9"], "the newest survive");
+  assert.equal(report.reasoningDropped, 4);
+});
+
+test("oversized reasoning items are dropped oldest-first to fit the byte budget", () => {
+  // Three items of ~30KB each: the count limit (6) never fires, so only the 50KB
+  // budget can bound them - the newest fits, the older ones are dropped.
+  const huge = (i) => ({ type: "reasoning", id: `r${i}`, summary: ["x".repeat(30 * 1024)] });
+  const source = {
+    input: [
+      { role: "user", content: [{ type: "input_text", text: "go" }] },
+      huge(0), huge(1), huge(2),
+    ],
+  };
+  const { payload, report } = transformResponsesRequest(source, {
+      profile: UNFILTERED_GO_PROFILE,
+      mediaStore: fakeStore(), defaultModel: "d" });
+  const kept = payload.input.filter((item) => item.type === "reasoning");
+  assert.equal(kept.length, 1, "only what fits the 50KB budget survives");
+  assert.equal(kept[0].id, "r2", "the newest reasoning is the one kept");
+  assert.equal(report.reasoningDropped, 2);
+  const bytes = kept.reduce((sum, item) => sum + JSON.stringify(item).length, 0);
+  assert.ok(bytes <= 50 * 1024, "surviving reasoning fits the budget");
+});

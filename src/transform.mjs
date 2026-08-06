@@ -508,17 +508,35 @@ export function transformResponsesRequest(source, { mediaStore, defaultModel, ta
     payload.tools = selectForwardedTools(payload.tools, { hiddenToolNames: effectiveHidden });
   }
   // Reasoning history balloons fast (244+ items observed in long sessions) and the
-  // model only needs the latest reasoning; old thinking text is dead weight. Keep the
-  // most recent RECENT_REASONING items, drop the rest.
+  // model only needs the latest reasoning; old thinking text is dead weight. Two limits
+  // apply, newest-first:
+  //   - RECENT_REASONING items, and
+  //   - REASONING_BUDGET_BYTES in total.
+  // The count alone is not enough: measured across real upstream payloads, six items
+  // ranged from 7KB to 76KB, making reasoning the single largest source of per-call
+  // context variance. The byte budget clips that tail - a typical turn stays well
+  // under it, an unusually long thinking burst gets its oldest items dropped.
   const RECENT_REASONING = 6;
+  const REASONING_BUDGET_BYTES = 50 * 1024;
   let currentInput = Array.isArray(payload.input) ? payload.input : rawInput;
+  let reasoningDropped = 0;
   if (Array.isArray(rawInput)) {
     const reasoningIndices = [];
     for (let i = 0; i < currentInput.length; i += 1) {
       if (currentInput[i]?.type === "reasoning") reasoningIndices.push(i);
     }
-    if (reasoningIndices.length > RECENT_REASONING) {
-      const drop = new Set(reasoningIndices.slice(0, reasoningIndices.length - RECENT_REASONING));
+    const drop = new Set(reasoningIndices.slice(0, Math.max(0, reasoningIndices.length - RECENT_REASONING)));
+    // Walk the survivors newest-first and keep only what fits the budget.
+    let budget = REASONING_BUDGET_BYTES;
+    for (let i = reasoningIndices.length - 1; i >= 0; i -= 1) {
+      const index = reasoningIndices[i];
+      if (drop.has(index)) continue;
+      const size = JSON.stringify(currentInput[index] ?? "").length;
+      if (size <= budget) budget -= size;
+      else drop.add(index);
+    }
+    if (drop.size) {
+      reasoningDropped = drop.size;
       currentInput = currentInput.filter((_, index) => !drop.has(index));
     }
   }
@@ -651,6 +669,7 @@ export function transformResponsesRequest(source, { mediaStore, defaultModel, ta
     payload,
     report: {
       blocked,
+      reasoningDropped,
       originalToolCount: originalTools.length,
       forwardedToolCount: Array.isArray(payload.tools) ? payload.tools.length : 0,
       injectedHarnessTools,
