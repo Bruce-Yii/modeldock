@@ -586,14 +586,20 @@ async function relayLiveResponses(payload, res, services, signal) {
     }
 
     // Keep the downstream SSE idle window open while the upstream thinks (DeepSeek can
-    // take 30-60s+ before its first token on huge contexts; most SSE clients time out on
-    // silence, not on total duration). A comment line resets the idle timer harmlessly.
-    let receivedFirstEvent = false;
+    // take 30-60s+ before its first token on huge contexts, and a revival round after a
+    // completed text turn can take another minute+). Most SSE clients time out on
+    // silence, not on total duration. A comment line resets the idle timer harmlessly.
+    // The timer runs for the whole relay: it only writes when no upstream event has
+    // arrived recently, so a busy stream never gets spammed but a quiet one stays alive.
+    let lastEventAt = Date.now();
     const keepalive = setInterval(() => {
-      if (receivedFirstEvent || res.writableEnded) return;
+      if (res.writableEnded) return;
+      if (Date.now() - lastEventAt < 25_000) return;
       res.write(": keepalive\n\n");
-    }, 30_000);
+      lastEventAt = Date.now();
+    }, 10_000);
     const stopKeepalive = () => clearInterval(keepalive);
+    const markEvent = () => { lastEventAt = Date.now(); };
 
     let call = null;
     let argumentsText = "";
@@ -602,7 +608,7 @@ async function relayLiveResponses(payload, res, services, signal) {
     const isChatCamp = chatEndpointFor(requestModel, services.config).style === "chat";
     try {
     for await (const event of parseSse(upstream.body)) {
-      receivedFirstEvent = true;
+      markEvent();
       const data = event.data;
       const events = isChatCamp ? [...chatChunkToResponsesEvents(data)] : [data];
       for (const ev of events) {
@@ -994,7 +1000,13 @@ export function codexModelCatalog(config) {
 }
 
 function serveModels(req, res, { config, modelSelection }) {
-  return res.json(codexModelCatalog(config));
+  // Advertise the dashboard-selected main model (with its modalities/plugins) so Codex
+  // starts conversations with the model the user actually picked.
+  return res.json(codexModelCatalog({
+    ...config,
+    mainModel: modelSelection?.mainModel || config.mainModel,
+    visionModel: modelSelection?.visionModel || config.visionModel,
+  }));
 }
 
 const VISION_MODEL_HINTS = ["luna", "omni", "vision", "vl", "mimi", "glm-5", "grok", "kimi"];
