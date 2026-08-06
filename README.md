@@ -30,6 +30,7 @@ ModelDock is a small local helper with two superpowers:
 | 🔗 Connect Codex | The dashboard backs up and switches the user config; restart Codex to apply |
 | 🧰 Tool loops preserved | Keeps local Codex tools and adapts hosted schemas that Go rejects |
 | 📊 One-glance dashboard | Usage, latency, recent requests in your browser |
+| 🔄 Self-updating | Checks GitHub on startup; a small Update button updates and restarts in one click |
 
 ## Quick start
 
@@ -100,11 +101,6 @@ On Windows, you can also run `powershell -ExecutionPolicy Bypass -File scripts/c
 3. **Fully quit and restart Codex**
 4. Pick the ModelDock model in Codex — done
 
-Tip: the dashboard also has a **Start at login** toggle (Windows/macOS) so ModelDock
-launches in the background automatically — no terminal window needed. When a new
-version is released, a small **Update** button appears in the dashboard header —
-one click updates and restarts ModelDock.
-
 **Option B: Let your AI do it**
 
 Send this repo URL to your AI coding assistant (Codex / Claude Code / Cursor, etc.):
@@ -114,6 +110,20 @@ https://github.com/architectds/modeldock
 ```
 
 Tell it: "Help me install ModelDock and configure the API token from .env.example." It will handle the clone, install, setup, and launch for you.
+
+## Start at login & automatic updates
+
+- **Start at login** (Windows / macOS): flip the **Autostart** toggle on the dashboard.
+  ModelDock then launches hidden in the background every time you log in — no terminal
+  window, nothing to remember. Flip it off any time from the same toggle.
+- **Update check on startup**: every time ModelDock starts, it compares itself against
+  the newest GitHub release. If a newer version exists, a small green **Update** button
+  appears in the dashboard header.
+- **One-click update**: click that button — ModelDock downloads the new version,
+  restarts itself, and the page reloads when it is back. Your token and settings are
+  kept (they live in your local config file, outside the app).
+- Installed with **Option A** (git clone)? The Update button runs `git pull` for you,
+  or just pull manually and restart.
 
 ## How it works (plain English)
 
@@ -147,6 +157,7 @@ ModelDock 是一个本地小工具，两件本事：
 | 🔗 接入 Codex | 仪表盘备份并切换用户配置，重启 Codex 后生效 |
 | 🧰 工具循环保留 | 保留 Codex 本地工具，并适配上游 API 不接受的 hosted tool schema |
 | 📊 一目了然的仪表盘 | 用量、延迟、最近请求，打开浏览器就能看 |
+| 🔄 自动更新 | 启动时自检新版本，仪表盘一键更新并自动重启 |
 
 ## 快速开始
 
@@ -212,8 +223,6 @@ Windows 用户也可以运行 `powershell -ExecutionPolicy Bypass -File scripts/
 3. **完全退出并重启 Codex**
 4. Codex 里选择 ModelDock 模型 —— 完成
 
-小提示：仪表盘上还有一个**开机自启**开关（Windows/macOS），打开后 ModelDock 会在登录时自动后台运行，不需要终端窗口。有新版本发布时，仪表盘顶部会出现一个小小的**更新**按钮，点一下就能自动更新并重启。
-
 **方法二：让 AI 帮你装**
 
 把本仓库地址发给你的 AI 编程助手（Codex / Claude Code / Cursor 等）：
@@ -223,6 +232,13 @@ https://github.com/architectds/modeldock
 ```
 
 告诉它："帮我安装这个 ModelDock，并按 .env.example 配置好 API token。" 它会把安装、配置、启动全部搞定。
+
+## 开机自启与自动更新
+
+- **开机自启**（Windows / macOS）：打开仪表盘上的 **Autostart** 开关，之后每次登录系统，ModelDock 都会自动在后台隐藏运行——没有终端窗口，也不用记着去启动。想关掉，同一个开关拨回去就行。
+- **启动时自检新版本**：ModelDock 每次启动都会和 GitHub 上的最新发布版本比对，发现有新版时，仪表盘顶部会出现一个小小的绿色**更新**按钮。
+- **一键更新**：点一下按钮——自动下载新版本、自动重启，页面恢复后自动刷新。你的 token 和设置都会保留（它们存在本地配置文件里，不在程序本体内）。
+- 用**方法一**（git clone）装的？更新按钮会帮你执行 `git pull`，或者自己 pull 之后重启也一样。
 
 ## 它怎么工作（大白话版）
 
@@ -256,6 +272,7 @@ ModelDock はローカルで動く小さなヘルパーです。できること�
 | 🔗 Codex に接続 | ダッシュボードがユーザー設定をバックアップして切り替え、Codex 再起動後に反映 |
 | 🧰 ツールループを維持 | ローカルツールを保ち、上流 API 非対応の hosted schema を変換 |
 | 📊 一目でわかるダッシュボード | 使用量・遅延・直近のリクエストをブラウザで確認 |
+| 🔄 自動アップデート | 起動時に新バージョンを確認、ワンクリックで更新・再起動 |
 
 ## クイックスタート
 
@@ -321,8 +338,6 @@ Windows では `powershell -ExecutionPolicy Bypass -File scripts/create-shortcut
 3. **Codex を完全に終了して再起動**
 4. Codex で ModelDock モデルを選択 — 完了
 
-ヒント: ダッシュボードには**ログイン時に自動起動**のトグル（Windows/macOS）もあります。オンにすると ModelDock がバックグラウンドで自動起動し、ターミナルは不要になります。新しいバージョンが公開されると、ダッシュボード上部に小さな**更新**ボタンが表示され、ワンクリックで更新・再起動できます。
-
 **方法 B: AI にやってもらう**
 
 このリポジトリ URL を AI コーディングアシスタント（Codex / Claude Code / Cursor など）に渡します:
@@ -332,6 +347,13 @@ https://github.com/architectds/modeldock
 ```
 
 「ModelDock をインストールして、.env.example に従ってトークンを設定して」と伝えるだけで、クローン・インストール・設定・起動まで全部やってくれます。
+
+## ログイン時の自動起動と自動アップデート
+
+- **ログイン時に自動起動**（Windows / macOS）: ダッシュボードの **Autostart** トグルをオンにすると、ログインのたびに ModelDock がバックグラウンドで自動起動します。ターミナルは不要です。オフにしたいときは同じトグルを戻すだけ。
+- **起動時のアップデート確認**: ModelDock は起動のたびに GitHub の最新リリースと自分を比較します。新しいバージョンがあると、ダッシュボード上部に小さな緑の**更新**ボタンが表示されます。
+- **ワンクリック更新**: ボタンを押すと、新バージョンのダウンロードと再起動が自動で行われ、復帰後にページも自動リロードされます。トークンや設定はローカルの設定ファイルに保存されているため、そのまま引き継がれます。
+- **方法 A**（git clone）でインストールした場合は、更新ボタンが `git pull` を実行します。手動で pull して再起動しても同じです。
 
 ## 仕組み（やさしい説明）
 
