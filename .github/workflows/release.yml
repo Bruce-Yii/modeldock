@@ -17,8 +17,10 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npm test
+      # dist/ is gitignored (not committed) but test/install-mock.test.mjs and the
+      # build artifact need the built bundle, so build before testing.
       - run: npm run build
+      - run: npm test
       - name: Check tag matches package.json version
         run: |
           TAG="${GITHUB_REF_NAME#v}"

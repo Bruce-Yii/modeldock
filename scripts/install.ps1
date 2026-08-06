@@ -12,11 +12,20 @@
 #      dashboard's start-at-login toggle and the one-click updater).
 #   3. Start ModelDock hidden (skipped if one is already running) and open the dashboard.
 # Tokens are NOT asked for here - the dashboard opens its Settings dialog on first run.
+#
+# Overrides (optional; used by the mock-install test and mirror deployments):
+#   MODELDOCK_ROOT          install directory             (default: ~\.modeldock)
+#   MODELDOCK_REPO          GitHub repo                   (default: architectds/modeldock)
+#   MODELDOCK_RELEASE_URL   direct asset URL (overrides MODELDOCK_REPO)
+#   MODELDOCK_PORT          dashboard port                (default: 4097)
+#   MODELDOCK_SKIP_OPEN     set to "1" to not open a browser
 
 $ErrorActionPreference = "Stop"
-$repo = "architectds/modeldock"
-$port = 4097
-$root = Join-Path $env:USERPROFILE ".modeldock"
+$repo = if ($env:MODELDOCK_REPO) { $env:MODELDOCK_REPO } else { "architectds/modeldock" }
+$port = if ($env:MODELDOCK_PORT) { [int]$env:MODELDOCK_PORT } else { 4097 }
+$root = if ($env:MODELDOCK_ROOT) { $env:MODELDOCK_ROOT } else { Join-Path $env:USERPROFILE ".modeldock" }
+$releaseUrl = if ($env:MODELDOCK_RELEASE_URL) { $env:MODELDOCK_RELEASE_URL } else { "https://github.com/$repo/releases/latest/download/modeldock.mjs" }
+$skipOpen = ($env:MODELDOCK_SKIP_OPEN -eq "1")
 
 Write-Host "ModelDock installer" -ForegroundColor Cyan
 
@@ -42,7 +51,7 @@ New-Item -ItemType Directory -Force (Join-Path $root "scripts") | Out-Null
 
 $bundle = Join-Path $root "dist\modeldock.mjs"
 Write-Host "  downloading latest release bundle..."
-Invoke-WebRequest -UseBasicParsing -Uri "https://github.com/$repo/releases/latest/download/modeldock.mjs" -OutFile $bundle
+Invoke-WebRequest -UseBasicParsing -Uri $releaseUrl -OutFile $bundle
 Write-Host ("  saved {0} ({1:N1} MB)" -f $bundle, ((Get-Item $bundle).Length / 1MB))
 
 # Hidden launcher (same content as the repo's scripts/start-hidden.ps1). Written by the
@@ -78,4 +87,4 @@ Write-Host ""
 Write-Host "Done. Dashboard: http://127.0.0.1:$port" -ForegroundColor Green
 Write-Host "First run: paste your API token into the Settings dialog that opens automatically."
 Write-Host "Optional: flip the 'Start at login' toggle on the dashboard."
-Start-Process "http://127.0.0.1:$port"
+if (-not $skipOpen) { Start-Process "http://127.0.0.1:$port" }

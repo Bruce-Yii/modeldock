@@ -15,8 +15,10 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npm test
+      # dist/ is gitignored (not committed) but test/install-mock.test.mjs and the
+      # boot smoke need the built bundle, so build before testing.
       - run: npm run build
+      - run: npm test
       - name: Bundle boot smoke test
         run: |
           MODELDOCK_PORT=4979 MODELDOCK_MODEL_PROBE_ENABLED=0 node dist/modeldock.mjs &
@@ -28,3 +30,30 @@ jobs:
           curl -sf -o /dev/null http://127.0.0.1:4979/ || { kill $SERVER_PID; exit 1; }
           curl -sf -o /dev/null http://127.0.0.1:4979/app.js || { kill $SERVER_PID; exit 1; }
           kill $SERVER_PID
+
+  # install.ps1 only runs on Windows; exercise the Windows mock install end to end.
+  install-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: node --test test/install-mock.test.mjs
+
+  # install.sh on a real macOS runner (same script as Linux, but exercises the
+  # macos platform branch: launchd paths, open, $HOME/.modeldock layout).
+  install-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: node --test test/install-mock.test.mjs

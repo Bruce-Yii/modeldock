@@ -14,12 +14,21 @@
 #   3. Start ModelDock in the background (skipped if one is already running) and print
 #      the dashboard URL.
 # Tokens are NOT asked for here - the dashboard opens its Settings dialog on first run.
+#
+# Overrides (optional; used by the mock-install test and mirror deployments):
+#   MODELDOCK_ROOT          install directory             (default: ~/.modeldock)
+#   MODELDOCK_REPO          GitHub repo                   (default: architectds/modeldock)
+#   MODELDOCK_RELEASE_URL   direct asset URL (overrides MODELDOCK_REPO)
+#   MODELDOCK_PORT          dashboard port                (default: 4097)
+#   MODELDOCK_SKIP_OPEN     set to "1" to not open a browser
 
 set -eu
 
-REPO="architectds/modeldock"
-PORT=4097
-ROOT="$HOME/.modeldock"
+REPO="${MODELDOCK_REPO:-architectds/modeldock}"
+PORT="${MODELDOCK_PORT:-4097}"
+ROOT="${MODELDOCK_ROOT:-$HOME/.modeldock}"
+RELEASE_URL="${MODELDOCK_RELEASE_URL:-https://github.com/$REPO/releases/latest/download/modeldock.mjs}"
+SKIP_OPEN="${MODELDOCK_SKIP_OPEN:-0}"
 
 echo "ModelDock installer"
 
@@ -42,7 +51,7 @@ mkdir -p "$ROOT/dist" "$ROOT/scripts"
 
 BUNDLE="$ROOT/dist/modeldock.mjs"
 echo "  downloading latest release bundle..."
-curl -fL --progress-bar "https://github.com/$REPO/releases/latest/download/modeldock.mjs" -o "$BUNDLE"
+curl -fL --progress-bar "$RELEASE_URL" -o "$BUNDLE"
 echo "  saved $BUNDLE"
 
 # Background launcher (same content as the repo's scripts/start-hidden.sh). Written by
@@ -75,4 +84,6 @@ echo ""
 echo "Done. Dashboard: http://127.0.0.1:$PORT"
 echo "First run: paste your API token into the Settings dialog that opens automatically."
 echo "Optional: flip the 'Start at login' toggle on the dashboard."
-command -v open >/dev/null 2>&1 && open "http://127.0.0.1:$PORT" || true
+if [ "$SKIP_OPEN" != "1" ]; then
+  command -v open >/dev/null 2>&1 && open "http://127.0.0.1:$PORT" || true
+fi
