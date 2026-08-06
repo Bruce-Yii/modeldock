@@ -101,6 +101,8 @@ function render(data) {
   renderModelOptions(data);
   set("uptime", `Uptime ${uptime(data.uptimeMs)}`);
   set("main-model", data.config.mainModel);
+  if (data.config.mainProviderLabel) set("route-provider", data.config.mainProviderLabel);
+  if (data.config.mainWire) set("route-wire", data.config.mainWire === "chat" ? "chat/completions" : "responses");
 
   const responses = data.responses;
   const success = percent(responses.ok, responses.total);
@@ -129,9 +131,14 @@ function render(data) {
   set("stream-count", number(responses.streaming));
 
   set("cfg-bind", data.config.bind);
-  set("cfg-go", data.config.goBaseUrl);
+  const mainUpstream = data.config.mainUpstreamUrl || data.config.goBaseUrl;
+  set("cfg-go", mainUpstream);
+  const upstreamDd = $("cfg-go");
+  if (upstreamDd) upstreamDd.title = mainUpstream;
   set("cfg-main", data.config.mainModel);
   set("cfg-vision", data.config.visionModel);
+  const visionDd = $("cfg-vision");
+  if (visionDd && data.config.visionUpstreamUrl) visionDd.title = `via ${data.config.visionUpstreamUrl}`;
   set("cfg-fallback", data.config.visionFallbackModel);
   set("cfg-exa", data.config.exaMcpUrl);
   renderAutostart(data);
