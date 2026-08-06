@@ -139,7 +139,13 @@ function scheduleRestart() {
   } else {
     const script = path.join(root, "scripts", "start-hidden.sh");
     const quoted = script.replace(/(["$`\\])/g, "\\$1");
-    spawn("sh", ["-c", `sleep 2; "${quoted}"`], { detached: true, stdio: "ignore" }).unref();
+    // "sh script" needs no executable bit; PATH gains this node's directory so the
+    // launcher's bare "node" resolves even under launchd's minimal environment.
+    spawn("sh", ["-c", `sleep 2; sh "${quoted}"`], {
+      detached: true,
+      stdio: "ignore",
+      env: { ...process.env, PATH: `${path.dirname(process.execPath)}:${process.env.PATH || ""}` },
+    }).unref();
   }
   setTimeout(() => process.exit(0), 700).unref();
 }

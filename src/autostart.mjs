@@ -45,7 +45,10 @@ function exec(cmd, args) {
   });
 }
 
-function plistXml(entryPath) {
+function plistXml(entryPath, rootDir) {
+  // launchd starts agents with a bare PATH (/usr/bin:/bin:...) that does not include
+  // Homebrew or nvm, so "env node" would fail on most Macs. This process IS node, so
+  // process.execPath is an absolute node path that is known to work.
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -53,12 +56,11 @@ function plistXml(entryPath) {
   <key>Label</key><string>${PLIST_LABEL}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/bin/env</string>
-    <string>node</string>
+    <string>${process.execPath}</string>
     <string>${entryPath}</string>
   </array>
   <key>RunAtLoad</key><true/>
-  <key>WorkingDirectory</key><string>${path.dirname(entryPath)}</string>
+  <key>WorkingDirectory</key><string>${rootDir}</string>
   <key>StandardOutPath</key><string>${path.join(os.tmpdir(), "modeldock.log")}</string>
   <key>StandardErrorPath</key><string>${path.join(os.tmpdir(), "modeldock.log")}</string>
 </dict>
@@ -106,9 +108,10 @@ export function createAutostart({
   async function macSetEnabled(enabled) {
     const plistPath = path.join(home, "Library", "LaunchAgents", PLIST_NAME);
     if (enabled) {
-      const entryPath = await serverEntryPath(path.resolve(dirname, ".."));
+      const rootDir = path.resolve(dirname, "..");
+      const entryPath = await serverEntryPath(rootDir);
       await mkdir(path.dirname(plistPath), { recursive: true });
-      await writeFile(plistPath, plistXml(entryPath), "utf8");
+      await writeFile(plistPath, plistXml(entryPath, rootDir), "utf8");
       await exec("launchctl", ["unload", plistPath]).catch(() => {});
       await exec("launchctl", ["load", "-w", plistPath]);
     } else {
