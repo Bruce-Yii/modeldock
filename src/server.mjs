@@ -785,16 +785,18 @@ async function relayResponses(req, res, services) {
       const summaryKey = source?.client_metadata?.session_id || source?.client_metadata?.thread_id || "default";
       const existing = services.sessionSummaries?.get(summaryKey) || null;
       const existingSummary = existing?.text || null;
-      // Always apply the stored summary on every request (local, no API call) so the
-      // upstream payload stays bounded even between fresh summary generations. Sliding
-      // window: drop only the oldest assistants beyond the window; new work is kept.
-      if (existingSummary) applySummaryToPayload(transformed.payload, existingSummary);
       // Debounce: one fresh summary per session per 5 minutes keeps us from calling the
       // model to re-summarize on every request while a long turn is still generating.
       const SUMMARY_DEBOUNCE_MS = 5 * 60_000;
+      // Generate FIRST from the untouched payload (it holds the full history this turn
+      // brought in); applying the stored summary before generation would feed the
+      // summarizer a truncated window and produce garbage summaries.
       if (!existing || Date.now() - existing.at > SUMMARY_DEBOUNCE_MS) {
         const newSummary = await summarizeHistory(services, summaryKey, transformed.payload, existingSummary);
         if (newSummary) services.sessionSummaries?.set(summaryKey, { text: newSummary, at: Date.now() });
+      } else if (existingSummary) {
+        // Between generations: apply the stored summary locally (sliding window).
+        applySummaryToPayload(transformed.payload, existingSummary);
       }
     }
   } catch (error) {
