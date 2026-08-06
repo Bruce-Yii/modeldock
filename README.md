@@ -34,7 +34,7 @@ ModelDock is a small local helper with two superpowers:
 
 ## Quick start
 
-**Option 0: One-line install (recommended)**
+**Option A: One-line install (recommended)**
 
 Windows (PowerShell):
 
@@ -50,56 +50,8 @@ curl -fsSL https://raw.githubusercontent.com/architectds/modeldock/main/scripts/
 
 The installer checks Node.js (>= 22, guides you to it if missing), downloads the latest
 single-file release into `~/.modeldock`, starts ModelDock in the background, and opens
-the dashboard. Paste your API token into the Settings dialog that pops up - done.
-
-**Option A: Do it yourself (~5 minutes)**
-
-**Step 0: Get the project**
-
-- Option A (recommended): run `git clone https://github.com/architectds/modeldock` in a terminal
-- Option B: go to <https://github.com/architectds/modeldock>, click the green **Code** button → **Download ZIP**, unzip it anywhere you like
-
-You'll get a folder containing `package.json`, `src`, `public`, etc.
-
-**Step 1: Check / install Node.js**
-
-Run `node -v` in a terminal:
-- Shows `v22.x` or newer → skip
-- Not installed or older → download the **LTS version** from <https://nodejs.org>, install, then reopen your terminal
-
-**Step 2: Add your API token**
-
-Easiest way: skip ahead to Step 3 and launch first — when no token is configured, the
-dashboard opens a small **Settings** dialog automatically. Paste your token there, hit
-Save, and it takes effect immediately (stored in your local config file).
-
-Get the token by signing in at <https://opencode.ai/auth> (the API key for your
-provider, same as with any third-party API).
-
-Prefer doing it by hand? In the **project root folder** (the same folder as `package.json`):
-
-1. Find the `.env.example` file
-2. Copy it and rename the copy to `.env`
-3. Open `.env` in a text editor and change this line to:
-
-   ```
-   OPENCODE_GO_TOKEN=your-token
-   ```
-
-   (`.env` stays local — it's never uploaded or committed to GitHub.)
-
-**Step 3: Install dependencies and launch**
-
-Open a terminal in the project folder, run `npm install`, then run `npm start`.
-
-On Windows, you can also run `powershell -ExecutionPolicy Bypass -File scripts/create-shortcut.ps1` once to create a `ModelDock` desktop shortcut for future launches.
-
-**Step 4: Connect Codex**
-
-1. Open <http://127.0.0.1:4097> in your browser
-2. Flip the switch on the page
-3. **Fully quit and restart Codex**
-4. Pick the ModelDock model in Codex — done
+the dashboard. Paste your API token into the Settings dialog that pops up — get one by
+signing in at <https://opencode.ai/auth> — and you are done.
 
 **Option B: Let your AI do it**
 
@@ -109,7 +61,15 @@ Send this repo URL to your AI coding assistant (Codex / Claude Code / Cursor, et
 https://github.com/architectds/modeldock
 ```
 
-Tell it: "Help me install ModelDock and configure the API token from .env.example." It will handle the clone, install, setup, and launch for you.
+Tell it: "Help me install ModelDock and configure the API token." It will handle the
+install, setup, and launch for you.
+
+**Connect Codex**
+
+1. Open <http://127.0.0.1:4097> in your browser
+2. Flip the switch on the page
+3. **Fully quit and restart Codex**
+4. Pick the ModelDock model in Codex — done
 
 ## Start at login & automatic updates
 
@@ -122,8 +82,8 @@ Tell it: "Help me install ModelDock and configure the API token from .env.exampl
 - **One-click update**: click that button — ModelDock downloads the new version,
   restarts itself, and the page reloads when it is back. Your token and settings are
   kept (they live in your local config file, outside the app).
-- Installed with **Option A** (git clone)? The Update button runs `git pull` for you,
-  or just pull manually and restart.
+- Running from a **git checkout** (developers)? The Update button runs `git pull` for
+  you, or just pull manually and restart.
 - **Update safety**: updates come only from this repository's GitHub Releases, over
   HTTPS. Before installing, ModelDock verifies the download against the release's
   SHA256 checksum — a corrupted or tampered file is refused — and it never replaces
@@ -166,7 +126,7 @@ ModelDock 是一个本地小工具，两件本事：
 
 ## 快速开始
 
-**方法零：一行命令安装（推荐）**
+**方法一：一行命令安装（推荐）**
 
 Windows（PowerShell）：
 
@@ -180,53 +140,7 @@ macOS（终端）：
 curl -fsSL https://raw.githubusercontent.com/architectds/modeldock/main/scripts/install.sh | sh
 ```
 
-安装器会检查 Node.js（需 22+，没有会引导你安装），把最新的单文件版本下载到 `~/.modeldock`，后台启动 ModelDock 并打开仪表盘。在自动弹出的设置窗口里粘贴 API token 即可 —— 完成。
-
-**方法一：自己动手（约 5 分钟）**
-
-**第 0 步：把项目拿下来**
-
-- 方式 A（推荐）：在终端运行 `git clone https://github.com/architectds/modeldock`
-- 方式 B：到 <https://github.com/architectds/modeldock> 点绿色 **Code** 按钮 → **Download ZIP**，解压到你喜欢的文件夹
-
-完成后，你会看到一个文件夹（含 `package.json`、`src`、`public` 等）。
-
-**第 1 步：确认/安装 Node.js**
-
-在终端运行 `node -v`：
-- 显示 `v22.x` 或更高 → 跳过
-- 没有或版本低于 22 → 到 <https://nodejs.org> 下载安装 **LTS 版本**，装完重开终端
-
-**第 2 步：填 API token**
-
-最省事的做法：直接跳到第 3 步先启动 —— 没配置 token 时，仪表盘会自动弹出一个小小的**设置**窗口，把 token 粘贴进去点保存，立即生效（保存在本地配置文件里）。
-
-Token 从 <https://opencode.ai/auth> 登录获取（你的 API key，与其他第三方 API 的接入方式相同）。
-
-想手动配置的话，在**项目根目录**（和 `package.json` 同一个文件夹）里：
-
-1. 找到 `.env.example` 文件
-2. 复制一份，重命名为 `.env`
-3. 用记事本打开 `.env`，把这一行改成：
-
-   ```
-   OPENCODE_GO_TOKEN=你的token
-   ```
-
-   （`.env` 只在本地生效，不会上传或被提交到 GitHub。）
-
-**第 3 步：安装依赖并启动**
-
-在项目文件夹打开终端，先运行 `npm install`，再运行 `npm start`。
-
-Windows 用户也可以运行 `powershell -ExecutionPolicy Bypass -File scripts/create-shortcut.ps1` 创建 `ModelDock` 桌面快捷方式，以后双击启动。
-
-**第 4 步：接入 Codex**
-
-1. 浏览器打开 <http://127.0.0.1:4097>
-2. 打开页面上的开关
-3. **完全退出并重启 Codex**
-4. Codex 里选择 ModelDock 模型 —— 完成
+安装器会检查 Node.js（需 22+，没有会引导你安装），把最新的单文件版本下载到 `~/.modeldock`，后台启动 ModelDock 并打开仪表盘。在自动弹出的设置窗口里粘贴 API token（到 <https://opencode.ai/auth> 登录获取）即可 —— 完成。
 
 **方法二：让 AI 帮你装**
 
@@ -236,14 +150,21 @@ Windows 用户也可以运行 `powershell -ExecutionPolicy Bypass -File scripts/
 https://github.com/architectds/modeldock
 ```
 
-告诉它："帮我安装这个 ModelDock，并按 .env.example 配置好 API token。" 它会把安装、配置、启动全部搞定。
+告诉它："帮我安装这个 ModelDock，并配置好 API token。" 它会把安装、配置、启动全部搞定。
+
+**接入 Codex**
+
+1. 浏览器打开 <http://127.0.0.1:4097>
+2. 打开页面上的开关
+3. **完全退出并重启 Codex**
+4. Codex 里选择 ModelDock 模型 —— 完成
 
 ## 开机自启与自动更新
 
 - **开机自启**（Windows / macOS）：打开仪表盘上的 **Autostart** 开关，之后每次登录系统，ModelDock 都会自动在后台隐藏运行——没有终端窗口，也不用记着去启动。想关掉，同一个开关拨回去就行。
 - **启动时自检新版本**：ModelDock 每次启动都会和 GitHub 上的最新发布版本比对，发现有新版时，仪表盘顶部会出现一个小小的绿色**更新**按钮。
 - **一键更新**：点一下按钮——自动下载新版本、自动重启，页面恢复后自动刷新。你的 token 和设置都会保留（它们存在本地配置文件里，不在程序本体内）。
-- 用**方法一**（git clone）装的？更新按钮会帮你执行 `git pull`，或者自己 pull 之后重启也一样。
+- 用 **git 检出**跑的（开发者）？更新按钮会帮你执行 `git pull`，或者自己 pull 之后重启也一样。
 - **更新安全**：更新只从本仓库的 GitHub Releases 走 HTTPS 获取。安装前 ModelDock 会用发布版附带的 SHA256 校验和验证下载内容——损坏或被篡改的文件会被直接拒绝——并且永远不会把自己替换成更旧的版本。校验不通过时，当前版本继续照常运行。
 
 ## 它怎么工作（大白话版）
@@ -282,7 +203,7 @@ ModelDock はローカルで動く小さなヘルパーです。できること�
 
 ## クイックスタート
 
-**方法 0: ワンライナーでインストール（推奨）**
+**方法 A: ワンライナーでインストール（推奨）**
 
 Windows（PowerShell）:
 
@@ -296,53 +217,7 @@ macOS（ターミナル）:
 curl -fsSL https://raw.githubusercontent.com/architectds/modeldock/main/scripts/install.sh | sh
 ```
 
-インストーラーが Node.js（22 以上、無ければ案内あり）を確認し、最新の単一ファイル版を `~/.modeldock` にダウンロードして ModelDock をバックグラウンドで起動し、ダッシュボードを開きます。自動で表示される設定ダイアログに API トークンを貼り付ければ完了です。
-
-**方法 A: 自分でセットアップ（約5分）**
-
-**ステップ 0: プロジェクトを入手**
-
-- 方法 A（推奨）: ターミナルで `git clone https://github.com/architectds/modeldock` を実行
-- 方法 B: <https://github.com/architectds/modeldock> で緑の **Code** ボタン → **Download ZIP** をクリックし、好きな場所に解凍
-
-`package.json`、`src`、`public` などが入ったフォルダができます。
-
-**ステップ 1: Node.js の確認 / インストール**
-
-ターミナルで `node -v` を実行:
-- `v22.x` 以上が表示される → 次のステップへ
-- 未インストールまたは古い場合 → <https://nodejs.org> から **LTS版** をダウンロードしてインストールし、ターミナルを開き直す
-
-**ステップ 2: API トークンを設定**
-
-いちばん簡単な方法: 先にステップ 3 へ進んで起動してください — トークンが未設定の場合、ダッシュボードに小さな**設定**ダイアログが自動で開きます。トークンを貼り付けて保存すれば即時反映されます（ローカルの設定ファイルに保存）。
-
-トークンは <https://opencode.ai/auth> にログインして取得します（ご利用のプロバイダーの API キー。他のサードパーティ API と同じ方式）。
-
-手動で設定する場合は、**プロジェクトのルートフォルダ**（`package.json` と同じ場所）で:
-
-1. `.env.example` ファイルを探す
-2. コピーして、名前を `.env` に変更
-3. テキストエディタで `.env` を開き、次の行を変更:
-
-   ```
-   OPENCODE_GO_TOKEN=あなたのトークン
-   ```
-
-   （`.env` はローカルのみで有効。アップロードや GitHub へのコミットはされません。）
-
-**ステップ 3: 依存関係をインストールして起動**
-
-プロジェクトフォルダでターミナルを開き、`npm install`、続けて `npm start` を実行します。
-
-Windows では `powershell -ExecutionPolicy Bypass -File scripts/create-shortcut.ps1` を一度実行すると、次回以降に使える `ModelDock` デスクトップショートカットを作成できます。
-
-**ステップ 4: Codex と接続**
-
-1. ブラウザで <http://127.0.0.1:4097> を開く
-2. ページ上のスイッチをオンにする
-3. **Codex を完全に終了して再起動**
-4. Codex で ModelDock モデルを選択 — 完了
+インストーラーが Node.js（22 以上、無ければ案内あり）を確認し、最新の単一ファイル版を `~/.modeldock` にダウンロードして ModelDock をバックグラウンドで起動し、ダッシュボードを開きます。自動で表示される設定ダイアログに API トークン（<https://opencode.ai/auth> にログインして取得）を貼り付ければ完了です。
 
 **方法 B: AI にやってもらう**
 
@@ -352,14 +227,21 @@ Windows では `powershell -ExecutionPolicy Bypass -File scripts/create-shortcut
 https://github.com/architectds/modeldock
 ```
 
-「ModelDock をインストールして、.env.example に従ってトークンを設定して」と伝えるだけで、クローン・インストール・設定・起動まで全部やってくれます。
+「ModelDock をインストールして、API トークンを設定して」と伝えるだけで、インストール・設定・起動まで全部やってくれます。
+
+**Codex と接続**
+
+1. ブラウザで <http://127.0.0.1:4097> を開く
+2. ページ上のスイッチをオンにする
+3. **Codex を完全に終了して再起動**
+4. Codex で ModelDock モデルを選択 — 完了
 
 ## ログイン時の自動起動と自動アップデート
 
 - **ログイン時に自動起動**（Windows / macOS）: ダッシュボードの **Autostart** トグルをオンにすると、ログインのたびに ModelDock がバックグラウンドで自動起動します。ターミナルは不要です。オフにしたいときは同じトグルを戻すだけ。
 - **起動時のアップデート確認**: ModelDock は起動のたびに GitHub の最新リリースと自分を比較します。新しいバージョンがあると、ダッシュボード上部に小さな緑の**更新**ボタンが表示されます。
 - **ワンクリック更新**: ボタンを押すと、新バージョンのダウンロードと再起動が自動で行われ、復帰後にページも自動リロードされます。トークンや設定はローカルの設定ファイルに保存されているため、そのまま引き継がれます。
-- **方法 A**（git clone）でインストールした場合は、更新ボタンが `git pull` を実行します。手動で pull して再起動しても同じです。
+- **git チェックアウト**で動かしている場合（開発者向け）は、更新ボタンが `git pull` を実行します。手動で pull して再起動しても同じです。
 - **アップデートの安全性**: 更新は本リポジトリの GitHub Releases からのみ、HTTPS 経由で取得します。インストール前にリリース付属の SHA256 チェックサムで検証し、破損・改ざんされたファイルは拒否します。また、古いバージョンへ置き換わることはありません。検証に失敗した場合は、現行バージョンがそのまま動き続けます。
 
 ## 仕組み（やさしい説明）
