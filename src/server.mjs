@@ -747,6 +747,21 @@ async function relayResponses(req, res, services) {
     // only; the DeepSeek official profile is a direct relay and needs none of it.
     if (config.profile?.id === "opencode-go") {
       const summaryKey = source?.client_metadata?.session_id || source?.client_metadata?.thread_id || "default";
+      // Splice a pending completion-check verdict into the conversation so the main
+      // model continues from where the checker left off (e.g. "I need to verify the
+      // state of the commit") instead of the verdict vanishing after the check.
+      const check = services.sessionChecks?.get(summaryKey);
+      if (check && !check.injected && check.answer && Array.isArray(transformed.payload.input)) {
+        transformed.payload.input = [
+          ...transformed.payload.input,
+          {
+            role: "user",
+            content: [{ type: "input_text", text: `[completion check from your last turn: "${check.answer}" — continue from here]` }],
+          },
+        ];
+        check.injected = true;
+        debugLog(services, `spliced check verdict into session ${summaryKey}`);
+      }
       const existing = services.sessionSummaries?.get(summaryKey) || null;
       const existingSummary = existing?.text || null;
       // Debounce: one compaction per session per 5 minutes keeps us from re-summarizing
@@ -1326,8 +1341,10 @@ async function checkSessionCompletion(services, key, payload) {
   ], { maxOutputTokens: 2000, timeoutMs: SESSION_CHECK_TIMEOUT_MS });
   // No text back means the model could not produce a verdict — treat that as
   // "done" rather than blocking the session end on an unresponsive side call.
-  const verdict = answer?.trim() ? answer.trim().slice(0, 40) : "yes";
-  services.sessionChecks?.set(key, { at: now, answer: verdict });
+  const verdict = answer?.trim() ? answer.trim().slice(0, 200) : "yes";
+  // `injected` flips when the verdict is spliced into the main conversation on the
+  // next request, so the main model can continue from where the check left off.
+  services.sessionChecks?.set(key, { at: now, answer: verdict, injected: false });
   debugLog(services, `session check (${key}): ${verdict}`);
 }
 
