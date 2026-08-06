@@ -1351,7 +1351,6 @@ function checkSessionCompletion(services, key, payload, currentTurnText = "") {
   const now = Date.now();
   const last = services.sessionChecks?.get(key);
   if (last && now - last.at < SESSION_CHECK_INTERVAL_MS) return null;
-  const summary = services.sessionSummaries?.get(key)?.text || null;
   const input = Array.isArray(payload.input) ? payload.input : [];
   const lastText = currentTurnText.trim() || (() => {
     for (let i = input.length - 1; i >= 0; i--) {
@@ -1369,13 +1368,15 @@ function checkSessionCompletion(services, key, payload, currentTurnText = "") {
     .join(", ");
   services.sessionChecks?.set(key, { at: now, answer: lastText.slice(0, 200) || "(no text)", state: "continue" });
   debugLog(services, `session check (${key}): revive ${lastText.slice(0, 120)}`);
+  // The payload already carries the summary block (applySummaryToPayload ran before
+  // this turn was relayed); embedding a second copy in the continuation message is
+  // redundant and was observed to precede upstream stalls. Keep the revive lean.
   return {
     role: "user",
     content: [{
       type: "input_text",
       text: [
         "[session continuation — continue working on the task]",
-        summary ? `ROLLING SUMMARY:\n${summary}` : "",
         `YOUR LAST TEXT:\n${lastText}`,
         `AVAILABLE TOOLS: ${toolNames || "(none)"}`,
         "[end session continuation]",
