@@ -67,7 +67,9 @@ else
   SERVER="$ROOT/src/server.mjs"
 fi
 cd "$ROOT"
-nohup node "$SERVER" >/dev/null 2>&1 &
+# Log instead of discarding: a background start that dies (bad node, port in use,
+# missing file) is otherwise completely silent for the user.
+nohup node "$SERVER" >>"$ROOT/modeldock.log" 2>&1 &
 EOF
 chmod +x "$LAUNCHER"
 

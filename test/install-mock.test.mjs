@@ -48,8 +48,9 @@ function pidListeningOn(port) {
     }
     return null;
   }
-  // POSIX: lsof is present on both Linux and macOS runners; fall back to ss.
-  for (const probe of [`lsof -ti tcp:${port}`, `ss -tlnp`]) {
+  // POSIX: lsof is present on both Linux and macOS runners; fall back to ss (Linux
+  // only - macOS has no iproute2, hence the stderr redirect so a missing tool is quiet).
+  for (const probe of [`lsof -ti tcp:${port} 2>/dev/null`, `ss -tlnp 2>/dev/null`]) {
     try {
       const out = execFileSync("sh", ["-c", probe], { encoding: "utf8" });
       if (probe.startsWith("lsof")) {
@@ -160,7 +161,13 @@ test("mock install: download -> install -> run", async (t) => {
       await new Promise((r) => setTimeout(r, 250));
     }
   }
-  assert.ok(healthz, "gateway should come up after install");
+  // The launcher runs node in the background, so a startup crash only shows up in the
+  // log it writes; surface it here or the failure is just "did not come up".
+  if (!healthz) {
+    const logFile = path.join(installDir, "modeldock.log");
+    const log = existsSync(logFile) ? readFileSync(logFile, "utf8") : "(no modeldock.log written)";
+    assert.fail(`gateway should come up after install\n--- installer stdout ---\n${out}\n--- installer stderr ---\n${err}\n--- modeldock.log ---\n${log}`);
+  }
   // /healthz answers 503 until a token is configured - that still proves it runs.
   assert.ok([200, 503].includes(healthz.status), `unexpected /healthz status ${healthz.status}`);
 
