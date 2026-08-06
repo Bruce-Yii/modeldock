@@ -33,6 +33,24 @@ ModelDock is a small local helper with two superpowers:
 
 ## Quick start
 
+**Option 0: One-line install (recommended)**
+
+Windows (PowerShell):
+
+```
+powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/architectds/modeldock/main/scripts/install.ps1 | iex"
+```
+
+macOS (Terminal):
+
+```
+curl -fsSL https://raw.githubusercontent.com/architectds/modeldock/main/scripts/install.sh | sh
+```
+
+The installer checks Node.js (>= 22, guides you to it if missing), downloads the latest
+single-file release into `~/.modeldock`, starts ModelDock in the background, and opens
+the dashboard. Paste your API token into the Settings dialog that pops up - done.
+
 **Option A: Do it yourself (~5 minutes)**
 
 **Step 0: Get the project**
@@ -132,6 +150,22 @@ ModelDock 是一个本地小工具，两件本事：
 
 ## 快速开始
 
+**方法零：一行命令安装（推荐）**
+
+Windows（PowerShell）：
+
+```
+powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/architectds/modeldock/main/scripts/install.ps1 | iex"
+```
+
+macOS（终端）：
+
+```
+curl -fsSL https://raw.githubusercontent.com/architectds/modeldock/main/scripts/install.sh | sh
+```
+
+安装器会检查 Node.js（需 22+，没有会引导你安装），把最新的单文件版本下载到 `~/.modeldock`，后台启动 ModelDock 并打开仪表盘。在自动弹出的设置窗口里粘贴 API token 即可 —— 完成。
+
 **方法一：自己动手（约 5 分钟）**
 
 **第 0 步：把项目拿下来**
@@ -224,6 +258,22 @@ ModelDock はローカルで動く小さなヘルパーです。できること�
 | 📊 一目でわかるダッシュボード | 使用量・遅延・直近のリクエストをブラウザで確認 |
 
 ## クイックスタート
+
+**方法 0: ワンライナーでインストール（推奨）**
+
+Windows（PowerShell）:
+
+```
+powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/architectds/modeldock/main/scripts/install.ps1 | iex"
+```
+
+macOS（ターミナル）:
+
+```
+curl -fsSL https://raw.githubusercontent.com/architectds/modeldock/main/scripts/install.sh | sh
+```
+
+インストーラーが Node.js（22 以上、無ければ案内あり）を確認し、最新の単一ファイル版を `~/.modeldock` にダウンロードして ModelDock をバックグラウンドで起動し、ダッシュボードを開きます。自動で表示される設定ダイアログに API トークンを貼り付ければ完了です。
 
 **方法 A: 自分でセットアップ（約5分）**
 
