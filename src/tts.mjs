@@ -31,12 +31,14 @@ export async function ttsStatus() {
 export async function ttsInstall() {
   const { execFile } = await import("node:child_process");
   const { promisify } = await import("node:util");
+  const { fileURLToPath } = await import("node:url");
   const run = promisify(execFile);
   const npm = process.platform === "win32" ? "npm.cmd" : "npm";
   await run(npm, ["install", "msedge-tts", "--no-save", "--no-audit", "--no-fund"], {
     timeout: INSTALL_TIMEOUT_MS,
     windowsHide: true,
-    cwd: new URL("..", import.meta.url).pathname,
+    // fileURLToPath, not URL.pathname: on Windows the latter yields "/D:/..." and npm fails.
+    cwd: fileURLToPath(new URL("..", import.meta.url)),
   });
   installed = null; // force re-probe
   return probeInstalled();

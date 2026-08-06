@@ -23,10 +23,8 @@ async function probeSapi() {
   const script = "Add-Type -AssemblyName System.Speech; [System.Speech.Recognition.SpeechRecognitionEngine]::InstalledRecognizers() | ForEach-Object { $_.Culture.Name }";
   try {
     const raw = await runPowerShell(script);
-    console.error(`[stt] probe raw: ${JSON.stringify(raw)}`);
     sapiCache = String(raw || "").split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-  } catch (error) {
-    console.error(`[stt] probe failed: ${error.message}`);
+  } catch {
     sapiCache = [];
   }
   sapiCheckedAt = now;
@@ -52,13 +50,17 @@ async function findFfmpeg() {
   }
 }
 
-async function runPowerShell(script) {
+// Values that come from the model (culture, file paths) are passed as environment
+// variables and read inside the script, never interpolated into it: string-built
+// PowerShell is a command-injection hole the moment a value contains a quote or $(...).
+async function runPowerShell(script, vars = {}) {
   const encoded = Buffer.from(script, "utf16le").toString("base64");
   return new Promise((resolve, reject) => {
     execFile("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded], {
       timeout: 120_000,
       windowsHide: true,
       maxBuffer: 16 * 1024 * 1024,
+      env: { ...process.env, ...vars },
     }, (error, stdout, stderr) => {
       if (error) return reject(new Error(`${error.message} | stderr: ${(stderr || "").slice(0, 200)}`));
       resolve(String(stdout || "").trim());
@@ -71,9 +73,15 @@ export async function sttTranscribe({ file = "", language = "auto", output = "" 
   if (!existsSync(file)) throw new Error(`audio file not found: ${file}`);
   const cultures = await probeSapi();
   if (!cultures.length) throw new Error("no Windows SAPI recognizer available");
-  const culture = language !== "auto"
-    ? cultures.find((c) => c.toLowerCase().startsWith(language.toLowerCase())) || language
-    : cultures.includes("zh-CN") ? "zh-CN" : cultures[0];
+  // Only ever hand PowerShell a culture we actually resolved, or a well-formed BCP-47
+  // tag - never an arbitrary model-supplied string.
+  const requested = String(language || "auto");
+  const matched = requested !== "auto"
+    ? cultures.find((c) => c.toLowerCase().startsWith(requested.toLowerCase()))
+    : null;
+  const culture = matched
+    || (requested !== "auto" && /^[a-z]{2,3}(-[A-Za-z0-9]{2,8})*$/.test(requested) ? requested : null)
+    || (cultures.includes("zh-CN") ? "zh-CN" : cultures[0]);
   const hasFfmpeg = await findFfmpeg();
   const wav = output || path.join(tmpdir(), `stt-input-${Date.now()}.wav`);
   if (!hasFfmpeg) {
@@ -84,16 +92,19 @@ export async function sttTranscribe({ file = "", language = "auto", output = "" 
   }
   const script = [
     "Add-Type -AssemblyName System.Speech",
-    `$ci = [System.Globalization.CultureInfo]::GetCultureInfo("${culture}")`,
+    "$ci = [System.Globalization.CultureInfo]::GetCultureInfo($env:MODELDOCK_STT_CULTURE)",
     "$engine = New-Object System.Speech.Recognition.SpeechRecognitionEngine($ci)",
     '$grammar = New-Object System.Speech.Recognition.DictationGrammar("grammar:dictation")',
     "$engine.LoadGrammar($grammar)",
-    `$engine.SetInputToWaveFile("${wav.replace(/\\/g, "\\\\")}")`,
+    "$engine.SetInputToWaveFile($env:MODELDOCK_STT_WAV)",
     "$result = $engine.Recognize()",
     'if ($result) { Write-Output ("TEXT:" + $result.Text); Write-Output ("CONF:" + $result.Confidence) } else { Write-Output "TEXT:" }',
     "$engine.Dispose()",
   ].join("; ");
-  const out = await runPowerShell(script);
+  const out = await runPowerShell(script, {
+    MODELDOCK_STT_CULTURE: culture,
+    MODELDOCK_STT_WAV: path.resolve(wav),
+  });
   const text = (out.match(/TEXT:(.*)/) || [])[1]?.trim() || "";
   const conf = parseFloat((out.match(/CONF:(.*)/) || [])[1] || "0");
   return { text, confidence: conf, language: culture };
