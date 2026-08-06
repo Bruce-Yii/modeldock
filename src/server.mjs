@@ -146,13 +146,15 @@ function modelProviderOf(options, modelId) {
   return options.find((entry) => entry.id === modelId)?.provider || "other";
 }
 
-function statusPayload({ config, metrics, mediaStore, routeAffinity, modelSelection, autostart }) {
+function statusPayload({ config, metrics, mediaStore, routeAffinity, modelSelection, autostart, sessionChecks }) {
   const selected = modelSelection || { mainModel: config.mainModel, visionModel: config.visionModel };
   const options = modelOptions(config);
   const visionOptions = options.filter((entry) => entry.supportsVision);
   const mainTokenReady = Boolean(tokenFor(config, selected.mainModel) || (config.tokens && Object.values(config.tokens).some(Boolean)));
+  const checks = sessionChecks ? Array.from(sessionChecks.entries()).map(([session, entry]) => ({ session, at: entry.at, answer: entry.answer })) : [];
   return metrics.snapshot({
     ready: mainTokenReady,
+    sessionChecks: checks,
     config: publicConfig({ ...config, mainModel: selected.mainModel, visionModel: selected.visionModel }),
     models: {
       selected,
@@ -277,7 +279,7 @@ function upstreamBaseForModel(config, model) {
   return (config.opencodeBaseUrl || config.goBaseUrl).replace(/\/$/, "");
 }
 
-async function executeHarnessCall(call, upstreams, { services, toolRegistry = [], disclosureSet = null } = {}) {
+async function executeHarnessCall(call, upstreams, { services } = {}) {
   const args = parseArguments(call.arguments);
   if (call.name === "harness_web_search") {
     const queries = Array.isArray(args.queries) ? args.queries.filter((query) => typeof query === "string" && query.trim()) : [];
@@ -370,11 +372,7 @@ async function runHarnessToolLoop(initialResponse, initialPayload, services, sig
     for (const call of calls) {
       let output;
       try {
-        output = await executeHarnessCall(call, services.upstreams, {
-          services,
-          toolRegistry: services.activeToolRegistry,
-          disclosureSet: services.activeDisclosureSet,
-        });
+        output = await executeHarnessCall(call, services.upstreams, { services });
       } catch (error) {
         output = `Harness tool error: ${error.message}`;
       }
@@ -643,6 +641,12 @@ async function relayLiveResponses(payload, res, services, signal) {
       }
       const response = writer.finish(usage);
       rememberReasoningItems(services, response);
+      // A plain-text turn (no tool call) ends the session's reply; ask the main model
+      // whether the task is done, fire-and-forget, rate-limited per session.
+      if (mode === "text") {
+        const key = payload?.client_metadata?.session_id || payload?.client_metadata?.thread_id || "default";
+        checkSessionCompletion(services, key, payload).catch(() => {});
+      }
       return { ok: true, httpStatus: 200, bytesOut: writer.bytes, usage, rounds, response };
     }
 
@@ -650,11 +654,7 @@ async function relayLiveResponses(payload, res, services, signal) {
     let output;
     let outputImageUrl = null;
     try {
-      output = await executeHarnessCall({ ...call, arguments: argumentsText }, services.upstreams, {
-        services,
-        toolRegistry: services.activeToolRegistry,
-        disclosureSet: services.activeDisclosureSet,
-      });
+      output = await executeHarnessCall({ ...call, arguments: argumentsText }, services.upstreams, { services });
       if (call.name === "vision_inspect") {
         // Surface the inspected image in the Codex conversation so the human sees it.
         outputImageUrl = await harnessImageUrl({ ...call, arguments: argumentsText }, services);
@@ -717,23 +717,19 @@ async function relayResponses(req, res, services) {
       visionModel: modelSelection.visionModel,
       affinity: routeAffinity,
     });
-    const { key, set: disclosureSet } = disclosureFor(services, source);
-    services.setActiveSessionSeed?.(source?.client_metadata?.session_id || source?.client_metadata?.thread_id || key || null);
-    services.activeToolRegistry = Array.isArray(source?.tools) ? source.tools : [];
-    services.activeDisclosureSet = disclosureSet;
+    services.setActiveSessionSeed?.(source?.client_metadata?.session_id || source?.client_metadata?.thread_id || null);
     transformed = transformResponsesRequest(source, {
       mediaStore,
       defaultModel: modelSelection.mainModel,
       targetModel: route.model,
       directVision: route.directVision,
       profile: config.profile,
-      disclosedTools: disclosureSet,
     });
     if (config.debug?.noReasoning) {
       delete transformed.payload.reasoning;
     }
     // L2 rolling summary: compact old assistant history into a pinned summary block.
-    const summaryKey = key || "default";
+    const summaryKey = source?.client_metadata?.session_id || source?.client_metadata?.thread_id || "default";
     const existing = services.sessionSummaries?.get(summaryKey) || null;
     const existingSummary = existing?.text || null;
     // Debounce: one compaction per session per 5 minutes keeps us from re-summarizing
@@ -1226,6 +1222,96 @@ const SUMMARY_PROMPT = [
   "Rules: output ONLY the summary block above — no code, no explanations, no continued work. Keep it under 200 words. Preserve technical details, file paths, and any constraint the model decided earlier — the model must not re-derive them.",
 ].join("\n");
 
+// Call the main model for a side task (summary, completion check). Follows the same
+// profile rules as normal traffic: opencode-go sends with session-affinity headers
+// under the main session seed, other profiles send plainly.
+async function callMainModelText(services, key, messages, { maxOutputTokens = 500, timeoutMs = 120_000 } = {}) {
+  const requestModel = services.config.mainModel;
+  const endpoint = chatEndpointFor(requestModel, services.config);
+  const isOpencodeGo = services.config.profile?.id === "opencode-go";
+  const headers = {
+    Authorization: `Bearer ${tokenFor(services.config, requestModel)}`,
+    "Content-Type": "application/json",
+    ...(isOpencodeGo ? opencodeSessionHeaders({ client_metadata: { session_id: key } }) : {}),
+  };
+  if (endpoint.style === "chat") {
+    const chatBody = responsesToChatRequest({
+      model: requestModel,
+      stream: false,
+      max_output_tokens: maxOutputTokens,
+      input: messages,
+    });
+    const res = await fetch(endpoint.url, {
+      method: "POST",
+      headers,
+      // Side-task calls (summary/checker) must not burn the token budget on reasoning:
+      // DeepSeek's thinking mode would consume max_tokens before emitting any content.
+      body: JSON.stringify({ ...chatBody, thinking: { type: "disabled" } }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.choices?.[0]?.message?.content || null;
+  }
+  const res = await fetch(`${upstreamBaseForModel(services.config, requestModel)}/responses`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      model: requestModel,
+      input: messages,
+      stream: false,
+      max_output_tokens: maxOutputTokens,
+    }),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!res.ok) return null;
+  const data = await res.json();
+  return (data.output || [])
+    .filter((item) => item?.type === "message")
+    .flatMap((item) => (item.content || []).map((p) => p.text || ""))
+    .join("") || null;
+}
+
+// Lightweight completion checker: when a turn ends with a plain text message (no tool
+// calls), ask the main model whether the session's task is done, using the rolling
+// summary plus the latest messages. Rate-limited to once per session per 30s so a
+// model stuck in a tool loop cannot hammer the upstream.
+const SESSION_CHECK_INTERVAL_MS = 30_000;
+const SESSION_CHECK_TIMEOUT_MS = 60_000;
+const SESSION_CHECK_PROMPT = [
+  "You are the completion checker of a long-running coding session.",
+  "Read the session summary and the latest messages, then answer the question:",
+  "Question: Has the user's task been completed?",
+  "Answer with exactly one word: yes or no.",
+].join("\n");
+
+async function checkSessionCompletion(services, key, payload) {
+  const now = Date.now();
+  const last = services.sessionChecks?.get(key);
+  if (last && now - last.at < SESSION_CHECK_INTERVAL_MS) return;
+  const summary = services.sessionSummaries?.get(key)?.text || null;
+  const input = Array.isArray(payload.input) ? payload.input : [];
+  const recent = input
+    .filter((item) => item?.role === "user" || item?.role === "assistant")
+    .slice(-4)
+    .map((item) => {
+      const text = Array.isArray(item.content) ? item.content.map((p) => p.text || "").join(" ") : item.content || "";
+      return text ? text.slice(0, 2_000) : "";
+    })
+    .filter(Boolean)
+    .join("\n---\n");
+  const target = `SESSION SUMMARY:\n${summary || "(none yet)"}\n\nLATEST MESSAGES:\n${recent || "(none)"}`;
+  const answer = await callMainModelText(services, key, [
+    { role: "developer", content: [{ type: "input_text", text: SESSION_CHECK_PROMPT }] },
+    { role: "user", content: [{ type: "input_text", text: target }] },
+  ], { maxOutputTokens: 2000, timeoutMs: SESSION_CHECK_TIMEOUT_MS });
+  // No text back means the model could not produce a verdict — treat that as
+  // "done" rather than blocking the session end on an unresponsive side call.
+  const verdict = answer?.trim() ? answer.trim().slice(0, 40) : "yes";
+  services.sessionChecks?.set(key, { at: now, answer: verdict });
+  debugLog(services, `session check (${key}): ${verdict}`);
+}
+
 async function summarizeHistory(services, key, payload, existingSummary) {
   try {
     const input = Array.isArray(payload.input) ? payload.input : [];
@@ -1251,66 +1337,10 @@ async function summarizeHistory(services, key, payload, existingSummary) {
       ? `PREVIOUS SUMMARY:\n${existingSummary}\n\nNEW HISTORY SINCE THEN:\n${oldText}`
       : `HISTORY TO SUMMARIZE:\n${oldText}`;
 
-    const requestModel = services.config.mainModel;
-    const endpoint = chatEndpointFor(requestModel, services.config);
-    const isOpencodeGo = services.config.profile?.id === "opencode-go";
-    // Session-affinity headers only for the OpenCode Go camp, and only with the
-    // *main* session seed so the summary call lands in the same ses_ as the request
-    // it compacts (a `#summary`-suffixed seed would show up as a separate session).
-    const affinityHeaders = isOpencodeGo
-      ? opencodeSessionHeaders({ client_metadata: { session_id: key } })
-      : {};
-    let summaryText = null;
-    if (endpoint.style === "chat") {
-      const chatBody = responsesToChatRequest({
-        model: requestModel,
-        stream: false,
-        input: [
-          { role: "developer", content: [{ type: "input_text", text: SUMMARY_PROMPT }] },
-          { role: "user", content: [{ type: "input_text", text: summarizeTarget }] },
-        ],
-      });
-      const res = await fetch(endpoint.url, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${tokenFor(services.config, requestModel)}`,
-          "Content-Type": "application/json",
-          ...affinityHeaders,
-        },
-        body: JSON.stringify(chatBody),
-        signal: AbortSignal.timeout(120_000),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        summaryText = data.choices?.[0]?.message?.content || null;
-      }
-    } else {
-      const res = await fetch(`${upstreamBaseForModel(services.config, requestModel)}/responses`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${tokenFor(services.config, requestModel)}`,
-          "Content-Type": "application/json",
-          ...affinityHeaders,
-        },
-        body: JSON.stringify({
-          model: requestModel,
-          input: [
-            { role: "developer", content: [{ type: "input_text", text: SUMMARY_PROMPT }] },
-            { role: "user", content: [{ type: "input_text", text: summarizeTarget }] },
-          ],
-          stream: false,
-          max_output_tokens: 500,
-        }),
-        signal: AbortSignal.timeout(120_000),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        summaryText = (data.output || [])
-          .filter((item) => item?.type === "message")
-          .flatMap((item) => (item.content || []).map((p) => p.text || ""))
-          .join("") || null;
-      }
-    }
+    const summaryText = await callMainModelText(services, key, [
+      { role: "developer", content: [{ type: "input_text", text: SUMMARY_PROMPT }] },
+      { role: "user", content: [{ type: "input_text", text: summarizeTarget }] },
+    ], { maxOutputTokens: 500, timeoutMs: 120_000 });
     if (!summaryText) return null;
 
     // Replace the summarized old assistants with the summary block, keep the recent
@@ -1350,6 +1380,9 @@ export function createServices(config = loadConfig()) {
   // L2: rolling per-session summaries (session_id -> { text, at }). Grows monotonically
   // with the conversation; each compaction folds the new delta into the old summary.
   const sessionSummaries = new Map();
+  // Session completion checker state: session_id -> { at, answer }. Fire-and-forget
+  // model calls asked at most once per session per 30s.
+  const sessionChecks = new Map();
   // Vision calls carry the same opencode session identity as the main-model turn that
   // triggered them (set per request by the relay), so the dashboard groups them under
   // one session instead of a session-less row.
@@ -1369,7 +1402,6 @@ export function createServices(config = loadConfig()) {
   const autostart = createAutostart();
   autostart.refresh().catch(() => {});
   const routeAffinity = new RouteAffinity();
-  const toolDisclosure = new Map();
   // Reasoning cache: call_id -> the reasoning text the model produced before that tool
   // call. Codex drops reasoning from its re-posted history, but Go's chat camp (thinking
   // mode) demands reasoning_content on every assistant.tool_calls turn, so the relay
@@ -1394,21 +1426,7 @@ export function createServices(config = loadConfig()) {
     ? setInterval(refreshModelCatalog, refreshIntervalHours * 3_600_000)
     : null;
   if (modelRefreshTimer) modelRefreshTimer.unref();
-  return { config: mutableConfig, runtime, metrics, mediaStore, upstreams, configSwitcher, autostart, routeAffinity, modelSelection, toolDisclosure, reasoningCache, rememberReasoning, reasoningFor, sessionSummaries, refreshModelCatalog, modelRefreshTimer, setActiveSessionSeed: (seed) => { activeSessionSeed = seed; } };
-}
-
-function disclosureFor(services, payload) {
-  const key = payload?.client_metadata?.session_id || payload?.client_metadata?.thread_id || "default";
-  let set = services.toolDisclosure.get(key);
-  if (!set) {
-    set = new Set();
-    services.toolDisclosure.set(key, set);
-    if (services.toolDisclosure.size > 64) {
-      const oldest = services.toolDisclosure.keys().next().value;
-      services.toolDisclosure.delete(oldest);
-    }
-  }
-  return { key, set };
+  return { config: mutableConfig, runtime, metrics, mediaStore, upstreams, configSwitcher, autostart, routeAffinity, modelSelection, reasoningCache, rememberReasoning, reasoningFor, sessionSummaries, sessionChecks, refreshModelCatalog, modelRefreshTimer, setActiveSessionSeed: (seed) => { activeSessionSeed = seed; } };
 }
 
 export function createApp(services = createServices()) {
