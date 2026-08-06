@@ -61,17 +61,12 @@
               <select id="vision-model-select" class="model-select" aria-label="Vision model"></select>
             </div>
           </div>
-          <div class="speech-row">
-            <span>TTS</span>
-            <div class="speech-cell">
-              <strong id="speech-tts-status">checking…</strong>
-              <button id="speech-tts-install" type="button" class="mini-button" hidden>Install edge-tts</button>
-            </div>
-          </div>
-          <div class="speech-row">
-            <span>STT</span>
-            <div class="speech-cell">
-              <strong id="speech-stt-status">checking…</strong>
+          <div>
+            <span>TTS · STT</span>
+            <div class="select-pair speech-pair">
+              <strong id="speech-tts-status" class="speech-status">checking…</strong>
+              <strong id="speech-stt-status" class="speech-status">checking…</strong>
+              <button id="speech-tts-install" type="button" class="mini-button" hidden>Install</button>
             </div>
           </div>
           <div class="debug-default">

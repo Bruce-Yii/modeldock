@@ -153,23 +153,26 @@ async function renderSpeech(data) {
   const sttStatus = $("speech-stt-status");
   const installBtn = $("speech-tts-install");
   if (!ttsStatus || !sttStatus) return;
+  const green = "var(--green)";
+  const red = "#ff7b7b";
   try {
     const res = await fetch("/api/speech", { headers: { accept: "application/json" } });
     const body = await res.json();
     const tts = body.tts || {};
     const stt = body.stt || {};
-    ttsStatus.textContent = tts.installed ? "TTS: msedge-tts" : "TTS: not installed";
-    ttsStatus.style.color = tts.installed ? "var(--green)" : "var(--amber)";
-    const sttText = stt.available
-      ? `STT: SAPI ${stt.cultures.join(" / ")}${stt.ffmpeg ? "" : " (needs ffmpeg)"}`
-      : "STT: not available (Windows only)";
-    sttStatus.textContent = sttText;
-    sttStatus.style.color = stt.available ? "var(--green)" : "var(--muted)";
+    ttsStatus.textContent = tts.installed ? "TTS On" : "TTS Off";
+    ttsStatus.style.color = tts.installed ? green : red;
+    sttStatus.textContent = stt.available
+      ? `STT On · ${stt.cultures.join(" / ")}`
+      : "STT Off";
+    sttStatus.style.color = stt.available ? green : red;
     installBtn.hidden = tts.installed;
     installBtn.disabled = false;
   } catch {
-    ttsStatus.textContent = "TTS: unavailable";
-    sttStatus.textContent = "STT: unavailable";
+    ttsStatus.textContent = "TTS Off";
+    ttsStatus.style.color = red;
+    sttStatus.textContent = "STT Off";
+    sttStatus.style.color = red;
   }
 }
 
@@ -465,16 +468,16 @@ if (ttsInstallBtn) {
       const res = await fetch("/api/speech/install", { method: "POST", headers: { accept: "application/json" } });
       const body = await res.json();
       if (res.ok && body.installed) {
-        $("speech-tts-status").textContent = "TTS: msedge-tts";
+        $("speech-tts-status").textContent = "TTS On";
         $("speech-tts-status").style.color = "var(--green)";
         ttsInstallBtn.hidden = true;
       } else {
-        $("speech-tts-status").textContent = `TTS: install failed (${body.error?.message || "unknown"})`;
+        $("speech-tts-status").textContent = `TTS Off (${body.error?.message || "install failed"})`;
       }
     } catch {
-      $("speech-tts-status").textContent = "TTS: install failed";
+      $("speech-tts-status").textContent = "TTS Off";
     }
-    ttsInstallBtn.textContent = "Install edge-tts";
+    ttsInstallBtn.textContent = "Install";
     ttsInstallBtn.disabled = false;
   });
 }
