@@ -119,9 +119,12 @@ test("mock install: download -> install -> run", async (t) => {
 
   // 2. Temp install dir (never touches the real ~/.modeldock) + a free app port.
   const installDir = mkdtempSync(path.join(os.tmpdir(), "modeldock-mock-install-"));
+  // Use the port the kernel just confirmed free, not that port + 1: +1 was never
+  // verified and collides with whatever else holds it (macOS hands out ephemeral
+  // ports randomly, so a neighbour being taken is common there).
   const probe = createServer();
-  const appPort = (await listen(probe)) + 1;
-  probe.close();
+  const appPort = await listen(probe);
+  await new Promise((resolve) => probe.close(resolve));
   // Cleanup order matters: stop the background gateway first (it holds the install
   // dir open), then remove the dir.
   t.after(() => killByPort(appPort));
@@ -164,9 +167,15 @@ test("mock install: download -> install -> run", async (t) => {
   // The launcher runs node in the background, so a startup crash only shows up in the
   // log it writes; surface it here or the failure is just "did not come up".
   if (!healthz) {
-    const logFile = path.join(installDir, "modeldock.log");
-    const log = existsSync(logFile) ? readFileSync(logFile, "utf8") : "(no modeldock.log written)";
-    assert.fail(`gateway should come up after install\n--- installer stdout ---\n${out}\n--- installer stderr ---\n${err}\n--- modeldock.log ---\n${log}`);
+    // Windows writes stdout and stderr separately (Start-Process cannot send both to
+    // one file); POSIX appends both to modeldock.log.
+    const logs = ["modeldock.log", "modeldock.err.log"]
+      .map((name) => {
+        const file = path.join(installDir, name);
+        return `--- ${name} ---\n${existsSync(file) ? readFileSync(file, "utf8") || "(empty)" : "(not written)"}`;
+      })
+      .join("\n");
+    assert.fail(`gateway should come up after install\n--- installer stdout ---\n${out}\n--- installer stderr ---\n${err}\n${logs}`);
   }
   // /healthz answers 503 until a token is configured - that still proves it runs.
   assert.ok([200, 503].includes(healthz.status), `unexpected /healthz status ${healthz.status}`);

@@ -63,7 +63,8 @@ $root = Split-Path -Parent $PSScriptRoot
 $bundle = Join-Path $root "dist\modeldock.mjs"
 $server = Join-Path $root "src\server.mjs"
 if (Test-Path -LiteralPath $bundle) { $server = $bundle }
-Start-Process -FilePath "node" -ArgumentList "`"$server`"" -WorkingDirectory $root -WindowStyle Hidden
+$log = Join-Path $root "modeldock.log"
+Start-Process -FilePath "cmd.exe" -ArgumentList "/c", "node `"$server`" >> `"$log`" 2>&1" -WorkingDirectory $root -WindowStyle Hidden
 '@ | Out-File -FilePath $launcher -Encoding ascii
 
 # 3. Start (unless already running) and open the dashboard
