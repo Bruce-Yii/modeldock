@@ -785,8 +785,11 @@ async function relayResponses(req, res, services) {
       const summaryKey = source?.client_metadata?.session_id || source?.client_metadata?.thread_id || "default";
       const existing = services.sessionSummaries?.get(summaryKey) || null;
       const existingSummary = existing?.text || null;
-      // Debounce: one compaction per session per 5 minutes keeps us from re-summarizing
-      // on every request while a long turn is still generating.
+      // Always apply the stored summary on every request (local, no API call) so the
+      // upstream payload stays bounded even between fresh summary generations.
+      if (existingSummary) applySummaryToPayload(transformed.payload, existingSummary);
+      // Debounce: one fresh summary per session per 5 minutes keeps us from calling the
+      // model to re-summarize on every request while a long turn is still generating.
       const SUMMARY_DEBOUNCE_MS = 5 * 60_000;
       if (!existing || Date.now() - existing.at > SUMMARY_DEBOUNCE_MS) {
         const newSummary = await summarizeHistory(services, summaryKey, transformed.payload, existingSummary);
@@ -1378,6 +1381,56 @@ function checkSessionCompletion(services, key, payload, currentTurnText = "") {
   };
 }
 
+// Local-only: replace the old assistant history (outside the keep window) with the
+// given summary block. No API call — runs on every request so the upstream always
+// sees a bounded payload, not just right after a fresh summary was generated.
+function applySummaryToPayload(payload, summaryText) {
+  const input = Array.isArray(payload.input) ? payload.input : [];
+  const assistants = [];
+  for (const item of input) {
+    if (item?.role !== "assistant") continue;
+    const text = Array.isArray(item.content) ? item.content.map((p) => p.text || "").join(" ") : item.content || "";
+    if (text) assistants.push(text);
+  }
+  const total = assistants.reduce((acc, t) => acc + t.length, 0);
+  if (total <= SUMMARY_TRIGGER_BYTES) return false;
+  // Window = the last N complete user turns; tool-loop sessions (<N turns) fall back
+  // to a flat item window so a long tool chain never dodges compaction.
+  let turnStart = -1;
+  let turns = 0;
+  for (let i = input.length - 1; i >= 0; i--) {
+    if (input[i]?.role !== "user") continue;
+    turns += 1;
+    if (turns === SUMMARY_WINDOW_TURNS) { turnStart = i; break; }
+  }
+  const FLAT_WINDOW_ITEMS = 100;
+  const keepCount = turnStart >= 0
+    ? input.slice(turnStart).filter((item) => {
+        if (item?.role !== "assistant") return false;
+        const text = Array.isArray(item.content) ? item.content.map((p) => p.text || "").join(" ") : item.content || "";
+        return Boolean(text);
+      }).length
+    : Math.min(FLAT_WINDOW_ITEMS, assistants.length);
+  if (keepCount >= assistants.length) return false;
+  const oldCount = assistants.length - keepCount;
+  let removed = 0;
+  const newInput = input.filter((item) => {
+    if (item?.role !== "assistant") return true;
+    const text = Array.isArray(item.content) ? item.content.map((p) => p.text || "").join(" ") : item.content || "";
+    if (text && removed < oldCount) { removed += 1; return false; }
+    return true;
+  });
+  const insertIdx = newInput.findIndex((item) => item?.role === "user");
+  const summaryItem = {
+    role: "user",
+    content: [{ type: "input_text", text: `[SESSION SUMMARY — earlier work, keep in mind]\n${summaryText}\n[end summary]` }],
+  };
+  payload.input = insertIdx >= 0
+    ? [...newInput.slice(0, insertIdx), summaryItem, ...newInput.slice(insertIdx)]
+    : [summaryItem, ...newInput];
+  return true;
+}
+
 async function summarizeHistory(services, key, payload, existingSummary) {
   try {
     const input = Array.isArray(payload.input) ? payload.input : [];
@@ -1388,12 +1441,8 @@ async function summarizeHistory(services, key, payload, existingSummary) {
       if (text) assistants.push(text);
     }
     const total = assistants.reduce((acc, t) => acc + t.length, 0);
-    // Window = the last N complete user turns (a "turn" is one user message and every
-    // assistant item after it), not a flat item count: one turn can span many small
-    // assistant items, so a 40-item window covered only ~2 turns of real work.
-    // Tool-loop sessions (one instruction -> dozens of shell_command rounds) rarely
-    // accumulate 10 user turns, so fall back to a flat item window when there are
-    // fewer turns than the target: never let a long session dodge compaction.
+    // Window = the last N complete user turns; tool-loop sessions (<N turns) fall
+    // back to a flat item window so a long tool chain never dodges compaction.
     let turnStart = -1;
     let turns = 0;
     for (let i = input.length - 1; i >= 0; i--) {
@@ -1409,7 +1458,6 @@ async function summarizeHistory(services, key, payload, existingSummary) {
           return Boolean(text);
         }).length
       : Math.min(FLAT_WINDOW_ITEMS, assistants.length);
-    // Nothing outside the window to compact, or history too small to bother.
     if (keepCount >= assistants.length || total <= SUMMARY_TRIGGER_BYTES) return null;
     const oldCount = assistants.length - keepCount;
     let oldText = assistants.slice(0, oldCount).join("\n\n");
@@ -1419,7 +1467,6 @@ async function summarizeHistory(services, key, payload, existingSummary) {
     if (oldText.length > SUMMARY_INPUT_LIMIT) {
       oldText = `${oldText.slice(0, SUMMARY_INPUT_LIMIT * 0.6)}\n...[truncated ${oldText.length} chars]...\n${oldText.slice(-SUMMARY_INPUT_LIMIT * 0.4)}`;
     }
-    const recentText = assistants.slice(-keepCount).join("\n\n");
     const summarizeTarget = existingSummary
       ? `PREVIOUS SUMMARY:\n${existingSummary}\n\nNEW HISTORY SINCE THEN:\n${oldText}`
       : `HISTORY TO SUMMARIZE:\n${oldText}`;
@@ -1429,24 +1476,7 @@ async function summarizeHistory(services, key, payload, existingSummary) {
       { role: "user", content: [{ type: "input_text", text: summarizeTarget }] },
     ], { maxOutputTokens: 500, timeoutMs: 120_000 });
     if (!summaryText) return null;
-
-    // Replace the summarized old assistants with the summary block, keep the recent
-    // window verbatim. Summary goes right after the leading developer/L1 block.
-    let removed = 0;
-    const newInput = input.filter((item) => {
-      if (item?.role !== "assistant") return true;
-      const text = Array.isArray(item.content) ? item.content.map((p) => p.text || "").join(" ") : item.content || "";
-      if (text && removed < oldCount) { removed += 1; return false; }
-      return true;
-    });
-    const insertIdx = newInput.findIndex((item) => item?.role === "user");
-    const summaryItem = {
-      role: "user",
-      content: [{ type: "input_text", text: `[SESSION SUMMARY — earlier work, keep in mind]\n${summaryText}\n[end summary]` }],
-    };
-    payload.input = insertIdx >= 0
-      ? [...newInput.slice(0, insertIdx), summaryItem, ...newInput.slice(insertIdx)]
-      : [summaryItem, ...newInput];
+    applySummaryToPayload(payload, summaryText);
     return summaryText;
   } catch (error) {
     debugLog(services, `summary failed: ${error.message}`);
