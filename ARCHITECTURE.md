@@ -5,7 +5,7 @@ ModelDock is, how a request flows through the system, what each module owns, and
 pieces are wired together the way they are. It complements the user-facing README, which
 exists only for installing and running ModelDock.
 
-> **Verified against:** commit `2f90048` (2026-08-04), `npm test` = 160 passing.
+> **Verified against:** commit `2b80eb9` (2026-08-05), `npm test` = 160 passing.
 > When you change routing, transform, profiles, or endpoints, re-verify the affected
 > section and bump this line. The codebase moves faster than prose — an unverified
 > architecture doc is worse than none.
@@ -85,7 +85,9 @@ Codex ──POST /v1/responses──> ModelDock gate (Express, loopback only)
 | `src/live-responses.mjs` | Streaming relay path: `LiveResponsesWriter` + SSE parser |
 | `src/chat-bridge.mjs` | Chat Completions bridge for the OpenCode camp: Responses⇄chat payload conversion and chat SSE→Responses event adaptation |
 | `src/mcp.mjs` | MCP server exposing the same web-search and vision tools over the `/mcp` endpoint |
-| `src/config.mjs` | Load environment configuration and (for the Codex bridge) the OpenCode Go API token |
+| `src/config.mjs` | Resolve + load the user `.env` (dev cwd or installed `~/.modeldock`), comment-preserving write-back for the settings API, and (for the Codex bridge) the OpenCode Go API token |
+| `src/autostart.mjs` | Cross-platform start-at-login: HKCU Run key (Windows) / per-user LaunchAgent (macOS), launched via `scripts/start-hidden.*` |
+| `src/static-inline.mjs` | Placeholder (null) in a git checkout; the release build replaces it with inlined frontend assets for single-file distribution |
 | `src/config-switcher.mjs` | Back up / rewrite / restore Codex's `config.toml` to point at ModelDock, with drift detection |
 | `src/metrics.mjs` | Per-kind request metrics, usage extraction, event emitter feeding the dashboard |
 | `src/media-store.mjs` | In-memory cache mapping `img_<hash>` refs to image blobs (data-URL or HTTPS) for the vision harness |
@@ -382,10 +384,25 @@ dashboard shows live counters.
 
 `config.mjs`:
 
-- Env-driven (`process.loadEnvFile`), validates hosts/ports/tokens.
+- **User config resolution** (`envFileFor`): `MODELDOCK_ENV_FILE` (explicit path) >
+  `MODELDOCK_CONFIG_DIR/.env` > `~/.modeldock/.env` when it exists (installed layout) >
+  `<cwd>/.env` (dev layout). When none exists yet, first-run saves land in
+  `~/.modeldock/.env` so they are cwd-independent. The file is parsed and applied to
+  `process.env` without overriding real environment variables; the resolved path is
+  recorded on the config (`config.envFile`) and shown in the settings dialog.
+- **Write-back** (`writeEnvFile`): the settings API merges key updates into the user
+  `.env` line-by-line, preserving comments, blank lines, and unrelated keys.
+- Validates hosts/ports/tokens.
 - For opencode-go: discovers the token from `OPENCODE_GO_TOKEN`, falling back to reading
   `experimental_bearer_token` out of the most recent Codex `config.toml` backup if the env
   var is unset.
+
+`autostart.mjs` owns start-at-login: on Windows a per-user `HKCU...\Run` value invoking
+`scripts/start-hidden.ps1` (hidden console, no admin rights); on macOS a per-user
+LaunchAgent plist running `scripts/start-hidden.sh`. Both prefer the built bundle
+(`dist/modeldock.mjs`) and fall back to `src/server.mjs` in a git checkout. The dashboard
+toggle drives `POST /api/autostart`; state is reported in `/api/status` and
+`/api/settings`.
 
 `config-switcher.mjs` is the Codex piece: `/api/config/enable` backs up the current
 `config.toml`, writes a managed block that sets `model`, `model_provider = modeldock_go`,
@@ -408,7 +425,9 @@ the file drifted). Drifted === a hash+signature check that refuses ambiguous res
 | POST | `/api/config/restart-ack` | Clear "restart required" sticky state |
 | GET / POST | `/api/models` | Read / change selected main+vision model + provider |
 | GET | `/api/profiles` | List available provider profiles |
-| POST | `/api/debug` | Toggle verbose gateway debug logging on/off |
+| POST | `/api/debug` | Toggle verbose gateway debug logging on/off (API-only; no dashboard switch) |
+| POST | `/api/autostart` | Enable/disable start-at-login (dashboard toggle) |
+| GET / POST | `/api/settings` | Read settings summary / save provider tokens into the user `.env` (applied live) |
 | GET | `/api/events` | SSE stream pushing a status snapshot |
 | POST | `/mcp` (Streamable HTTP) | MCP tools: `web_search_exa`, `vision_inspect` |
 | GET | `/` (+ `*.html`) | Static dashboard from `public/` (no cache) |
@@ -425,13 +444,15 @@ Streaming requests (`stream: true`) always use the **live** relay: the client ge
 incremental SSE stream; text deltas pass through, and harness tool results are injected
 inline with a 30s keepalive while the upstream thinks. Non-streaming requests
 (`stream: false`) share the same forward path with a JSON accept header and the harness
-loop applied. There is no buffer toggle; the dashboard `DEBUG` switch toggles verbose
-gateway logging (`MODELDOCK_DEBUG` at startup, `/api/debug` at runtime).
+loop applied. There is no buffer toggle; verbose gateway logging is controlled by
+`MODELDOCK_DEBUG` at startup or `POST /api/debug` at runtime (the former dashboard
+debug switch is now the autostart toggle).
 
 ## Config env vars (subset)
 
 | Var | Default | Purpose |
 | --- | --- | --- |
+| `MODELDOCK_ENV_FILE` / `MODELDOCK_CONFIG_DIR` | — | Override the user `.env` location (default: `~/.modeldock/.env` when installed, `<cwd>/.env` in dev) |
 | `MODELDOCK_PROFILE` | `opencode-go` | Which profile drives tool policy + catalog |
 | `MODELDOCK_UPSTREAM_BASE_URL` | `https://opencode.ai/zen/go/v1` | Override the OpenCode Go camp base URL; zen-free camp is fixed |
 | `MODELDOCK_DEEPSEEK_BASE_URL` | `https://api.deepseek.com` | Override the DeepSeek camp base URL |
@@ -445,7 +466,7 @@ gateway logging (`MODELDOCK_DEBUG` at startup, `/api/debug` at runtime).
 
 ## Tests
 
-Tests live in `src/*.test.mjs` and `test/`; `npm test` runs 161 tests, including the
+Tests live in `src/*.test.mjs` and `test/`; `npm test` runs 160 tests, including the
 chat-bridge conversion suite and the cross-provider DeepSeek routing suite. Note that
 `src/profiles.test.mjs` is *not* referenced in the
 `npm test` script (dead), and `test/*.test.mjs` are older duplicates of some `src`

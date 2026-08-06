@@ -48,9 +48,16 @@ Run `node -v` in a terminal:
 - Shows `v22.x` or newer → skip
 - Not installed or older → download the **LTS version** from <https://nodejs.org>, install, then reopen your terminal
 
-**Step 2: Add your API token (the .env file)**
+**Step 2: Add your API token**
 
-In the **project root folder** (the same folder as `package.json`):
+Easiest way: skip ahead to Step 3 and launch first — when no token is configured, the
+dashboard opens a small **Settings** dialog automatically. Paste your token there, hit
+Save, and it takes effect immediately (stored in your local config file).
+
+Get the token by signing in at <https://opencode.ai/auth> (the API key for your
+provider, same as with any third-party API).
+
+Prefer doing it by hand? In the **project root folder** (the same folder as `package.json`):
 
 1. Find the `.env.example` file
 2. Copy it and rename the copy to `.env`
@@ -59,8 +66,6 @@ In the **project root folder** (the same folder as `package.json`):
    ```
    OPENCODE_GO_TOKEN=your-token
    ```
-
-   Get the token by signing in at <https://opencode.ai/auth> (the API key for your provider, same as with any third-party API).
 
    (`.env` stays local — it's never uploaded or committed to GitHub.)
 
@@ -76,6 +81,9 @@ On Windows, you can also run `powershell -ExecutionPolicy Bypass -File scripts/c
 2. Flip the switch on the page
 3. **Fully quit and restart Codex**
 4. Pick the ModelDock model in Codex — done
+
+Tip: the dashboard also has a **Start at login** toggle (Windows/macOS) so ModelDock
+launches in the background automatically — no terminal window needed.
 
 **Option B: Let your AI do it**
 
@@ -137,9 +145,13 @@ ModelDock 是一个本地小工具，两件本事：
 - 显示 `v22.x` 或更高 → 跳过
 - 没有或版本低于 22 → 到 <https://nodejs.org> 下载安装 **LTS 版本**，装完重开终端
 
-**第 2 步：填 API token（.env 文件）**
+**第 2 步：填 API token**
 
-在**项目根目录**（和 `package.json` 同一个文件夹）里：
+最省事的做法：直接跳到第 3 步先启动 —— 没配置 token 时，仪表盘会自动弹出一个小小的**设置**窗口，把 token 粘贴进去点保存，立即生效（保存在本地配置文件里）。
+
+Token 从 <https://opencode.ai/auth> 登录获取（你的 API key，与其他第三方 API 的接入方式相同）。
+
+想手动配置的话，在**项目根目录**（和 `package.json` 同一个文件夹）里：
 
 1. 找到 `.env.example` 文件
 2. 复制一份，重命名为 `.env`
@@ -148,8 +160,6 @@ ModelDock 是一个本地小工具，两件本事：
    ```
    OPENCODE_GO_TOKEN=你的token
    ```
-
-   Token 从 <https://opencode.ai/auth> 登录获取（你的 API key，与其他第三方 API 的接入方式相同）。
 
    （`.env` 只在本地生效，不会上传或被提交到 GitHub。）
 
@@ -165,6 +175,8 @@ Windows 用户也可以运行 `powershell -ExecutionPolicy Bypass -File scripts/
 2. 打开页面上的开关
 3. **完全退出并重启 Codex**
 4. Codex 里选择 ModelDock 模型 —— 完成
+
+小提示：仪表盘上还有一个**开机自启**开关（Windows/macOS），打开后 ModelDock 会在登录时自动后台运行，不需要终端窗口。
 
 **方法二：让 AI 帮你装**
 
@@ -226,9 +238,13 @@ ModelDock はローカルで動く小さなヘルパーです。できること�
 - `v22.x` 以上が表示される → 次のステップへ
 - 未インストールまたは古い場合 → <https://nodejs.org> から **LTS版** をダウンロードしてインストールし、ターミナルを開き直す
 
-**ステップ 2: API トークンを設定（.env ファイル）**
+**ステップ 2: API トークンを設定**
 
-**プロジェクトのルートフォルダ**（`package.json` と同じ場所）で:
+いちばん簡単な方法: 先にステップ 3 へ進んで起動してください — トークンが未設定の場合、ダッシュボードに小さな**設定**ダイアログが自動で開きます。トークンを貼り付けて保存すれば即時反映されます（ローカルの設定ファイルに保存）。
+
+トークンは <https://opencode.ai/auth> にログインして取得します（ご利用のプロバイダーの API キー。他のサードパーティ API と同じ方式）。
+
+手動で設定する場合は、**プロジェクトのルートフォルダ**（`package.json` と同じ場所）で:
 
 1. `.env.example` ファイルを探す
 2. コピーして、名前を `.env` に変更
@@ -237,8 +253,6 @@ ModelDock はローカルで動く小さなヘルパーです。できること�
    ```
    OPENCODE_GO_TOKEN=あなたのトークン
    ```
-
-   トークンは <https://opencode.ai/auth> にログインして取得します（ご利用のプロバイダーの API キー。他のサードパーティ API と同じ方式）。
 
    （`.env` はローカルのみで有効。アップロードや GitHub へのコミットはされません。）
 
@@ -254,6 +268,8 @@ Windows では `powershell -ExecutionPolicy Bypass -File scripts/create-shortcut
 2. ページ上のスイッチをオンにする
 3. **Codex を完全に終了して再起動**
 4. Codex で ModelDock モデルを選択 — 完了
+
+ヒント: ダッシュボードには**ログイン時に自動起動**のトグル（Windows/macOS）もあります。オンにすると ModelDock がバックグラウンドで自動起動し、ターミナルは不要になります。
 
 **方法 B: AI にやってもらう**
 
