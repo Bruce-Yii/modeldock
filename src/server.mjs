@@ -1391,6 +1391,9 @@ async function summarizeHistory(services, key, payload, existingSummary) {
     // Window = the last N complete user turns (a "turn" is one user message and every
     // assistant item after it), not a flat item count: one turn can span many small
     // assistant items, so a 40-item window covered only ~2 turns of real work.
+    // Tool-loop sessions (one instruction -> dozens of shell_command rounds) rarely
+    // accumulate 10 user turns, so fall back to a flat item window when there are
+    // fewer turns than the target: never let a long session dodge compaction.
     let turnStart = -1;
     let turns = 0;
     for (let i = input.length - 1; i >= 0; i--) {
@@ -1398,12 +1401,14 @@ async function summarizeHistory(services, key, payload, existingSummary) {
       turns += 1;
       if (turns === SUMMARY_WINDOW_TURNS) { turnStart = i; break; }
     }
-    if (turnStart < 0) return null;
-    const keepCount = input.slice(turnStart).filter((item) => {
-      if (item?.role !== "assistant") return false;
-      const text = Array.isArray(item.content) ? item.content.map((p) => p.text || "").join(" ") : item.content || "";
-      return Boolean(text);
-    }).length;
+    const FLAT_WINDOW_ITEMS = 100;
+    const keepCount = turnStart >= 0
+      ? input.slice(turnStart).filter((item) => {
+          if (item?.role !== "assistant") return false;
+          const text = Array.isArray(item.content) ? item.content.map((p) => p.text || "").join(" ") : item.content || "";
+          return Boolean(text);
+        }).length
+      : Math.min(FLAT_WINDOW_ITEMS, assistants.length);
     // Nothing outside the window to compact, or history too small to bother.
     if (keepCount >= assistants.length || total <= SUMMARY_TRIGGER_BYTES) return null;
     const oldCount = assistants.length - keepCount;
