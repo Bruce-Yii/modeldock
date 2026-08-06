@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+      - name: Bundle boot smoke test
+        run: |
+          MODELDOCK_PORT=4979 MODELDOCK_MODEL_PROBE_ENABLED=0 node dist/modeldock.mjs &
+          SERVER_PID=$!
+          for i in $(seq 1 20); do
+            if curl -sf -o /dev/null http://127.0.0.1:4979/; then break; fi
+            sleep 0.5
+          done
+          curl -sf -o /dev/null http://127.0.0.1:4979/ || { kill $SERVER_PID; exit 1; }
+          curl -sf -o /dev/null http://127.0.0.1:4979/app.js || { kill $SERVER_PID; exit 1; }
+          kill $SERVER_PID
