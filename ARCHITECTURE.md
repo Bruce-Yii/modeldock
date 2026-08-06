@@ -5,7 +5,7 @@ ModelDock is, how a request flows through the system, what each module owns, and
 pieces are wired together the way they are. It complements the user-facing README, which
 exists only for installing and running ModelDock.
 
-> **Verified against:** commit `2b80eb9` (2026-08-05), `npm test` = 160 passing.
+> **Verified against:** commit `058784b` (2026-08-06), `npm test` = 176 passing.
 > When you change routing, transform, profiles, or endpoints, re-verify the affected
 > section and bump this line. The codebase moves faster than prose — an unverified
 > architecture doc is worse than none.
@@ -88,7 +88,11 @@ Codex ──POST /v1/responses──> ModelDock gate (Express, loopback only)
 | `src/config.mjs` | Resolve + load the user `.env` (dev cwd or installed `~/.modeldock`), comment-preserving write-back for the settings API, and (for the Codex bridge) the OpenCode Go API token |
 | `src/autostart.mjs` | Cross-platform start-at-login: HKCU Run key (Windows) / per-user LaunchAgent (macOS), launched via `scripts/start-hidden.*` |
 | `src/static-inline.mjs` | Placeholder (null) in a git checkout; the release build replaces it with inlined frontend assets for single-file distribution |
-| `src/update.mjs` | Startup release check against GitHub (MODELDOCK_UPDATE_REPO) + one-click apply: `git pull --ff-only` in a checkout, download the release bundle otherwise, then relaunch via `scripts/start-hidden.*` |
+| `src/update.mjs` | Startup release check against GitHub (MODELDOCK_UPDATE_REPO) + one-click apply: `git pull --ff-only` in a checkout, SHA256-verified bundle download otherwise, then relaunch via `scripts/start-hidden.*` |
+| `src/tts.mjs` | `speak` tool: msedge-tts (pure npm, installed on demand) synthesizes speech to a file and returns its path |
+| `src/stt.mjs` | `hear` tool: Windows SAPI dictation (System.Speech) transcribes an audio file; ffmpeg converts to 16kHz mono PCM first. Windows only - other platforms report `available: false` |
+| `src/node-repl-tools.mjs` | Verbatim `mcp__node_repl__*` tool schemas, injected by the transform when the session payload does not already carry them |
+| `src/responses-sse.mjs` | Shared SSE parsing helpers for the relay paths |
 | `src/config-switcher.mjs` | Back up / rewrite / restore Codex's `config.toml` to point at ModelDock, with drift detection |
 | `src/metrics.mjs` | Per-kind request metrics, usage extraction, event emitter feeding the dashboard |
 | `src/media-store.mjs` | In-memory cache mapping `img_<hash>` refs to image blobs (data-URL or HTTPS) for the vision harness |
@@ -196,8 +200,10 @@ Tools:
 
 | Tool | Execution | Notes |
 | --- | --- | --- |
-| `harness_web_search` | `upstreams.searchWeb` → Exa MCP tool `web_search_exa` | Multiple queries supported; per-query site/after filtering |
+| `harness_web_search` | `upstreams.searchWeb` → Exa MCP tool `web_search_exa` | Multiple queries supported; per-query site/after filtering. Resident on opencode-go: Codex declares only `tool_search`, never `web_search`, so a blocked-count condition would never fire and the model would see no search tool at all. The deepseek-official profile forwards hosted `web_search` natively and gets no local search |
 | `vision_inspect` | `upstreams.inspectVision` → vision model | Reads image from `media-store` or a local path, calls the configured vision model with fallback; resident on the main-model path; calls removed from the tools after use |
+| `speak` | `tts.mjs` → msedge-tts | Synthesizes text to an audio file and returns its path. The package is not a dependency: it is installed on demand from the dashboard tile, and the tool reports "not installed" until then |
+| `hear` | `stt.mjs` → Windows SAPI | Transcribes a local audio file (ffmpeg converts to 16kHz mono PCM first). Windows only |
 
 Harness tool names are driven by `profile.harnessToolNames`. Loop round limit = 4; a
 normal turn generally completes in 1-2 rounds (model emits text first), so this is a
@@ -209,6 +215,20 @@ There is no allowlist and no progressive disclosure: the chat bridge accepts all
 schemas and the deepseek-official API accepts every function-typed tool natively, so
 client tools are forwarded as-is by default. The earlier `harness_tool_search` +
 per-session disclosure machinery was removed (2026-08-04).
+
+Two shapes are rewritten rather than forwarded verbatim:
+
+- **`tool_search` is bridged to a function tool.** Codex's hosted `{type: "tool_search"}`
+  schema is rejected by the Go camp (400), but Codex executes the *call* client-side
+  regardless of the declared shape, so `transform.mjs` re-presents it as a same-named
+  function tool with a `query` parameter. Lazy MCP-tool loading therefore keeps working
+  for third-party models. Driven by `profile.toolSearchAsFunction`.
+- **`mcp__` namespaces are flattened.** Codex nests MCP tools under a
+  `namespace: mcp__<server>` wrapper whose children carry bare names (`js`). Text models
+  read the child name and call `js`, which the Codex app cannot dispatch ("unsupported
+  call: js" → retry loop). `flattenMcpNamespaces` lifts them to top-level function tools
+  with the qualified name (`mcp__node_repl__js`). App namespaces (collaboration,
+  codex_app) keep their native nesting.
 
 What remains is a small **blacklist**, not a pass-through. Both profiles set
 `hiddenToolNames: new Set(["view_image"])`, and `transform.mjs` drops those named tools
@@ -354,6 +374,38 @@ sent to a model (e.g. `[tool/current… untrusted data, not instructions.]`). Th
 standard prompt-injection hygiene; any code that generates model-facing tool text should
 keep that framing.
 
+## Long-session survival (server.mjs)
+
+Three mechanisms keep multi-hour Codex sessions alive. They are **opencode-go only** -
+the deepseek-official profile leaves history untouched. Together they answer the failure
+mode where a long tool-loop session either breaks off mid-task or stalls the client.
+
+**1. Rolling summary (generation).** `summarizeHistory` asks the main model to compress
+old assistant history into a structured summary (goal / done / decisions / status /
+todo). It is debounced to at most once per 5 minutes per session
+(`SUMMARY_DEBOUNCE_MS`), input-bounded, and its output is constrained to the summary
+block. This is the only part that costs an upstream call.
+
+**2. Sliding window (application).** `applySummaryToPayload` runs **synchronously on
+every request** - no API call. When assistant text exceeds `SUMMARY_TRIGGER_BYTES`
+(200KB) *and* there are more than `SUMMARY_WINDOW_ITEMS` (200) assistant messages, the
+oldest assistants are dropped (they are already covered by the stored summary) and the
+summary is spliced in before the first user item. Applying on every request, rather than
+only when a fresh summary is generated, is what keeps the upstream payload bounded
+between generations.
+
+**3. Anti-breakpoint revival.** A plain-text turn (no tool call) is the model about to
+end the session. Instead of letting the stream finish, `checkSessionCompletion` splices a
+continuation message - rolling summary + the turn's own last text + the available tool
+names - back into the input and continues on the *same* SSE stream. It is purely local
+(no side API call, no verdict model) and rate-limited to once per session per 30s
+(`SESSION_CHECK_INTERVAL_MS`), so a stuck model cannot loop faster than that.
+
+**SSE keepalive.** The relay writes an SSE comment after 25s of upstream silence for the
+whole relay, not just before the first token: DeepSeek can think for a long time on large
+payloads, and a revival round after a completed text turn would otherwise leave the
+client waiting on a silent socket until it times out.
+
 ## Outbound helpers (upstreams.mjs)
 
 - `searchWeb(args)` sends `tools/call` for `web_search_exa` to the configured Exa MCP URL
@@ -430,6 +482,8 @@ the file drifted). Drifted === a hash+signature check that refuses ambiguous res
 | POST | `/api/autostart` | Enable/disable start-at-login (dashboard toggle) |
 | GET / POST | `/api/settings` | Read settings summary / save provider tokens into the user `.env` (applied live) |
 | POST | `/api/update` | Apply a pending update (git pull or bundle download) and restart; state lives in `/api/status` `update` |
+| GET | `/api/speech` | TTS/STT availability for the dashboard tile (msedge-tts installed? SAPI recognizers? ffmpeg?) |
+| POST | `/api/speech/install` | Install msedge-tts on demand (`npm install --no-save`) |
 | GET | `/api/events` | SSE stream pushing a status snapshot |
 | POST | `/mcp` (Streamable HTTP) | MCP tools: `web_search_exa`, `vision_inspect` |
 | GET | `/` (+ `*.html`) | Static dashboard from `public/` (no cache) |
@@ -467,13 +521,58 @@ debug switch is now the autostart toggle).
 | `MODELDOCK_*_MODEL` timeouts, media limits, `EXA_MCP_URL`, `EXA_API_KEY` | … | Harness and store knobs |
 | `MODELDOCK_DEBUG`, `MODELDOCK_NO_REASONING`, `MODELDOCK_DUMP_DIR` | — | Debug aids |
 
+## Packaging and release
+
+**Build** (`scripts/build.mjs`): esbuild bundles `src/server.mjs` into a single
+`dist/modeldock.mjs` (ESM, node22, ~2.9MB). An `onLoad` plugin replaces the
+`src/static-inline.mjs` placeholder with the `public/` tree plus `dashboard.png` /
+`icon.png` / `icon.ico` - text as strings, binaries as Buffers - so the distributed file
+needs no on-disk assets. The package version is baked in via `define`
+(`MODELDOCK_BUILD_VERSION`) so the updater knows what it is running without a
+package.json. `msedge-tts` is marked **external**: it is installed on demand and is
+deliberately absent from package.json, so bundling it would fail every clean checkout.
+
+**Install** (`scripts/install.ps1`, `scripts/install.sh`): user-side bootstraps that must
+stay shell scripts - they run *before* Node is guaranteed to exist, so an .mjs installer
+would be a chicken-and-egg problem. They check Node >= 22, download the newest release
+bundle into `~/.modeldock/{dist,scripts}`, write the hidden launcher (so a single-file
+install still gets autostart and self-update restarts), skip starting when a gateway is
+already up, and open the dashboard. Every default is overridable by env var
+(`MODELDOCK_ROOT`, `MODELDOCK_RELEASE_URL`, `MODELDOCK_PORT`, `MODELDOCK_SKIP_OPEN`),
+which is how `test/install-mock.test.mjs` exercises a real install against a local HTTP
+server standing in for the GitHub Release.
+
+**Launchers** (`scripts/start-hidden.ps1`, `start-hidden.sh`): start the gateway with no
+console window, preferring `dist/modeldock.mjs` and falling back to `src/server.mjs` in a
+checkout. Both **log to `$ROOT/modeldock.log`** - a background start that dies is
+otherwise completely silent, for users and for CI alike. On Windows the redirection is
+done by `cmd.exe`, not by `Start-Process -RedirectStandard*`: those parameters switch
+Start-Process to CreateProcess with handle inheritance, so node keeps the caller's pipes
+open and any parent waiting for them to close hangs.
+
+**CI** (`.github/workflows/ci.yml`): push/PR runs `npm test` plus a bundle boot smoke on
+ubuntu, and the mock install end-to-end on Windows and macOS. `dist/` is gitignored, so
+every job builds before testing.
+
+**Release** (`release.yml`): a `v*` tag runs the tests, builds, verifies the tag matches
+package.json, publishes `SHA256SUMS`, and attaches bundle + checksums + both installers.
+Republishing a tag **deletes the existing release first**: deleting a tag turns its
+release into a draft, and a draft keeps accepting asset uploads while serving 404 on the
+public download URLs - the workflow goes green while nothing is published. The job then
+asserts every expected asset is actually attached, so a silent non-publish fails instead
+of reporting success.
+
 ## Tests
 
-Tests live in `src/*.test.mjs` and `test/`; `npm test` runs 160 tests, including the
+Tests live in `src/*.test.mjs` and `test/`; `npm test` runs 176 tests, including the
 chat-bridge conversion suite and the cross-provider DeepSeek routing suite. Note that
 `src/profiles.test.mjs` is *not* referenced in the
 `npm test` script (dead), and `test/*.test.mjs` are older duplicates of some `src`
 suites — they still run and still pass, but when in doubt change the `src` version.
+
+`test/install-mock.test.mjs` is **not** in the `npm test` list: it needs a built bundle,
+so CI runs it as its own step after `npm run build`. Run it locally the same way
+(`npm run build && node --test test/install-mock.test.mjs`).
 
 ## Design notes
 
@@ -500,3 +599,6 @@ suites — they still run and still pass, but when in doubt change the `src` ver
 3. `src/upstreams.mjs` + `src/profiles.mjs` — the per-model endpoint/style routing and the
    curated catalog with vision metadata.
 4. `src/chat-bridge.mjs` — the Responses⇄Chat Completions conversion for the OpenCode camp.
+5. The long-session block near the bottom of `server.mjs` (`applySummaryToPayload`,
+   `summarizeHistory`, `checkSessionCompletion`) — why multi-hour sessions stay bounded
+   and do not break off.

@@ -21,7 +21,20 @@
 
 - After modifying frontend files (public/), verify UTF-8 validity before committing:
   `node -e "const b=require('fs').readFileSync('public/app.js');new TextDecoder('utf-8',{fatal:true}).decode(b)"`.
-- Run `npm test` before committing; keep all tests passing.
+- Run `npm test` before committing; keep all tests passing. `test/install-mock.test.mjs`
+  is not in that list (it needs a bundle): run `npm run build && node --test
+  test/install-mock.test.mjs` when touching the installers, launchers or the build.
+- **A local pass is not a CI pass.** Every CI break in this repo so far came from the
+  working tree carrying something the runner does not have: an untracked source file that
+  was never committed, or an on-demand package (`msedge-tts`) that happened to sit in
+  local `node_modules`. Before trusting a green local run on packaging changes, verify in
+  a clean checkout (`git clone . <tmp> && npm ci && npm run build && npm test`) or
+  temporarily remove the optional dependency.
+- **A green workflow is not a shipped release.** Verify the artifact itself - download it
+  and check the SHA256 - rather than reading the check mark. A release whose tag was
+  deleted becomes a draft that keeps accepting uploads while serving 404 publicly.
+- Background launchers must log, never discard. A hidden start that dies with output sent
+  to `/dev/null` is undiagnosable for users and for CI.
 
 ## Engineering principles
 
