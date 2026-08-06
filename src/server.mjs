@@ -153,10 +153,21 @@ function statusPayload({ config, metrics, mediaStore, routeAffinity, modelSelect
   const visionOptions = options.filter((entry) => entry.supportsVision);
   const mainTokenReady = Boolean(tokenFor(config, selected.mainModel) || (config.tokens && Object.values(config.tokens).some(Boolean)));
   const checks = sessionChecks ? Array.from(sessionChecks.entries()).map(([session, entry]) => ({ session, at: entry.at, answer: entry.answer })) : [];
+  const mainProvider = providerForModel(config, selected.mainModel) || config.profileId;
+  const providerLabel = providerOptions(config).find((p) => p.id === mainProvider)?.label || mainProvider;
   return metrics.snapshot({
     ready: mainTokenReady,
     sessionChecks: checks,
-    config: publicConfig({ ...config, mainModel: selected.mainModel, visionModel: selected.visionModel }),
+    config: {
+      ...publicConfig({ ...config, mainModel: selected.mainModel, visionModel: selected.visionModel }),
+      // Selection-aware routing facts for the route card and forwarding map: which
+      // provider owns the selected main model, which base URL and wire style it hits.
+      mainProvider,
+      mainProviderLabel: providerLabel,
+      mainUpstreamUrl: upstreamBaseForModel(config, selected.mainModel),
+      mainWire: chatEndpointFor(selected.mainModel, config).style,
+      visionUpstreamUrl: upstreamBaseForModel(config, selected.visionModel),
+    },
     models: {
       selected,
       options,
@@ -644,8 +655,9 @@ async function relayLiveResponses(payload, res, services, signal) {
       const response = writer.finish(usage);
       rememberReasoningItems(services, response);
       // A plain-text turn (no tool call) ends the session's reply; ask the main model
-      // whether the task is done, fire-and-forget, rate-limited per session.
-      if (mode === "text") {
+      // whether the task is done, fire-and-forget, rate-limited per session. OpenCode
+      // Go camp only (see the summary compaction guard).
+      if (mode === "text" && services.config.profile?.id === "opencode-go") {
         const key = payload?.client_metadata?.session_id || payload?.client_metadata?.thread_id || "default";
         checkSessionCompletion(services, key, payload).catch(() => {});
       }
@@ -731,15 +743,19 @@ async function relayResponses(req, res, services) {
       delete transformed.payload.reasoning;
     }
     // L2 rolling summary: compact old assistant history into a pinned summary block.
-    const summaryKey = source?.client_metadata?.session_id || source?.client_metadata?.thread_id || "default";
-    const existing = services.sessionSummaries?.get(summaryKey) || null;
-    const existingSummary = existing?.text || null;
-    // Debounce: one compaction per session per 5 minutes keeps us from re-summarizing
-    // on every request while a long turn is still generating.
-    const SUMMARY_DEBOUNCE_MS = 5 * 60_000;
-    if (!existing || Date.now() - existing.at > SUMMARY_DEBOUNCE_MS) {
-      const newSummary = await summarizeHistory(services, summaryKey, transformed.payload, existingSummary);
-      if (newSummary) services.sessionSummaries?.set(summaryKey, { text: newSummary, at: Date.now() });
+    // Memory machinery (compaction + completion checker) is for the OpenCode Go camp
+    // only; the DeepSeek official profile is a direct relay and needs none of it.
+    if (config.profile?.id === "opencode-go") {
+      const summaryKey = source?.client_metadata?.session_id || source?.client_metadata?.thread_id || "default";
+      const existing = services.sessionSummaries?.get(summaryKey) || null;
+      const existingSummary = existing?.text || null;
+      // Debounce: one compaction per session per 5 minutes keeps us from re-summarizing
+      // on every request while a long turn is still generating.
+      const SUMMARY_DEBOUNCE_MS = 5 * 60_000;
+      if (!existing || Date.now() - existing.at > SUMMARY_DEBOUNCE_MS) {
+        const newSummary = await summarizeHistory(services, summaryKey, transformed.payload, existingSummary);
+        if (newSummary) services.sessionSummaries?.set(summaryKey, { text: newSummary, at: Date.now() });
+      }
     }
   } catch (error) {
     finish({ ok: false, error: error.message });
