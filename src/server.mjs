@@ -1320,10 +1320,28 @@ const SESSION_CHECK_INTERVAL_MS = 30_000;
 const SESSION_CHECK_TIMEOUT_MS = 60_000;
 const SESSION_CHECK_PROMPT = [
   "You are the completion checker of a long-running coding session.",
-  "Read the session summary and the latest messages, then answer the question:",
-  "Question: Has the user's task been completed?",
-  "Answer with exactly one word: yes or no.",
+  "Read the session summary and the latest messages, then decide the session state.",
+  "Answer on the FIRST line with exactly one of:",
+  "DONE - the user's task is completed, or nothing remains that the assistant can do.",
+  "ASK_USER - the assistant is waiting for the user's answer or decision. Never push it to continue.",
+  "CONTINUE: <one short sentence naming the concrete next step, and which available tool to use when that helps>",
 ].join("\n");
+
+// Parse the checker's reply into {state, note}. First-line token wins; free-form
+// replies fall back to leading yes/no. Anything unparseable fails open to "done"
+// so a confused checker can never trap the session in revival loops.
+export function parseCheckVerdict(answer) {
+  const text = String(answer || "").trim();
+  if (!text) return { state: "done", note: "" };
+  const first = text.split(/\r?\n/)[0].trim();
+  if (/^done\b/i.test(first)) return { state: "done", note: first };
+  if (/^ask[_\s-]?user\b/i.test(first)) return { state: "ask_user", note: first };
+  const cont = first.match(/^continue\b[:\s-]*(.*)$/i);
+  if (cont) return { state: "continue", note: cont[1].trim() || text.slice(0, 300) };
+  if (/^(yes|y|done|complete|completed|finished)\b/i.test(first)) return { state: "done", note: first };
+  if (/^(no|not)\b/i.test(first)) return { state: "continue", note: text.slice(0, 300) };
+  return { state: "done", note: first.slice(0, 200) };
+}
 
 async function checkSessionCompletion(services, key, payload) {
   const now = Date.now();
@@ -1340,24 +1358,30 @@ async function checkSessionCompletion(services, key, payload) {
     })
     .filter(Boolean)
     .join("\n---\n");
-  const target = `SESSION SUMMARY:\n${summary || "(none yet)"}\n\nLATEST MESSAGES:\n${recent || "(none)"}`;
+  // Name the tools the main model actually has this turn, so a CONTINUE verdict can
+  // point at one ("run the tests with shell_command") instead of staying vague.
+  const toolNames = (Array.isArray(payload.tools) ? payload.tools : [])
+    .map((tool) => tool?.name || tool?.function?.name)
+    .filter(Boolean)
+    .slice(0, 40)
+    .join(", ");
+  const target = `SESSION SUMMARY:\n${summary || "(none yet)"}\n\nLATEST MESSAGES:\n${recent || "(none)"}\n\nAVAILABLE TOOLS: ${toolNames || "(none)"}`;
   const answer = await callMainModelText(services, key, [
     { role: "developer", content: [{ type: "input_text", text: SESSION_CHECK_PROMPT }] },
     { role: "user", content: [{ type: "input_text", text: target }] },
   ], { maxOutputTokens: 2000, timeoutMs: SESSION_CHECK_TIMEOUT_MS });
-  // No text back means the model could not produce a verdict — treat that as
-  // "done" rather than blocking the session end on an unresponsive side call.
-  const verdict = answer?.trim() ? answer.trim().slice(0, 200) : "yes";
-  services.sessionChecks?.set(key, { at: now, answer: verdict });
-  debugLog(services, `session check (${key}): ${verdict}`);
-  const done = /^(yes|y|done|complete|completed|finished)$/i.test(verdict);
-  if (done) return null;
-  // Not done: revive the conversation so the model continues instead of breaking.
+  const verdict = answer?.trim() ? answer.trim().slice(0, 300) : "DONE";
+  const { state, note } = parseCheckVerdict(verdict);
+  services.sessionChecks?.set(key, { at: now, answer: verdict, state });
+  debugLog(services, `session check (${key}): [${state}] ${verdict}`);
+  // done: the task is finished. ask_user: the model is waiting for the user's input —
+  // reviving it would force an answer nobody gave. Both end the stream normally.
+  if (state !== "continue") return null;
   return {
     role: "user",
     content: [{
       type: "input_text",
-      text: `[session continuation — the completion checker determined the task is not finished: "${verdict}" — continue working on it]\n\n${summary ? `ROLLING SUMMARY:\n${summary}\n` : ""}[end session continuation]`,
+      text: `[session continuation — the completion checker determined the task is not finished${note ? `: "${note}"` : ""} — continue working on it]\n\n${summary ? `ROLLING SUMMARY:\n${summary}\n` : ""}[end session continuation]`,
     }],
   };
 }
