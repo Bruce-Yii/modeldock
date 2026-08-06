@@ -1253,6 +1253,13 @@ async function summarizeHistory(services, key, payload, existingSummary) {
 
     const requestModel = services.config.mainModel;
     const endpoint = chatEndpointFor(requestModel, services.config);
+    const isOpencodeGo = services.config.profile?.id === "opencode-go";
+    // Session-affinity headers only for the OpenCode Go camp, and only with the
+    // *main* session seed so the summary call lands in the same ses_ as the request
+    // it compacts (a `#summary`-suffixed seed would show up as a separate session).
+    const affinityHeaders = isOpencodeGo
+      ? opencodeSessionHeaders({ client_metadata: { session_id: key } })
+      : {};
     let summaryText = null;
     if (endpoint.style === "chat") {
       const chatBody = responsesToChatRequest({
@@ -1268,10 +1275,10 @@ async function summarizeHistory(services, key, payload, existingSummary) {
         headers: {
           Authorization: `Bearer ${tokenFor(services.config, requestModel)}`,
           "Content-Type": "application/json",
-          ...opencodeSessionHeaders({ client_metadata: { session_id: `${key}#summary` } }),
+          ...affinityHeaders,
         },
         body: JSON.stringify(chatBody),
-        signal: AbortSignal.timeout(60_000),
+        signal: AbortSignal.timeout(120_000),
       });
       if (res.ok) {
         const data = await res.json();
@@ -1283,6 +1290,7 @@ async function summarizeHistory(services, key, payload, existingSummary) {
         headers: {
           Authorization: `Bearer ${tokenFor(services.config, requestModel)}`,
           "Content-Type": "application/json",
+          ...affinityHeaders,
         },
         body: JSON.stringify({
           model: requestModel,
@@ -1293,7 +1301,7 @@ async function summarizeHistory(services, key, payload, existingSummary) {
           stream: false,
           max_output_tokens: 500,
         }),
-        signal: AbortSignal.timeout(60_000),
+        signal: AbortSignal.timeout(120_000),
       });
       if (res.ok) {
         const data = await res.json();
