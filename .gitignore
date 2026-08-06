@@ -21,3 +21,7 @@ voxel/
 
 # Release build output
 dist/
+
+# Internal docs: kept locally, not published
+ARCHITECTURE.md
+AGENTS.md
