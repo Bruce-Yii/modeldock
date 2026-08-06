@@ -46,6 +46,14 @@ const DEEPSEEK_REASONING_LEVELS = [
   { effort: "max", description: "Maximum reasoning depth" },
 ];
 
+// Feature flags Codex reads from the model catalog to decide which client-side plugin
+// machinery to expose (verified in the Codex binary's ModelInfo vocabulary):
+// `artifact` = artifact-tool plugins (presentations / spreadsheets / documents / pdf),
+// `tool_call_mcp_elicitation` = let the model request MCP tool schemas it does not have,
+// `workspace_dependencies` = codex_app.load_workspace_dependencies,
+// `computer_use` = desktop screen control, `browser_use` = Chrome control.
+export const EXPERIMENTAL_SUPPORTED_TOOLS = ["artifact", "tool_call_mcp_elicitation", "workspace_dependencies", "computer_use", "browser_use"];
+
 function modelCatalogDefaults({ mainModel, displayName, description, compHash, inputModalities, supportsSearchTool, baseInstructions, defaultReasoningLevel = "high", supportedReasoningLevels = [ { effort: "low", description: "Fast responses with lighter reasoning" }, { effort: "high", description: "Deeper reasoning for complex work" }, { effort: "max", description: "Maximum reasoning depth" } ] }) {
   return {
     models: [
@@ -83,7 +91,7 @@ function modelCatalogDefaults({ mainModel, displayName, description, compHash, i
         availability_nux: null,
         upgrade: null,
         priority: 1,
-        experimental_supported_tools: [],
+        experimental_supported_tools: EXPERIMENTAL_SUPPORTED_TOOLS,
         supports_search_tool: supportsSearchTool,
         default_service_tier: null,
         supports_reasoning_summaries: true,
@@ -108,6 +116,9 @@ const OPENCODE_GO_PROFILE = {
   tokenEnvName: "OPENCODE_GO_TOKEN",
 
   blockedToolTypes: new Set(["tool_search", "web_search"]),
+  // tool_search is Codex's client-side MCP-tool elicitation tool: the hosted schema 400s
+  // on the Go camp, so the transform bridges it to a function tool with the same name.
+  toolSearchAsFunction: true,
   // Forward every Codex tool except view_image: it hands the model base64 it cannot
   // interpret (text-only main model) and caused pixel-decode loops. vision_inspect is
   // the single visual path — it analyzes AND surfaces the image into the conversation.

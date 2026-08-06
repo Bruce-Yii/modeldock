@@ -52,7 +52,7 @@ test("keeps a plain request intact and adds the resident vision tool on the main
   assert.deepEqual(report.imageRefs, []);
 });
 
-test("filters web_search and tool_search tools and counts them", () => {
+test("bridges tool_search to a function tool and still blocks web_search", () => {
   const source = baseRequest();
   source.tools = [
     { type: "web_search" },
@@ -63,11 +63,13 @@ test("filters web_search and tool_search tools and counts them", () => {
   const { payload, report } = transformResponsesRequest(source, {
       profile: UNFILTERED_GO_PROFILE,
       mediaStore: fakeStore(), defaultModel: "d" });
-  assert.deepEqual(payload.tools.map((t) => t.name), ["f1", "harness_web_search", "vision_inspect"]);
-  assert.deepEqual(report.blocked, { tool_search: 1, web_search: 2 });
+  const names = payload.tools.map((t) => t.name);
+  assert.ok(names.includes("tool_search"), "tool_search is bridged to a function tool (client-side MCP elicitation)");
+  assert.equal(payload.tools.find((t) => t.name === "tool_search").type, "function", "bridged tool_search is function-typed so the Go camp accepts it");
+  assert.ok(names.includes("f1"), "regular function tools pass through");
+  assert.ok(names.includes("harness_web_search"), "web search harness still injected for blocked web_search");
+  assert.deepEqual(report.blocked, { tool_search: 0, web_search: 2 }, "only web_search is counted as blocked");
   assert.equal(report.originalToolCount, 4);
-  assert.equal(report.forwardedToolCount, 3);
-  assert.deepEqual(report.injectedHarnessTools, ["harness_web_search", "vision_inspect"]);
 });
 
 test("rewrites tool_choice required to auto", () => {
@@ -286,6 +288,70 @@ test("forces parallel_tool_calls to false and reports the rewrite", () => {
     assert.equal(payload.parallel_tool_calls, false);
     assert.equal(report.parallelToolCallsRewritten, incoming !== false);
   }
+});
+
+test("a vision-capable main model keeps tool-output screenshots for direct vision", () => {
+  const source = {
+    model: "gpt-5.6-luna",
+    tools: [{ type: "function", name: "computer_use", parameters: { type: "object", properties: {} } }],
+    input: [
+      { type: "function_call", call_id: "call_shot", name: "computer_use", arguments: "{}" },
+      { type: "function_call_output", call_id: "call_shot", output: [{ type: "input_text", text: "screen captured" }, { type: "input_image", image_url: IMAGE_DATA_URL }] },
+    ],
+  };
+  const { payload, report } = transformResponsesRequest(source, {
+      profile: UNFILTERED_GO_PROFILE,
+      mediaStore: fakeStore(), defaultModel: "deepseek-v4-flash", targetModel: "gpt-5.6-luna" });
+  const output = payload.input.find((item) => item.type === "function_call_output")?.output;
+  assert.ok(Array.isArray(output), "tool output stays an array for the vision model");
+  assert.ok(output.some((part) => part?.type === "input_image" && part.image_url === IMAGE_DATA_URL), "the real screenshot pixels reach Luna");
+  assert.equal(report.imageRefs.length, 1, "still registered for the dashboard / later reference");
+});
+
+test("a text-only main model still compresses tool-output images to references", () => {
+  const source = {
+    tools: [{ type: "function", name: "computer_use", parameters: { type: "object", properties: {} } }],
+    input: [
+      { type: "function_call", call_id: "call_shot", name: "computer_use", arguments: "{}" },
+      { type: "function_call_output", call_id: "call_shot", output: [{ type: "input_text", text: "screen captured" }, { type: "input_image", image_url: IMAGE_DATA_URL }] },
+    ],
+  };
+  const { payload, report } = transformResponsesRequest(source, {
+      profile: UNFILTERED_GO_PROFILE,
+      mediaStore: fakeStore(), defaultModel: "deepseek-v4-flash", targetModel: "deepseek-v4-flash" });
+  const output = payload.input.find((item) => item.type === "function_call_output")?.output;
+  assert.equal(typeof output, "string", "text models get a reference string");
+  assert.match(output, /Image attachment img_1/);
+  assert.equal(report.imageRefs.length, 1);
+});
+
+test("flattens mcp__ namespaces to qualified function tools so calls dispatch", () => {
+  const source = {
+    model: "gpt-5.6-luna",
+    tools: [
+      { type: "namespace", name: "mcp__node_repl", tools: [
+        { type: "function", name: "js", description: "run js", parameters: { type: "object", properties: {} } },
+        { type: "function", name: "js_reset", description: "reset", parameters: { type: "object", properties: {} } },
+      ] },
+      { type: "namespace", name: "collaboration", tools: [
+        { type: "function", name: "spawn_agent", description: "spawn", parameters: { type: "object", properties: {} } },
+      ] },
+    ],
+    input: [
+      { type: "function_call", call_id: "call_js", name: "mcp__node_repl__js", arguments: "{}" },
+      { type: "function_call_output", call_id: "call_js", output: "hello from js" },
+    ],
+  };
+  const { payload } = transformResponsesRequest(source, {
+      profile: UNFILTERED_GO_PROFILE,
+      mediaStore: fakeStore(), defaultModel: "deepseek-v4-flash", targetModel: "gpt-5.6-luna" });
+  const names = payload.tools.map((tool) => `${tool.type}:${tool.name || tool.type === "namespace" ? tool.name : ""}`);
+  assert.ok(payload.tools.some((tool) => tool.type === "function" && tool.name === "mcp__node_repl__js"), "mcp child flattened with qualified name");
+  assert.ok(payload.tools.some((tool) => tool.type === "function" && tool.name === "mcp__node_repl__js_reset"), "second mcp child flattened too");
+  const collaboration = payload.tools.find((tool) => tool.type === "namespace");
+  assert.equal(collaboration?.name, "collaboration", "app namespaces stay nested");
+  const pair = payload.input.find((item) => item.type === "function_call_output");
+  assert.equal(pair.output, "hello from js", "qualified MCP call pairs replay natively, not as receipts");
 });
 
 test("injects ids into replayable native tool result items for Go", () => {

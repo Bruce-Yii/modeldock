@@ -71,13 +71,16 @@ export function routeResponsesRequest(source, { mainModel, visionModel, affinity
   if (pinned) {
     return { model: pinned.model, reason: "luna_tool_continuation", directVision: pinned.model === visionModel, pinnedCallId: pinned.callId };
   }
-  if (source?.model === visionModel) {
+  if (source?.model === visionModel && source?.model !== mainModel) {
     return { model: visionModel, reason: "vision_model_requested", directVision: true };
   }
   if (hasImage(current)) {
     return { model: visionModel, reason: "current_turn_image", directVision: true };
   }
-  return { model: source?.model || mainModel, reason: "default_main", directVision: false };
+  // The dashboard selection is authoritative for the main road: Codex re-sends its own
+  // configured model id on every request, so trusting source.model would silently veto
+  // the user's main-model choice (e.g. switching to Luna would still hit DeepSeek).
+  return { model: mainModel, reason: "default_main", directVision: false };
 }
 
 export const routerInternals = { currentTurnItems, hasImage, continuationCallIds };

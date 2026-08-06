@@ -1,5 +1,23 @@
 const DEFAULT_BLOCKED_TOOL_TYPES = new Set(["tool_search", "web_search"]);
 
+// Bridge schema for Codex's client-side tool_search (MCP-tool elicitation): the hosted
+// `{type:"tool_search"}` schema is rejected by the Go camp (400), but Codex executes the
+// *call* locally regardless of the declared shape, so presenting it as a function tool
+// keeps the elicitation path alive for the model.
+const TOOL_SEARCH_AS_FUNCTION = {
+  type: "function",
+  name: "tool_search",
+  description: "Search for additional tools and MCP capabilities that are not currently loaded in this session. Use this when the task needs a capability you do not see in your available tools.",
+  parameters: {
+    type: "object",
+    properties: {
+      query: { type: "string", description: "Plain-language description of the capability you need" },
+    },
+    required: ["query"],
+    additionalProperties: false,
+  },
+};
+
 function resolveProfileOptions(profile) {
   const blockedToolTypes = profile?.blockedToolTypes || DEFAULT_BLOCKED_TOOL_TYPES;
   const webSearchTool = profile?.harnessTools?.webSearch || null;
@@ -29,6 +47,32 @@ function selectForwardedTools(tools, { hiddenToolNames }) {
     if (!tool.name || !hidden.has(tool.name)) forwarded.push(structuredClone(tool));
   }
   return forwarded;
+}
+
+// MCP tools are registered under fully-qualified identifiers (`mcp__server__tool`), but
+// Codex sends them nested under a `namespace:mcp__<server>` wrapper. Text/third-party
+// models read the child names and call the bare tool (`js`), which the Codex app cannot
+// dispatch ("unsupported call: js" -> infinite retry loop). Flatten the standard MCP
+// namespaces into top-level function tools with the qualified name; app namespaces
+// (collaboration, codex_app) keep their native nesting.
+function flattenMcpNamespaces(tools) {
+  if (!Array.isArray(tools)) return tools;
+  const out = [];
+  for (const tool of tools) {
+    if (!tool || typeof tool !== "object") {
+      out.push(tool);
+      continue;
+    }
+    if (tool.type === "namespace" && typeof tool.name === "string" && tool.name.startsWith("mcp__")) {
+      for (const child of Array.isArray(tool.tools) ? tool.tools : []) {
+        if (!child?.name) continue;
+        out.push({ ...structuredClone(child), type: "function", name: `${tool.name}__${child.name}` });
+      }
+      continue;
+    }
+    out.push(tool);
+  }
+  return out;
 }
 
 function normalizeInput(input) {
@@ -71,19 +115,40 @@ function normalizeAssistantMessages(input) {
   });
 }
 
-function toolOutputText(output, mediaStore, imageRefs) {
+function toolOutputText(output, mediaStore, imageRefs, keepImages = false) {
   if (typeof output === "string") return output;
-  if (Array.isArray(output) && mediaStore) {
-    const replaced = output.map((part) => {
-      if (!part || typeof part !== "object" || part.type !== "input_image" || typeof part.image_url !== "string") return part;
-      const ref = mediaStore.put(part.image_url);
-      imageRefs?.push(ref);
-      return `[Image attachment ${ref}. The main model cannot inspect it directly. Use vision_inspect with image_ref "${ref}" before making visual claims.]`;
-    });
-    if (replaced.some((part, index) => part !== output[index])) {
-      return replaced
-        .map((part) => (typeof part === "string" ? part : toolOutputText(part, mediaStore, imageRefs)))
-        .join("\n");
+  if (Array.isArray(output)) {
+    if (keepImages) {
+      // Vision-capable target models (e.g. Luna as the main model) must see the real
+      // pixels of tool-produced screenshots (computer_use, browser_use, view_image).
+      // Keep input_image parts intact and flatten text parts to strings; return the
+      // array only when it still contains image parts.
+      const parts = output.map((part) => {
+        if (!part || typeof part !== "object") return part;
+        if (part.type === "input_image" && typeof part.image_url === "string") {
+          const ref = mediaStore?.put(part.image_url);
+          if (ref) imageRefs?.push(ref);
+          return part;
+        }
+        if (part.type === "input_text" && typeof part.text === "string") return part.text;
+        if (typeof part.text === "string") return part.text;
+        return part;
+      });
+      if (parts.some((part) => part && typeof part === "object")) return parts;
+      return parts.map((part) => (typeof part === "string" ? part : "")).join("\n");
+    }
+    if (mediaStore) {
+      const replaced = output.map((part) => {
+        if (!part || typeof part !== "object" || part.type !== "input_image" || typeof part.image_url !== "string") return part;
+        const ref = mediaStore.put(part.image_url);
+        imageRefs?.push(ref);
+        return `[Image attachment ${ref}. The main model cannot inspect it directly. Use vision_inspect with image_ref "${ref}" before making visual claims.]`;
+      });
+      if (replaced.some((part, index) => part !== output[index])) {
+        return replaced
+          .map((part) => (typeof part === "string" ? part : toolOutputText(part, mediaStore, imageRefs)))
+          .join("\n");
+      }
     }
   }
   try {
@@ -216,7 +281,7 @@ function fallbackToolReceipt(call, output, mediaStore, imageRefs, role = "user",
   };
 }
 
-function normalizeToolHistory(input, tools, mediaStore, imageRefs, { canonicalizeCallIds = true, receiptRole = "user" } = {}) {
+function normalizeToolHistory(input, tools, mediaStore, imageRefs, { canonicalizeCallIds = true, receiptRole = "user", keepToolOutputImages = false } = {}) {
   const expanded = moveInterleavedAssistantBeforeToolCalls(expandChatToolHistory(input));
   if (!Array.isArray(expanded)) {
     return { input: expanded, nativeCalls: 0, nativeOutputs: 0, fallbackResults: 0, fallbackOutputBytes: 0, canonicalizedCallIds: 0 };
@@ -275,7 +340,7 @@ function normalizeToolHistory(input, tools, mediaStore, imageRefs, { canonicaliz
             type: "function_call_output",
             ...(item.id ? { id: item.id } : {}),
             call_id: item.call_id,
-            output: toolOutputText(item.output),
+            output: toolOutputText(item.output, mediaStore, imageRefs, keepToolOutputImages),
           }];
         }
         const path = imagePathFromArguments(call.arguments);
@@ -292,7 +357,7 @@ function normalizeToolHistory(input, tools, mediaStore, imageRefs, { canonicaliz
           type: "function_call_output",
           ...(item.id ? { id: item.id } : {}),
           call_id: item.call_id,
-          output: toolOutputText(item.output, mediaStore, imageRefs),
+          output: toolOutputText(item.output, mediaStore, imageRefs, keepToolOutputImages),
         }];
       }
       const receipt = fallbackToolReceipt(call, item.output, mediaStore, imageRefs, receiptRole, true);
@@ -421,10 +486,19 @@ export function transformResponsesRequest(source, { mediaStore, defaultModel, ta
   const originalTools = Array.isArray(payload.tools) ? payload.tools : [];
   const blocked = { tool_search: 0, web_search: 0 };
   if (Array.isArray(payload.tools)) {
-    payload.tools = payload.tools.filter((tool) => {
-      if (!tool || !blockedToolTypes.has(tool.type)) return true;
+    payload.tools = payload.tools.flatMap((tool) => {
+      if (!tool || !blockedToolTypes.has(tool.type)) return [tool];
       blocked[tool.type] += 1;
-      return false;
+      // tool_search is Codex's client-side MCP-tool elicitation mechanism ("lazy-loaded
+      // through the tool_search tool"): Codex executes the call locally and returns the
+      // matched tool definitions, which appear in the next request. The hosted schema
+      // 400s on the Go camp, so bridge it as a plain function tool (same name); the
+      // relayed call is still dispatched by Codex client-side.
+      if (tool.type === "tool_search" && profile?.toolSearchAsFunction) {
+        blocked.tool_search -= 1;
+        return [structuredClone(TOOL_SEARCH_AS_FUNCTION)];
+      }
+      return [];
     });
   }
   const rawInput = normalizeInput(payload.input);
@@ -477,6 +551,7 @@ export function transformResponsesRequest(source, { mediaStore, defaultModel, ta
   if (hiddenToolNames && hiddenToolNames.size > 0) {
     payload.tools = selectForwardedTools(payload.tools, { hiddenToolNames: effectiveHidden });
   }
+  payload.tools = flattenMcpNamespaces(payload.tools);
 
   let toolChoiceRewritten = false;
   if (payload.tool_choice === "required") {
@@ -504,7 +579,7 @@ export function transformResponsesRequest(source, { mediaStore, defaultModel, ta
     payload.tools.push(structuredClone(visionTool));
     injectedHarnessTools.push(visionTool.name);
   }
-  const toolHistory = normalizeToolHistory(rewrittenInput, payload.tools, mediaStore, imageRefs, { canonicalizeCallIds: shouldCanonicalizeCallIds, receiptRole });
+  const toolHistory = normalizeToolHistory(rewrittenInput, payload.tools, mediaStore, imageRefs, { canonicalizeCallIds: shouldCanonicalizeCallIds, receiptRole, keepToolOutputImages: targetSupportsVision });
   const compactedHistory = shouldCompactCompletedToolHistory ? compactCompletedToolHistory(toolHistory.input, mediaStore, imageRefs, receiptRole, chatBridgeActive ? RECENT_TOOL_PAIRS : 0) : { input: toolHistory.input, compacted: 0, outputBytes: 0 };
   const stringifiedAssistantMessages = Array.isArray(compactedHistory.input)
     ? compactedHistory.input.filter((item) => item?.role === "assistant" && Array.isArray(item.content) && assistantMessageText(item).length > 0).length
