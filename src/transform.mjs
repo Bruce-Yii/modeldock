@@ -1,36 +1,5 @@
 const DEFAULT_BLOCKED_TOOL_TYPES = new Set(["tool_search", "web_search"]);
 
-const HARNESS_WEB_SEARCH_TOOL = {
-  type: "function",
-  name: "harness_web_search",
-  description: "Search the public web through the local harness and return cited source results.",
-  parameters: {
-    type: "object",
-    properties: {
-      queries: { type: "array", items: { type: "string" }, minItems: 1 },
-      domains: { type: "array", items: { type: "string" } },
-      recency_days: { type: "integer", minimum: 1 },
-    },
-    required: ["queries"],
-  },
-};
-
-const HARNESS_VISION_TOOL = {
-  type: "function",
-  name: "harness_vision_inspect",
-  description: "Inspect an attached image by its local image_ref using a vision model.",
-  parameters: {
-    type: "object",
-    properties: {
-      image_ref: { type: "string" },
-      compare_image_ref: { type: "string" },
-      question: { type: "string" },
-      mode: { type: "string", enum: ["general", "ocr", "ui", "chart", "compare"] },
-    },
-    required: ["image_ref", "question"],
-  },
-};
-
 function resolveProfileOptions(profile) {
   const blockedToolTypes = profile?.blockedToolTypes || DEFAULT_BLOCKED_TOOL_TYPES;
   const webSearchTool = profile?.harnessTools?.webSearch || null;
@@ -38,22 +7,7 @@ function resolveProfileOptions(profile) {
   // Blacklist-style tool policy: every named tool is forwarded EXCEPT those the
   // profile cannot use (hiddenToolNames). Namespaced tools are kept wholesale.
   const hiddenToolNames = profile?.hiddenToolNames || new Set();
-  const coreTools = profile?.coreTools || null;
-  return { blockedToolTypes, webSearchTool, visionTool, hiddenToolNames, coreTools };
-}
-
-function disclosedToolNamesFromHistory(input) {
-  if (!Array.isArray(input)) return new Set();
-  const disclosed = new Set();
-  for (const item of input) {
-    if (item?.type === "function_call_output" && item.call_id) {
-      const text = typeof item.output === "string" ? item.output : "";
-      for (const match of text.matchAll(/"name"\s*:\s*"([^"]+)"/g)) {
-        if (!match[1].startsWith("harness_")) disclosed.add(match[1]);
-      }
-    }
-  }
-  return disclosed;
+  return { blockedToolTypes, webSearchTool, visionTool, hiddenToolNames };
 }
 
 function selectForwardedTools(tools, { hiddenToolNames }) {
@@ -124,7 +78,7 @@ function toolOutputText(output, mediaStore, imageRefs) {
       if (!part || typeof part !== "object" || part.type !== "input_image" || typeof part.image_url !== "string") return part;
       const ref = mediaStore.put(part.image_url);
       imageRefs?.push(ref);
-      return `[Image attachment ${ref}. The main model cannot inspect it directly. Use harness_vision_inspect with image_ref "${ref}" before making visual claims.]`;
+      return `[Image attachment ${ref}. The main model cannot inspect it directly. Use vision_inspect with image_ref "${ref}" before making visual claims.]`;
     });
     if (replaced.some((part, index) => part !== output[index])) {
       return replaced
@@ -426,7 +380,7 @@ function rewriteImages(input, mediaStore, imageRefs, currentImageRefs, { keepCur
       return {
         type: "input_text",
         text: current
-          ? `[Image attachment ${ref}. The main model cannot inspect it directly. Use harness_vision_inspect with image_ref "${ref}" before making visual claims.]`
+          ? `[Image attachment ${ref}. The main model cannot inspect it directly. Use vision_inspect with image_ref "${ref}" before making visual claims.]`
           : `[Earlier image attachment ${ref}. Its visual contents were handled in a prior turn. Use the following assistant observation as context; do not re-inspect it unless the user asks a new visual question.]`,
       };
     });
@@ -434,12 +388,12 @@ function rewriteImages(input, mediaStore, imageRefs, currentImageRefs, { keepCur
   });
 }
 
-export function transformResponsesRequest(source, { mediaStore, defaultModel, targetModel, directVision = false, profile = null, disclosedTools = null }) {
+export function transformResponsesRequest(source, { mediaStore, defaultModel, targetModel, directVision = false, profile = null }) {
   if (!source || typeof source !== "object" || Array.isArray(source)) {
     throw new Error("Responses request body must be a JSON object");
   }
 
-  const { blockedToolTypes, webSearchTool, visionTool, hiddenToolNames, coreTools } = resolveProfileOptions(profile);
+  const { blockedToolTypes, webSearchTool, visionTool, hiddenToolNames } = resolveProfileOptions(profile);
   // Tools follow the MODEL, not the provider: view_image is useful only to vision-capable
   // models (they can read the base64 it returns). When the target model supports vision,
   // view_image is kept; for text models it is hidden and vision_inspect is the visual path.

@@ -1,13 +1,81 @@
 import process from "node:process";
 import os from "node:os";
 import path from "node:path";
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { readdirSync, readFileSync, statSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { profileById } from "./profiles.mjs";
 
-try {
-  process.loadEnvFile?.(".env");
-} catch (error) {
-  if (error?.code !== "ENOENT") throw error;
+// Resolve the user configuration (.env) file. Priority:
+//   1. MODELDOCK_ENV_FILE (explicit path)
+//   2. MODELDOCK_CONFIG_DIR/.env
+//   3. ~/.modeldock/.env when it exists (installed layout; cwd is not controllable)
+//   4. <cwd>/.env (dev layout)
+// When nothing exists yet, fall back to ~/.modeldock/.env so first-run settings saves
+// land in a cwd-independent location. The resolved path is recorded on the config so
+// the settings API can write back to it.
+export function envFileFor() {
+  if (process.env.MODELDOCK_ENV_FILE) return path.resolve(process.env.MODELDOCK_ENV_FILE);
+  if (process.env.MODELDOCK_CONFIG_DIR) return path.join(path.resolve(process.env.MODELDOCK_CONFIG_DIR), ".env");
+  const installed = path.join(os.homedir(), ".modeldock", ".env");
+  if (existsSync(installed)) return installed;
+  const dev = path.resolve(".env");
+  if (existsSync(dev)) return dev;
+  return installed;
+}
+
+export function parseEnvFile(source) {
+  const entries = {};
+  for (const line of String(source || "").split(/\r?\n/)) {
+    const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
+    if (!match) continue;
+    let value = match[2].trim();
+    const double = value.startsWith('"') && value.endsWith('"');
+    const single = value.startsWith("'") && value.endsWith("'");
+    if (double || single) value = value.slice(1, -1);
+    entries[match[1]] = value;
+  }
+  return entries;
+}
+
+export function serializeEnvFile(entries) {
+  return Object.entries(entries)
+    .filter(([, value]) => value !== undefined && value !== null)
+    .map(([key, value]) => `${key}=${value}`)
+    .join("\n") + "\n";
+}
+
+// Load a .env file into process.env without overriding real environment variables.
+function applyEnvFile(file) {
+  if (!existsSync(file)) return;
+  const entries = parseEnvFile(readFileSync(file, "utf8"));
+  for (const [key, value] of Object.entries(entries)) {
+    if (process.env[key] === undefined) process.env[key] = value;
+  }
+}
+
+// Merge the given entries into the user .env file, preserving comments, blank lines and
+// unrelated keys (a line-preserving merge), creating the directory if needed.
+export function writeEnvFile(updates) {
+  const file = envFileFor();
+  const raw = existsSync(file) ? readFileSync(file, "utf8") : "";
+  const lines = raw.split(/\r?\n/);
+  const updated = new Set(Object.keys(updates));
+  const next = [];
+  for (const line of lines) {
+    const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=/);
+    if (match && updated.has(match[1])) {
+      next.push(`${match[1]}=${updates[match[1]]}`);
+      updated.delete(match[1]);
+    } else {
+      next.push(line);
+    }
+  }
+  for (const key of updated) next.push(`${key}=${updates[key]}`);
+  mkdirSync(path.dirname(file), { recursive: true });
+  writeFileSync(file, next.join("\n").replace(/\n+$/, "\n"), "utf8");
+  for (const [key, value] of Object.entries(updates)) {
+    if (value) process.env[key] = value;
+  }
+  return file;
 }
 
 function integer(name, fallback, { min = 0, max = Number.MAX_SAFE_INTEGER } = {}) {
@@ -79,6 +147,7 @@ function discoverCodexGoToken(codexHome) {
 }
 
 export function loadConfig() {
+  applyEnvFile(envFileFor());
   const host = process.env.MODELDOCK_HOST || "127.0.0.1";
   if (!["127.0.0.1", "localhost", "::1"].includes(host)) {
     throw new Error("MODELDOCK_HOST must be a loopback address for this MVP");
@@ -131,8 +200,14 @@ export function loadConfig() {
     exaApiKey: process.env.EXA_API_KEY || "",
     recentLimit: integer("MODELDOCK_RECENT_LIMIT", 50, { min: 10, max: 500 }),
     modelRefreshHours: Number(process.env.MODELDOCK_MODEL_REFRESH_HOURS || 24),
-    modelProbeEnabled: process.env.MODELDOCK_MODEL_PROBE_ENABLED !== "0",
+    // Model catalog refresh. Off by default: the shipped curated catalog in profiles.mjs
+    // is the primary source and is published with the release. When enabled it only does a
+    // light GET /models merge (new ids appended, vision metadata untouched). The heavier
+    // vision probe/evaluation code in server.mjs is dev-only test tooling and is never
+    // triggered here or at startup.
+    modelProbeEnabled: process.env.MODELDOCK_MODEL_PROBE_ENABLED === "1",
     codexHome,
+    envFile: envFileFor(),
   });
 }
 
@@ -154,5 +229,6 @@ export function publicConfig(config) {
       noReasoning: Boolean(config.debug?.noReasoning),
       dumpDir: config.debug?.dumpDir || "",
     },
+    envFile: config.envFile || "",
   };
 }

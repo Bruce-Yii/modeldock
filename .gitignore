@@ -9,3 +9,6 @@ ModelDock.lnk
 
 # Dashboard screenshots (generated, not source)
 test/dashboard*.png
+
+# Local long-horizon task test area (rendered pages, screenshots, its own static server)
+voxel/

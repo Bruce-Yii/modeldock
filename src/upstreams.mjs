@@ -209,7 +209,7 @@ export function createUpstreams({ config, metrics, mediaStore, getVisionModel = 
       if (!item) throw new Error(`Unknown or expired image_ref: ${compare_image_ref}`);
       loaded.push(item);
     }
-    if (!loaded.length) throw new Error("harness_vision_inspect requires path, image_ref, or compare_image_ref");
+    if (!loaded.length) throw new Error("vision_inspect requires path, image_ref, or compare_image_ref");
 
     const images = loaded;
     const finish = metrics.begin("vision", { operation: "vision_inspect", mode, imageRefs: refs });

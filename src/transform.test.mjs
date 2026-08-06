@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import { transformResponsesRequest } from "./transform.mjs";
 import { OPENCODE_GO_PROFILE } from "./profiles.mjs";
 
-const NATIVE_PAIR_PROFILE = { ...OPENCODE_GO_PROFILE, compactCompletedToolHistory: false, coreTools: null };
-const UNFILTERED_GO_PROFILE = { ...OPENCODE_GO_PROFILE, coreTools: null };
+const NATIVE_PAIR_PROFILE = { ...OPENCODE_GO_PROFILE, compactCompletedToolHistory: false };
+const UNFILTERED_GO_PROFILE = { ...OPENCODE_GO_PROFILE };
 
 function fakeStore() {
   const puts = [];
@@ -130,7 +130,7 @@ test("replaces input_image with placeholder text and registers media ref", () =>
   assert.equal(parts[0].type, "input_text");
   assert.equal(parts[1].type, "input_text");
   assert.match(parts[1].text, /\[Image attachment img_1/);
-  assert.match(parts[1].text, /vision_inspect/);
+  assert.match(parts[1].text, /Use vision_inspect with image_ref "img_1" before making visual claims\./);
   assert.deepEqual(report.imageRefs, ["img_1"]);
   assert.deepEqual(store.puts, [IMAGE_DATA_URL]);
 });

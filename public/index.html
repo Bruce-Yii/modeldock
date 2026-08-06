@@ -18,6 +18,7 @@
         <div class="status-stack">
           <div id="live-status" class="status-pill waiting"><span></span><strong>Connecting</strong></div>
           <p id="uptime">Uptime —</p>
+          <button id="settings-open" type="button" class="settings-open">Settings</button>
         </div>
       </header>
 
@@ -59,12 +60,12 @@
           </div>
           <div><span>Web</span><strong>Exa hosted MCP</strong></div>
           <div class="debug-default">
-            <span>DEBUG</span>
-            <label class="mode-toggle" for="debug-toggle">
-              <b id="buffer-mode-label">Normal</b>
-              <input id="debug-toggle" type="checkbox" role="switch" aria-label="Use debug logging" />
+            <span>AUTOSTART</span>
+            <label class="mode-toggle" for="autostart-toggle">
+              <b id="autostart-off-label">Off</b>
+              <input id="autostart-toggle" type="checkbox" role="switch" aria-label="Start ModelDock at login" />
               <span class="mode-track"><i></i></span>
-              <b id="streaming-mode-label">Debug</b>
+              <b id="autostart-on-label">On</b>
             </label>
           </div>
         </div>
@@ -177,6 +178,28 @@
         </aside>
       </section>
     </main>
+
+    <dialog id="settings-dialog" class="settings-dialog">
+      <div class="settings-card">
+        <div class="settings-head">
+          <div><p class="eyebrow">SETTINGS</p><h2>Connection</h2></div>
+          <button id="settings-close" type="button" class="settings-close" aria-label="Close settings">Close</button>
+        </div>
+        <p class="settings-path">Config file: <code id="settings-envfile"></code></p>
+        <label class="field">
+          <span>OpenCode Go token</span>
+          <input id="settings-go-token" type="password" placeholder="sk-..." autocomplete="off" spellcheck="false" />
+        </label>
+        <label class="field">
+          <span>DeepSeek API key</span>
+          <input id="settings-deepseek-token" type="password" placeholder="sk-..." autocomplete="off" spellcheck="false" />
+        </label>
+        <div class="settings-actions">
+          <button id="settings-save" type="button">Save</button>
+          <span id="settings-status" aria-live="polite"></span>
+        </div>
+      </div>
+    </dialog>
     <script src="/app.js" type="module"></script>
   </body>
 </html>

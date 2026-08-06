@@ -127,18 +127,6 @@ const OPENCODE_GO_PROFILE = {
     vision: HARNESS_VISION_TOOL,
   },
   harnessToolNames: new Set(["harness_web_search", "vision_inspect"]),
-  coreTools: new Set([
-    "shell_command",
-    "apply_patch",
-    "update_plan",
-    "list_mcp_resources",
-    "list_mcp_resource_templates",
-    "read_mcp_resource",
-    "request_user_input",
-    "view_image",
-    "harness_web_search",
-    "vision_inspect",
-  ]),
   availableModels: [
     { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash", endpoint: "responses", supportsVision: false, status: "available" },
     { id: "deepseek-v4-flash-free", label: "DeepSeek V4 Flash Free", endpoint: "responses", free: true, supportsVision: false, quota5h: 100000, status: "available" },
@@ -209,18 +197,6 @@ const DEEPSEEK_OFFICIAL_PROFILE = {
   // ("Unsupported custom tool: 'shell_command'. Only 'apply_patch' is supported.").
   // Hosted web_search is native too (echoed in the response tools list); tool_search is
   // silently ignored. So the same allowlist as opencode-go works, and nothing is blocked.
-  coreTools: new Set([
-    "shell_command",
-    "apply_patch",
-    "update_plan",
-    "list_mcp_resources",
-    "list_mcp_resource_templates",
-    "read_mcp_resource",
-    "request_user_input",
-    "view_image",
-    "harness_web_search",
-    "vision_inspect",
-  ]),
   availableModels: [
     { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash", endpoint: "responses", supportsVision: false, status: "available" },
     { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro", endpoint: "responses", supportsVision: false, status: "available" },

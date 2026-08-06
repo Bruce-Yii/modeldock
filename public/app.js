@@ -154,7 +154,8 @@ function render(data) {
   set("cfg-vision", data.config.visionModel);
   set("cfg-fallback", data.config.visionFallbackModel);
   set("cfg-exa", data.config.exaMcpUrl);
-  renderMessaging(data.config ? { config: data.config } : {});
+  renderAutostart(data);
+  maybePromptSettings(data.config);
   renderRecent(data.recent || []);
 }
 
@@ -212,9 +213,9 @@ function renderModelOptions(data) {
   }
 }
 
-let debugBusy = false;
+let autostartBusy = false;
 let modelBusy = false;
-let debugEnabled = false;
+let autostartEnabled = false;
 
 async function setModels() {
   modelBusy = true;
@@ -234,34 +235,37 @@ async function setModels() {
   }
 }
 
-function renderMessaging(data) {
-  debugEnabled = Boolean(data.config?.debug?.enabled);
-  const toggle = $("debug-toggle");
-  toggle.checked = debugEnabled;
-  toggle.disabled = debugBusy;
-  $("buffer-mode-label").classList.toggle("active", !debugEnabled);
-  $("streaming-mode-label").classList.toggle("active", debugEnabled);
-  toggle.title = debugEnabled ? "Verbose gateway logging" : "Minimal gateway logging";
+function renderAutostart(data) {
+  autostartEnabled = Boolean(data.autostart?.enabled);
+  const supported = Boolean(data.autostart?.supported);
+  const toggle = $("autostart-toggle");
+  toggle.checked = autostartEnabled;
+  toggle.disabled = autostartBusy || !supported;
+  $("autostart-off-label").classList.toggle("active", !autostartEnabled);
+  $("autostart-on-label").classList.toggle("active", autostartEnabled);
+  toggle.title = supported
+    ? (autostartEnabled ? "Start at login: on" : "Start at login: off")
+    : "Autostart is not supported on this platform";
 }
 
-async function setDebugEnabled(enabled) {
-  debugBusy = true;
-  $("debug-toggle").disabled = true;
+async function setAutostartEnabled(enabled) {
+  autostartBusy = true;
+  $("autostart-toggle").disabled = true;
   try {
-    const response = await fetch("/api/debug", {
+    const response = await fetch("/api/autostart", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ enabled }),
     });
     const body = await response.json();
-    if (!response.ok) throw new Error(body.error?.message || `Debug update ${response.status}`);
-    renderMessaging({ config: { debug: { enabled: body.enabled } } });
+    if (!response.ok) throw new Error(body.error?.message || `Autostart update ${response.status}`);
+    renderAutostart({ autostart: { supported: true, enabled: body.enabled } });
   } catch (error) {
-    renderMessaging({ config: { debug: { enabled: debugEnabled } } });
+    renderAutostart({ autostart: { supported: true, enabled: autostartEnabled } });
     window.alert(error.message);
   } finally {
-    debugBusy = false;
-    $("debug-toggle").disabled = false;
+    autostartBusy = false;
+    $("autostart-toggle").disabled = false;
   }
 }
 
@@ -358,8 +362,8 @@ $("proxy-toggle").addEventListener("change", async (event) => {
   await configAction(enabling ? "enable" : "disable");
 });
 
-$("debug-toggle").addEventListener("change", (event) => {
-  setDebugEnabled(event.target.checked);
+$("autostart-toggle").addEventListener("change", (event) => {
+  setAutostartEnabled(event.target.checked);
 });
 
 $("main-provider-select").addEventListener("change", async (event) => {
@@ -381,3 +385,79 @@ $("vision-provider-select").addEventListener("change", () => {
 
 $("restart-ack").addEventListener("click", () => configAction("restart-ack"));
 $("trace-detail-close").addEventListener("click", () => { $("trace-detail").hidden = true; });
+
+let settingsPrompted = false;
+
+function maybePromptSettings(config) {
+  if (settingsPrompted) return;
+  settingsPrompted = true;
+  if (config && !config.tokenConfigured) {
+    openSettings();
+  }
+}
+
+async function openSettings() {
+  const dialog = $("settings-dialog");
+  if (!dialog) return;
+  try {
+    const response = await fetch("/api/settings", { cache: "no-store" });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error?.message || `Settings ${response.status}`);
+    const go = (data.providers || []).find((p) => p.id === "opencode-go");
+    const ds = (data.providers || []).find((p) => p.id === "deepseek-official");
+    const goInput = $("settings-go-token");
+    const dsInput = $("settings-deepseek-token");
+    goInput.value = "";
+    dsInput.value = "";
+    goInput.placeholder = go?.tokenConfigured ? "configured - leave blank to keep" : "sk-... (required)";
+    dsInput.placeholder = ds?.tokenConfigured ? "configured - leave blank to keep" : "sk-... (optional)";
+    $("settings-status").textContent = "";
+    $("settings-envfile").textContent = data.envFile || "";
+    if (typeof dialog.showModal === "function") dialog.showModal();
+    else dialog.setAttribute("open", "");
+  } catch (error) {
+    window.alert(error.message);
+  }
+}
+
+function closeSettings() {
+  const dialog = $("settings-dialog");
+  if (typeof dialog.close === "function") dialog.close();
+  else dialog.removeAttribute("open");
+}
+
+async function saveSettings() {
+  const saveBtn = $("settings-save");
+  saveBtn.disabled = true;
+  const status = $("settings-status");
+  status.textContent = "Saving...";
+  try {
+    const body = {};
+    const go = $("settings-go-token").value.trim();
+    const ds = $("settings-deepseek-token").value.trim();
+    if (go) body.opencodeGoToken = go;
+    if (ds) body.deepseekApiKey = ds;
+    if (!Object.keys(body).length) {
+      closeSettings();
+      return;
+    }
+    const response = await fetch("/api/settings", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error?.message || `Save ${response.status}`);
+    status.textContent = "Saved - active now";
+    closeSettings();
+    poll().catch(() => {});
+  } catch (error) {
+    status.textContent = error.message;
+  } finally {
+    saveBtn.disabled = false;
+  }
+}
+
+$("settings-open")?.addEventListener("click", openSettings);
+$("settings-close")?.addEventListener("click", closeSettings);
+$("settings-save")?.addEventListener("click", saveSettings);

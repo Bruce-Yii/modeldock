@@ -45,8 +45,6 @@ test("deepseek-official profile routes the main model on DeepSeek with harness o
   assert.equal(DEEPSEEK_OFFICIAL_PROFILE.harnessToolNames.has("vision_inspect"), true);
   assert.ok(DEEPSEEK_OFFICIAL_PROFILE.harnessTools.webSearch, "web search harness tool defined");
   assert.ok(DEEPSEEK_OFFICIAL_PROFILE.harnessTools.vision, "vision harness tool defined");
-  assert.equal(DEEPSEEK_OFFICIAL_PROFILE.coreTools.has("apply_patch"), true, "apply_patch is the only Codex local tool DeepSeek accepts");
-  assert.equal(DEEPSEEK_OFFICIAL_PROFILE.coreTools.has("shell_command"), false, "shell_command is rejected by the DeepSeek Responses API");
   assert.equal(DEEPSEEK_OFFICIAL_PROFILE.baseUrl, "https://api.deepseek.com");
   assert.equal(DEEPSEEK_OFFICIAL_PROFILE.tokenEnvName, "DEEPSEEK_API_KEY");
   assert.deepEqual(DEEPSEEK_OFFICIAL_PROFILE.availableModels.map((model) => model.id), ["deepseek-v4-flash", "deepseek-v4-pro"]);
