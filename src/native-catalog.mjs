@@ -12,19 +12,16 @@ import path from "node:path";
 // the gateway can route them to the native backend instead of an external
 // upstream. Same approach codex-router uses for its merged catalog.
 
-// The desktop app bundles its CLI under a version-hashed directory
-// (%LOCALAPPDATA%\OpenAI\Codex\bin\<hash>\codex.exe); the hash changes on every
-// app update, so scan for the newest installed version instead of pinning one.
-function desktopBundledCodex() {
-  if (process.platform !== "win32") return null;
-  const localAppData = process.env.LOCALAPPDATA;
-  if (!localAppData) return null;
-  const binDir = path.join(localAppData, "OpenAI", "Codex", "bin");
-  if (!existsSync(binDir)) return null;
+// The desktop app bundles its CLI in different places per platform. Windows puts
+// it under a version-hashed directory (%LOCALAPPDATA%\OpenAI\Codex\bin\<hash>\
+// codex.exe); the hash changes on every app update, so scan for the newest
+// installed version instead of pinning one. macOS ships it inside the app bundle
+// (currently ChatGPT.app/Contents/Resources/codex).
+function newestCodexInDir(binDir, binaryName) {
   try {
     const matches = readdirSync(binDir, { withFileTypes: true })
       .filter((entry) => entry.isDirectory())
-      .map((entry) => path.join(binDir, entry.name, "codex.exe"))
+      .map((entry) => path.join(binDir, entry.name, binaryName))
       .filter((candidate) => existsSync(candidate))
       .sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs);
     return matches[0] || null;
@@ -33,9 +30,47 @@ function desktopBundledCodex() {
   }
 }
 
+export function desktopCodexCandidates(platform = process.platform) {
+  if (platform === "win32") {
+    const localAppData = process.env.LOCALAPPDATA;
+    if (!localAppData) return [];
+    const bundled = newestCodexInDir(path.join(localAppData, "OpenAI", "Codex", "bin"), "codex.exe");
+    return bundled ? [bundled] : [];
+  }
+  if (platform === "darwin") {
+    return [
+      newestCodexInDir(path.join(os.homedir(), "Library", "Application Support", "OpenAI", "Codex", "bin"), "codex"),
+      "/Applications/ChatGPT.app/Contents/Resources/codex",
+      "/Applications/OpenAI Codex.app/Contents/Resources/codex",
+      path.join(os.homedir(), "Applications", "ChatGPT.app", "Contents", "Resources", "codex"),
+      path.join(os.homedir(), "Applications", "OpenAI Codex.app", "Contents", "Resources", "codex"),
+    ].filter(Boolean);
+  }
+  return [];
+}
+
+function desktopBundledCodex() {
+  return desktopCodexCandidates().find((candidate) => existsSync(candidate)) || null;
+}
+
+function pathCodex() {
+  if (process.platform === "win32") return null;
+  try {
+    const output = execFileSync("which", ["codex"], {
+      encoding: "utf8",
+      timeout: 5_000,
+      windowsHide: true,
+    });
+    const candidate = String(output || "").trim().split(/\r?\n/)[0];
+    return candidate && existsSync(candidate) ? candidate : null;
+  } catch {
+    return null;
+  }
+}
+
 function resolveCodexBinary() {
   if (process.env.CODEX_BIN && existsSync(process.env.CODEX_BIN)) return process.env.CODEX_BIN;
-  return desktopBundledCodex();
+  return desktopBundledCodex() || pathCodex();
 }
 
 function runCodex(args) {

@@ -3,7 +3,7 @@ import test from "node:test";
 import os from "node:os";
 import path from "node:path";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
-import { nativeCatalogPath, nativeModelSlugs, readNativeCatalog } from "./native-catalog.mjs";
+import { desktopCodexCandidates, nativeCatalogPath, nativeModelSlugs, readNativeCatalog } from "./native-catalog.mjs";
 
 function writeCapture(file, models) {
   writeFileSync(file, JSON.stringify({ captured_with: "0.1.0", models }), "utf8");
@@ -49,4 +49,15 @@ test("nativeModelSlugs includes every captured slug, hidden or not", () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("desktopCodexCandidates covers the bundled Windows and macOS CLIs", () => {
+  const mac = desktopCodexCandidates("darwin");
+  assert.ok(
+    mac.some((candidate) => candidate.endsWith(path.join("ChatGPT.app", "Contents", "Resources", "codex"))),
+    "macOS must include the ChatGPT.app bundled Codex CLI",
+  );
+
+  const win = desktopCodexCandidates("win32");
+  assert.ok(win.every((candidate) => candidate.endsWith("codex.exe")), "Windows candidates must point at codex.exe");
 });
