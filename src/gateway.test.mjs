@@ -6,9 +6,14 @@ import {
   applyToolPolicy,
   createUsageTee,
   currentTurnStartForTesting,
+  isNativeModel,
+  nativeTarget,
+  normalizeNativeInput,
   normalizeGatewayInput,
   pipeGatewayStream,
   redactBearer,
+  relayNativeImage,
+  relayNativeResponses,
   relayResponses,
   rewriteHistoricalImages,
   routeGatewayRequest,
@@ -452,4 +457,195 @@ test("relayResponses rejects requests without a configured upstream token", asyn
   assert.equal(result.httpStatus, 503);
   const body = Buffer.concat(sink.chunks).toString("utf8");
   assert.match(body, /configuration_error/);
+});
+
+test("isNativeModel distinguishes catalog slugs from native GPT ids", () => {
+  const known = new Set(["deepseek-v4-flash", "gpt-5.6-luna"]);
+  assert.equal(isNativeModel("gpt-5.6-sol", known), true);
+  assert.equal(isNativeModel("gpt-5.5", known), true);
+  assert.equal(isNativeModel("deepseek-v4-flash", known), false);
+  assert.equal(isNativeModel("gpt-5.6-luna", known), false);
+  assert.equal(isNativeModel("", known), false, "an empty model id stays on the routed path");
+  assert.equal(isNativeModel(undefined, known), false);
+});
+
+test("nativeTarget strips the keyed and bare /v1 prefixes", () => {
+  assert.equal(nativeTarget("/c/k123/v1/responses", ""), "https://chatgpt.com/backend-api/codex/responses");
+  assert.equal(nativeTarget("/v1/responses", ""), "https://chatgpt.com/backend-api/codex/responses");
+  assert.equal(nativeTarget("/v1/images/generations", "?model=x"), "https://chatgpt.com/backend-api/codex/images/generations?model=x");
+});
+
+test("normalizeNativeInput strips non-opaque reasoning and expands summaries", () => {
+  const input = [
+    { type: "reasoning", encrypted_content: "local plaintext reasoning with spaces", summary: "kept" },
+    { type: "reasoning", encrypted_content: "gAAAAABopaque_token_without_spaces", summary: "kept" },
+    { type: "compaction", encrypted_content: [{ type: "summary_text", text: "earlier context" }] },
+    { type: "compaction", encrypted_content: "gAAAAABopaque_fernettoken" },
+    { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
+  ];
+  const out = normalizeNativeInput(input);
+  assert.equal(out[0].encrypted_content, undefined, "non-opaque reasoning blob is stripped");
+  assert.equal(out[0].summary, "kept");
+  assert.equal(out[1].encrypted_content, "gAAAAABopaque_token_without_spaces", "opaque native token passes through");
+  assert.equal(out[2].type, "message");
+  assert.match(out[2].content[0].text, /earlier context/);
+  assert.equal(out[3].encrypted_content, "gAAAAABopaque_fernettoken", "opaque compaction token passes through");
+  assert.equal(out[4], input[4]);
+});
+
+test("relayNativeResponses forwards native GPT traffic to the ChatGPT backend", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, headers: options.headers, body: JSON.parse(options.body) });
+    return new Response(
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(Buffer.from('event: response.completed\ndata: {"type":"response.completed","response":{"usage":{"input_tokens":9,"output_tokens":3}}}\n\n'));
+          controller.close();
+        },
+      }),
+      { status: 200, headers: { "content-type": "text/event-stream" } },
+    );
+  };
+  try {
+    const result = await relayNativeResponses(
+      {
+        model: "gpt-5.6-sol",
+        input: [
+          { type: "reasoning", encrypted_content: "local plaintext reasoning" },
+          { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
+        ],
+        previous_response_id: "resp_old",
+        tools: [{ type: "web_search" }],
+      },
+      res,
+      {
+        recordUsage: () => {},
+        metrics: { begin: () => () => {}, recordResponseUsage: () => {} },
+        incomingHeaders: {
+          authorization: "Bearer chatgpt-token",
+          "chatgpt-account-id": "acct-1",
+          "x-oai-attestation": "attest",
+          "x-codex-window-id": "w1",
+          host: "127.0.0.1:4097",
+        },
+        requestUrl: "/c/key123/v1/responses",
+      },
+    );
+    assert.equal(result.ok, true);
+    assert.equal(result.upstream, "openai");
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, "https://chatgpt.com/backend-api/codex/responses");
+    assert.equal(calls[0].headers.authorization, "Bearer chatgpt-token");
+    assert.equal(calls[0].headers["chatgpt-account-id"], "acct-1");
+    assert.equal(calls[0].headers["x-oai-attestation"], "attest");
+    assert.equal(calls[0].headers["x-codex-window-id"], "w1");
+    assert.equal(calls[0].headers.host, undefined, "loopback bookkeeping headers are not forwarded");
+    assert.equal(calls[0].body.previous_response_id, undefined, "previous_response_id is dropped for native");
+    assert.equal(calls[0].body.model, "gpt-5.6-sol");
+    assert.equal(calls[0].body.input[0].encrypted_content, undefined, "non-opaque reasoning is stripped");
+    assert.equal(calls[0].body.input[1].content[0].text, "hi");
+    assert.equal(result.usage.input_tokens, 9);
+    const forwarded = Buffer.concat(sink.chunks).toString("utf8");
+    assert.match(forwarded, /response\.completed/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("relayNativeResponses forwards native errors untouched", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(
+    JSON.stringify({ error: { message: "native says no" } }),
+    { status: 401, headers: { "content-type": "application/json" } },
+  );
+  try {
+    const result = await relayNativeResponses(
+      { model: "gpt-5.6-sol", input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }] },
+      res,
+      {
+        recordUsage: () => {},
+        metrics: { begin: () => () => {}, recordResponseUsage: () => {} },
+        incomingHeaders: { authorization: "Bearer chatgpt-token" },
+        requestUrl: "/v1/responses",
+      },
+    );
+    assert.equal(result.ok, false);
+    assert.equal(result.httpStatus, 401);
+    const body = Buffer.concat(sink.chunks).toString("utf8");
+    assert.match(body, /native says no/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("relayResponses routes unknown slugs to the native leg instead of default_main", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    calls.push(url);
+    return new Response(JSON.stringify({ error: { message: "x" } }), { status: 401 });
+  };
+  try {
+    const result = await relayResponses(
+      { model: "gpt-5.5", input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }] },
+      res,
+      {
+        recordUsage: () => {},
+        config: configStub(),
+        metrics: { begin: () => () => {}, recordResponseUsage: () => {} },
+        routeAffinity: new RouteAffinity(),
+        knownModels: new Set(["deepseek-v4-flash", "gpt-5.6-luna"]),
+        mainModel: "deepseek-v4-flash",
+        visionModel: "gpt-5.6-luna",
+        incomingHeaders: { authorization: "Bearer chatgpt-token" },
+        requestUrl: "/v1/responses",
+      },
+    );
+    assert.equal(calls.length, 1);
+    assert.match(calls[0], /chatgpt\.com\/backend-api\/codex\/responses/);
+    assert.equal(result.ok, false);
+    assert.equal(result.httpStatus, 401);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("relayNativeImage forwards image generation to the native backend", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, body: JSON.parse(options.body) });
+    return new Response(JSON.stringify({ data: [{ b64_json: "abc" }] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  try {
+    const result = await relayNativeImage(
+      { model: "gpt-image-2", prompt: "a dashboard mockup", size: "1536x1024" },
+      res,
+      {
+        incomingHeaders: { authorization: "Bearer chatgpt-token" },
+        requestUrl: "/c/key123/v1/images/generations",
+      },
+    );
+    assert.equal(result.ok, true);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, "https://chatgpt.com/backend-api/codex/images/generations");
+    assert.equal(calls[0].body.prompt, "a dashboard mockup");
+    const forwarded = Buffer.concat(sink.chunks).toString("utf8");
+    assert.match(forwarded, /b64_json/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

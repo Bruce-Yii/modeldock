@@ -8,7 +8,7 @@ import { loadConfig, publicConfig, writeEnvFile, envFileFor, migrateEnvSecrets }
 import { catalogFor } from "./catalog.mjs";
 import { MediaStore } from "./media-store.mjs";
 import { Metrics } from "./metrics.mjs";
-import { relayResponses as relayGatewayResponses } from "./gateway.mjs";
+import { NATIVE_IMAGE_PATHS, relayNativeImage, relayResponses as relayGatewayResponses } from "./gateway.mjs";
 import { createUpstreams } from "./upstreams.mjs";
 import { createMcpNodeHandler } from "./mcp.mjs";
 import { CodexConfigSwitcher } from "./config-switcher.mjs";
@@ -403,6 +403,9 @@ async function relayGatewayRequest(req, res, services) {
     knownModels: publishedModelIds(config),
     mainModel: modelSelection?.mainModel || config.mainModel,
     visionModel: modelSelection?.visionModel || config.visionModel,
+    // The native passthrough leg forwards these to ChatGPT's backend untouched.
+    incomingHeaders: req.headers,
+    requestUrl: req.originalUrl,
   });
   if (result?.route?.reason === "client_selected" && modelSelection && result.route.model !== modelSelection.mainModel) {
     modelSelection.mainModel = result.route.model;
@@ -651,6 +654,14 @@ export function createApp(services = createServices()) {
   };
   app.post(`${CALLER_PATH_PREFIX}/:key/v1/responses`, requireCallerKey, (req, res) => relayGatewayRequest(req, res, services));
   app.get(`${CALLER_PATH_PREFIX}/:key/v1/models`, requireCallerKey, (req, res) => serveModels(req, res, services));
+  // The built-in image_gen tool posts to the openai_base_url's images endpoints;
+  // with the transparent config those land here and go straight to the native
+  // backend on the client's subscription (no Platform API key needed).
+  const nativeImageRelay = (req, res) => relayNativeImage(req.body, res, {
+    incomingHeaders: req.headers,
+    requestUrl: req.originalUrl,
+  });
+  app.post([...NATIVE_IMAGE_PATHS].map((item) => `${CALLER_PATH_PREFIX}/:key${item}`), requireCallerKey, nativeImageRelay);
   // Bare paths stay for compatibility with configs written before the caller key
   // existed. MODELDOCK_REQUIRE_CALLER_KEY=1 turns them off once the switch has
   // been re-enabled and Codex uses the keyed URL.
@@ -660,7 +671,14 @@ export function createApp(services = createServices()) {
     }
     return relayGatewayRequest(req, res, services);
   };
+  const bareNativeImageRelay = (req, res) => {
+    if (process.env.MODELDOCK_REQUIRE_CALLER_KEY === "1") {
+      return res.status(401).json({ error: { type: "caller_key_required", message: "This gateway requires the keyed base URL; re-enable the Codex switch." } });
+    }
+    return nativeImageRelay(req, res);
+  };
   app.post(["/v1/responses", "/responses"], bareRelay);
+  app.post([...NATIVE_IMAGE_PATHS], bareNativeImageRelay);
   app.get(["/v1/models", "/models"], (req, res) => serveModels(req, res, services));
   app.get("/healthz", (req, res) => {
     const tokenReady = Boolean(tokenFor(config, services.modelSelection?.mainModel) || (config.tokens && Object.values(config.tokens).some(Boolean)));

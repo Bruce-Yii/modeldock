@@ -32,22 +32,31 @@ async function fixture(t) {
   };
 }
 
-test("managed config replaces only top-level provider defaults", () => {
+test("managed config keeps the built-in provider and redirects its base URL", () => {
   const managed = buildManagedCodexConfig(originalConfig, {
-    baseUrl: "http://127.0.0.1:4097/v1",
+    baseUrl: "http://127.0.0.1:4097/c/callerkey/v1",
     model: "deepseek-v4-flash",
+    catalogFile: "C:/Users/x/.modeldock/codex-model-catalog.json",
     mcpUrl: "http://127.0.0.1:4097/mcp",
   });
   assert.match(managed, /^model = "deepseek-v4-flash"/m);
-  assert.match(managed, /^model_provider = "modeldock_go"/m);
-  assert.match(managed, /^web_search = "disabled"/m);
+  assert.match(managed, /^openai_base_url = "http:\/\/127\.0\.0\.1:4097\/c\/callerkey\/v1"$/m);
+  assert.doesNotMatch(managed, /model_provider/);
+  assert.doesNotMatch(managed, /^web_search\s*=/m);
+  assert.doesNotMatch(managed, /model_providers\.modeldock_go/);
+  assert.match(managed, /# BEGIN modeldock-managed/);
+  assert.match(managed, /# END modeldock-managed/);
+  assert.match(managed, /^model_catalog_json = "C:\/Users\/x\/\.modeldock\/codex-model-catalog\.json"$/m);
+  assert.match(managed, /^experimental_realtime_webrtc_call_base_url = "https:\/\/chatgpt\.com\/backend-api\/codex"$/m);
+  assert.match(managed, /^experimental_realtime_ws_base_url = "https:\/\/api\.openai\.com\/v1"$/m);
   assert.match(managed, /\[features\]\nmulti_agent = true/);
   assert.match(managed, /\[mcp_servers\.docs\]/);
-  assert.equal((managed.match(/\[model_providers\.modeldock_go\]/g) || []).length, 1);
-  assert.match(managed, /\[model_providers\.modeldock_go\]\n# Managed by ModelDock\./);
-  assert.ok((managed.match(/# Managed by ModelDock/g) || []).length >= 1, "managed sections are commented");
   assert.match(managed, /\[mcp_servers\.modeldock\]\n# Managed by ModelDock: web_search_exa/);
   assert.match(managed, /url = "http:\/\/127\.0\.0\.1:4097\/mcp"/);
+  // The managed keys must stay above the first table so the TOML stays valid.
+  const table = managed.indexOf("[features]");
+  const openaiBase = managed.indexOf("openai_base_url");
+  assert.ok(openaiBase < table, "openai_base_url sits before any [table]");
 });
 
 test("managed config without mcpUrl writes no mcp_servers.modeldock section", () => {
@@ -58,6 +67,14 @@ test("managed config without mcpUrl writes no mcp_servers.modeldock section", ()
   assert.doesNotMatch(managed, /\[mcp_servers\.modeldock\]/);
 });
 
+test("managed config without catalogFile writes no model_catalog_json", () => {
+  const managed = buildManagedCodexConfig(originalConfig, {
+    baseUrl: "http://127.0.0.1:4097/v1",
+    model: "deepseek-v4-flash",
+  });
+  assert.doesNotMatch(managed, /model_catalog_json/);
+});
+
 test("defaults off, backs up on enable, and restores exact config on disable", async (t) => {
   const { configPath, switcher } = await fixture(t);
   assert.equal((await switcher.status()).enabled, false);
@@ -66,8 +83,11 @@ test("defaults off, backs up on enable, and restores exact config on disable", a
   assert.equal(enabled.enabled, true);
   assert.equal(enabled.managed, true);
   assert.equal(enabled.restartRequired, true);
+  assert.equal(enabled.targetProvider, "openai");
+  assert.equal(enabled.targetMode, "openai_base_url");
   assert.equal(await readFile(enabled.backupPath, "utf8"), originalConfig);
-  assert.match(await readFile(configPath, "utf8"), /model_provider = "modeldock_go"/);
+  const managed = await readFile(configPath, "utf8");
+  assert.match(managed, /openai_base_url = "http:\/\/127\.0\.0\.1:4097\/v1"/);
 
   assert.equal((await switcher.acknowledgeRestart()).restartRequired, false);
   const disabled = await switcher.disable();
@@ -87,6 +107,7 @@ test("preserves unrelated edits made after enable while restoring managed fields
   const restored = await readFile(configPath, "utf8");
   assert.match(restored, /model = "gpt-5.6-sol"/);
   assert.doesNotMatch(restored, /modeldock_go/);
+  assert.doesNotMatch(restored, /openai_base_url/);
   assert.doesNotMatch(restored, /Managed by ModelDock/);
   assert.match(restored, /\[plugins\.user_added\]\nenabled = true/);
 });
@@ -95,7 +116,11 @@ test("refuses restore only when ModelDock-managed fields conflict", async (t) =>
   const { configPath, switcher } = await fixture(t);
   await switcher.enable();
   const current = await readFile(configPath, "utf8");
-  await writeFile(configPath, current.replace('model_provider = "modeldock_go"', 'model_provider = "somewhere_else"'), "utf8");
+  await writeFile(
+    configPath,
+    current.replace('openai_base_url = "http://127.0.0.1:4097/v1"', 'openai_base_url = "http://127.0.0.1:9999/v1"'),
+    "utf8",
+  );
   await assert.rejects(() => switcher.disable(), (error) => error.code === "CONFIG_DRIFTED");
 });
 
@@ -135,11 +160,67 @@ test("the managed config names the catalog file and restore removes it", async (
   await switcher.enable();
 
   const managed = await readFile(path.join(home, "config.toml"), "utf8");
-  // The App never refreshes a custom provider's /models, so it needs this pointer.
   assert.match(managed, /^model_catalog_json = "C:\/Users\/x\/\.modeldock\/codex-model-catalog\.json"$/m);
 
   await switcher.disable();
   const restored = await readFile(path.join(home, "config.toml"), "utf8");
   assert.equal(/model_catalog_json/.test(restored), false, "the key is a managed field and goes away with the rest");
   assert.match(restored, /^model = "gpt-5\.6-sol"$/m, "the user's own model comes back");
+});
+
+test("a legacy modeldock_go managed config is migrated to the transparent shape", async (t) => {
+  const codexHome = await mkdtemp(path.join(os.tmpdir(), "modeldock-migrate-"));
+  t.after(() => rm(codexHome, { recursive: true, force: true }));
+  const configPath = path.join(codexHome, "config.toml");
+  await writeFile(configPath, originalConfig, "utf8");
+  const switcher = new CodexConfigSwitcher({
+    codexHome,
+    baseUrl: "http://127.0.0.1:4097/v1",
+    model: "deepseek-v4-flash",
+    catalogFile: "C:/Users/x/.modeldock/codex-model-catalog.json",
+  });
+  await switcher.enable();
+  // Simulate the pre-transparent managed config this gate used to write.
+  const legacy = `model = "deepseek-v4-flash"
+model_provider = "modeldock_go"
+web_search = "disabled"
+model_catalog_json = "C:/Users/x/.modeldock/codex-model-catalog.json"
+
+[model_providers.modeldock_go]
+# Managed by ModelDock. Use the dashboard to restore the backup.
+name = "ModelDock"
+base_url = "http://127.0.0.1:4097/c/key/v1"
+wire_api = "responses"
+experimental_bearer_token = "local-modeldock"
+`;
+  await writeFile(configPath, legacy, "utf8");
+  const status = await switcher.status();
+  assert.equal(status.enabled, true);
+  assert.equal(status.needsMigration, true);
+
+  const migrated = await switcher.enable();
+  assert.equal(migrated.enabled, true);
+  assert.equal(migrated.needsMigration, false);
+  const text = await readFile(configPath, "utf8");
+  assert.match(text, /openai_base_url =/);
+  assert.doesNotMatch(text, /model_provider/);
+  assert.doesNotMatch(text, /modeldock_go/);
+  assert.doesNotMatch(text, /^web_search\s*=/m);
+  assert.match(text, /model_catalog_json = "C:\/Users\/x\/\.modeldock\/codex-model-catalog\.json"/);
+});
+
+test("enable refuses when codex-router already manages openai_base_url", async (t) => {
+  const codexHome = await mkdtemp(path.join(os.tmpdir(), "modeldock-codex-router-conflict-"));
+  t.after(() => rm(codexHome, { recursive: true, force: true }));
+  const configPath = path.join(codexHome, "config.toml");
+  const routerManaged = `model = "opencode-go/deepseek-v4-flash"
+# BEGIN codex-router-managed
+openai_base_url = "http://127.0.0.1:4102/_codex-router/key/v1"
+model_catalog_json = "C:/Users/x/codex-router/merged-models.json"
+# END codex-router-managed
+`;
+  await writeFile(configPath, routerManaged, "utf8");
+  const switcher = new CodexConfigSwitcher({ codexHome, baseUrl: "http://127.0.0.1:4097/v1", model: "deepseek-v4-flash" });
+  await assert.rejects(() => switcher.enable(), (error) => error.code === "EXTERNAL_MANAGED");
+  assert.equal(await readFile(configPath, "utf8"), routerManaged, "the conflicting config is left untouched");
 });

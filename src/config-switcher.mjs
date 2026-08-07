@@ -14,20 +14,89 @@ function tomlString(value) {
   return JSON.stringify(String(value));
 }
 
-function removeManagedProvider(lines) {
-  const output = [];
-  let skipping = false;
+// The transparent mode keeps the built-in openai provider and only redirects its
+// API base to the local gate (the codex-router shape). This makes the App keep
+// listing native GPT models beside ours, keeps the ChatGPT subscription intact,
+// and leaves uses_codex_backend() true so the picker keeps refreshing. The managed
+// fields live inside a sentinel block so detection and restore are exact.
+const MANAGED_BEGIN = /^\s*#\s*BEGIN\s+modeldock-managed\s*(?:#.*)?$/m;
+const MANAGED_END = /^\s*#\s*END\s+modeldock-managed\s*(?:#.*)?$/m;
+const CODERX_ROUTER_BEGIN = /^\s*#\s*BEGIN\s+codex-router-managed\s*(?:#.*)?$/m;
+
+// Every top-level key ModelDock may write. Restoring a backup puts the user's own
+// values back, and enable() overwrites them with the managed block.
+const MANAGED_TOP_LEVEL_KEYS = [
+  "model",
+  "model_provider",
+  "web_search",
+  "model_catalog_json",
+  "openai_base_url",
+  "experimental_realtime_webrtc_call_base_url",
+  "experimental_realtime_ws_base_url",
+];
+
+function providerSection(source) {
+  const lines = source.replace(/\r\n/g, "\n").split("\n");
+  const start = lines.findIndex((line) => /^\s*\[model_providers\.modeldock_go\]\s*(?:#.*)?$/i.test(line));
+  if (start < 0) return [];
+  let end = start + 1;
+  while (end < lines.length && !/^\s*\[/.test(lines[end])) end += 1;
+  return lines.slice(start, end);
+}
+
+function isLegacyManaged(source) {
+  return topLevelString(source, "model_provider") === "modeldock_go" || providerSection(source).length > 0;
+}
+
+function isNewManaged(source) {
+  return MANAGED_BEGIN.test(source) && MANAGED_END.test(source);
+}
+
+function hasManagedRoute(source) {
+  return isLegacyManaged(source) || isNewManaged(source);
+}
+
+function hasCodexRouterBlock(source) {
+  return CODERX_ROUTER_BEGIN.test(source);
+}
+
+function extractManagedBlock(source) {
+  const lines = source.replace(/\r\n/g, "\n").split("\n");
+  const block = [];
+  let inBlock = false;
   for (const line of lines) {
-    if (/^\s*\[model_providers\.modeldock_go\]\s*(?:#.*)?$/i.test(line)) {
-      skipping = true;
+    if (MANAGED_BEGIN.test(line)) {
+      inBlock = true;
+      block.push(line.trim());
       continue;
     }
-    if (skipping && /^\s*\[/.test(line)) skipping = false;
-    if (skipping) continue;
-    if (/^\s*#\s*Managed by ModelDock/i.test(line)) continue;
-    output.push(line);
+    if (inBlock) {
+      if (MANAGED_END.test(line)) {
+        inBlock = false;
+        block.push(line.trim());
+      } else if (line.trim() && !line.trim().startsWith("#")) {
+        block.push(line.trim());
+      }
+    }
   }
-  return output;
+  return block;
+}
+
+function managedSignature(source) {
+  return JSON.stringify({
+    model: topLevelString(source, "model"),
+    block: extractManagedBlock(source),
+    legacy: {
+      modelProvider: topLevelString(source, "model_provider"),
+      webSearch: topLevelString(source, "web_search"),
+      modelCatalogJson: topLevelString(source, "model_catalog_json"),
+      provider: providerSection(source)
+        .slice(1)
+        .map((line) => line.trim())
+        .filter((line) => line && !line.startsWith("#"))
+        .sort(),
+    },
+  });
 }
 
 function topLevelLine(source, key) {
@@ -45,32 +114,48 @@ function topLevelString(source, key) {
   return match ? match[2] : null;
 }
 
-function providerSection(source) {
-  const lines = source.replace(/\r\n/g, "\n").split("\n");
-  const start = lines.findIndex((line) => /^\s*\[model_providers\.modeldock_go\]\s*(?:#.*)?$/i.test(line));
-  if (start < 0) return [];
-  let end = start + 1;
-  while (end < lines.length && !/^\s*\[/.test(lines[end])) end += 1;
-  return lines.slice(start, end);
-}
+// Remove everything ModelDock wrote: the sentinel block, the legacy
+// [model_providers.modeldock_go] section, our [mcp_servers.modeldock] section,
+// and any managed top-level key (the original values are restored separately).
+function removeManagedRoute(lines) {
+  const output = [];
+  let inSentinel = false;
+  let skippingProvider = false;
+  let skippingMcp = false;
+  for (const line of lines) {
+    if (MANAGED_BEGIN.test(line)) {
+      inSentinel = true;
+      continue;
+    }
+    if (inSentinel) {
+      if (MANAGED_END.test(line)) inSentinel = false;
+      continue;
+    }
+    if (/^\s*\[model_providers\.modeldock_go\]/.test(line)) {
+      skippingProvider = true;
+      continue;
+    }
+    if (skippingProvider && /^\s*\[/.test(line)) skippingProvider = false;
+    if (skippingProvider) continue;
+    if (/^\s*\[mcp_servers\.modeldock\]/.test(line)) {
+      skippingMcp = true;
+      continue;
+    }
+    if (skippingMcp && /^\s*\[/.test(line)) skippingMcp = false;
+    if (skippingMcp) continue;
+    if (/^\s*#\s*Managed by ModelDock/i.test(line)) continue;
+    output.push(line);
+  }
 
-function managedSignature(source) {
-  const entries = providerSection(source)
-    .slice(1)
-    .map((line) => line.trim())
-    .filter((line) => line && !line.startsWith("#"))
-    .sort();
-  return JSON.stringify({
-    model: topLevelString(source, "model"),
-    modelProvider: topLevelString(source, "model_provider"),
-    webSearch: topLevelString(source, "web_search"),
-    modelCatalogJson: topLevelString(source, "model_catalog_json"),
-    provider: entries,
-  });
-}
-
-function hasManagedRoute(source) {
-  return topLevelString(source, "model_provider") === "modeldock_go" || providerSection(source).length > 0;
+  const firstTable = output.findIndex((line) => /^\s*\[/.test(line));
+  const limit = firstTable < 0 ? output.length : firstTable;
+  const matchers = MANAGED_TOP_LEVEL_KEYS.map((key) => new RegExp(`^\\s*${key}\\s*=`));
+  const stripped = [];
+  for (let index = 0; index < output.length; index += 1) {
+    if (index < limit && matchers.some((matcher) => matcher.test(output[index]))) continue;
+    stripped.push(output[index]);
+  }
+  return stripped;
 }
 
 function restoreTopLevel(lines, key, originalLine) {
@@ -87,8 +172,8 @@ function restoreTopLevel(lines, key, originalLine) {
 export function mergeRestoredCodexConfig(current, original) {
   const newline = current.includes("\r\n") ? "\r\n" : "\n";
   const originalSection = providerSection(original);
-  const lines = removeManagedProvider(current.replace(/\r\n/g, "\n").split("\n"));
-  for (const key of ["model", "model_provider", "web_search", "model_catalog_json"]) restoreTopLevel(lines, key, topLevelLine(original, key));
+  const lines = removeManagedRoute(current.replace(/\r\n/g, "\n").split("\n"));
+  for (const key of MANAGED_TOP_LEVEL_KEYS) restoreTopLevel(lines, key, topLevelLine(original, key));
   while (lines.length && !lines.at(-1).trim()) lines.pop();
   if (originalSection.length) lines.push("", ...originalSection);
   return `${lines.join("\n").replace(/\n/g, newline)}${newline}`;
@@ -109,17 +194,30 @@ function setTopLevel(lines, key, value) {
   return lines;
 }
 
+// Build the transparent managed config: the built-in openai provider stays, its
+// base URL is redirected to the local gate, and the realtime endpoints point at
+// OpenAI so Codex Voice never dials the loopback. The catalog file keeps naming
+// our models in the App picker (openai/codex#32119 only affects custom providers).
 export function buildManagedCodexConfig(source, { baseUrl, model, catalogFile = "", mcpUrl = "" }) {
   const newline = source.includes("\r\n") ? "\r\n" : "\n";
-  let lines = removeManagedProvider(source.replace(/\r\n/g, "\n").split("\n"));
+  let lines = removeManagedRoute(source.replace(/\r\n/g, "\n").split("\n"));
   while (lines.length && !lines.at(-1).trim()) lines.pop();
   lines = setTopLevel(lines, "model", model);
-  lines = setTopLevel(lines, "model_provider", "modeldock_go");
-  lines = setTopLevel(lines, "web_search", "disabled");
-  // The Codex App does not refresh a custom provider's /models (openai/codex#32119),
-  // so point it at the catalog file the gate writes; without this the App picker shows
-  // "Custom" for every model it cannot name locally. The CLI keeps using /v1/models.
-  if (catalogFile) lines = setTopLevel(lines, "model_catalog_json", catalogFile);
+
+  const managed = [
+    "# BEGIN modeldock-managed",
+    "# Managed by ModelDock: keeps the built-in openai provider and points it at the local gate.",
+    `openai_base_url = ${tomlString(baseUrl)}`,
+  ];
+  if (catalogFile) managed.push(`model_catalog_json = ${tomlString(catalogFile)}`);
+  managed.push(
+    'experimental_realtime_webrtc_call_base_url = "https://chatgpt.com/backend-api/codex"',
+    'experimental_realtime_ws_base_url = "https://api.openai.com/v1"',
+    "# END modeldock-managed",
+  );
+  const firstTable = lines.findIndex((line) => /^\s*\[/.test(line));
+  lines.splice(firstTable < 0 ? lines.length : firstTable, 0, "", ...managed);
+
   if (mcpUrl) {
     lines.push(
       "",
@@ -128,16 +226,6 @@ export function buildManagedCodexConfig(source, { baseUrl, model, catalogFile = 
       `url = ${tomlString(mcpUrl)}`,
     );
   }
-  lines.push(
-    "",
-    "[model_providers.modeldock_go]",
-    "# Managed by ModelDock. Use the dashboard to restore the backup.",
-    'name = "ModelDock"',
-    `base_url = ${tomlString(baseUrl)}`,
-    'wire_api = "responses"',
-    "# Local-only placeholder; ModelDock replaces it with OPENCODE_GO_TOKEN upstream.",
-    'experimental_bearer_token = "local-modeldock"',
-  );
   return `${lines.join("\n").replace(/\n/g, newline)}${newline}`;
 }
 
@@ -149,8 +237,6 @@ export class CodexConfigSwitcher {
     this.statePath = path.join(this.stateDir, "config-switch-state.json");
     this.baseUrl = baseUrl;
     this.model = model;
-    // Written by the gate; named in the managed config so the Codex App can list our
-    // models instead of labelling every one of them "Custom".
     this.catalogFile = catalogFile;
     this.mcpUrl = mcpUrl;
   }
@@ -197,9 +283,21 @@ export class CodexConfigSwitcher {
       backupPath: state.backupPath || state.lastBackupPath || null,
       changedAt: state.changedAt || null,
       targetModel: this.model,
-      targetProvider: "modeldock_go",
+      targetProvider: "openai",
+      targetMode: "openai_base_url",
+      needsMigration: Boolean(state.enabled && routeActive && !isNewManaged(current) && isLegacyManaged(current)),
+      codexRouterConflict: hasCodexRouterBlock(current),
       stateError: state.stateError || null,
     };
+  }
+
+  async #readCurrent() {
+    try {
+      return await readFile(this.configPath, "utf8");
+    } catch (error) {
+      if (error.code === "ENOENT") return "";
+      throw error;
+    }
   }
 
   async enable() {
@@ -207,7 +305,15 @@ export class CodexConfigSwitcher {
     if (state.stateError) throw Object.assign(new Error(`Cannot read switch state: ${state.stateError}`), { code: "STATE_INVALID" });
     if (state.enabled) {
       const status = await this.status();
-      if (status.enabled) return status;
+      if (status.enabled) {
+        // Re-write the config once when it still carries the pre-transparent
+        // modeldock_go provider shape, so upgrades land on openai_base_url.
+        if (status.needsMigration) {
+          await this.disable({ migrating: true });
+          return this.enable();
+        }
+        return status;
+      }
       await this.disable();
       return this.enable();
     }
@@ -220,15 +326,27 @@ export class CodexConfigSwitcher {
       if (error.code !== "ENOENT") throw error;
       originalExisted = false;
     }
+    if (hasCodexRouterBlock(original)) {
+      throw Object.assign(
+        new Error("codex-router also manages openai_base_url; disable its integration before enabling ModelDock."),
+        { code: "EXTERNAL_MANAGED" },
+      );
+    }
+
     const backupPath = path.join(this.codexHome, `config.toml.modeldock-backup-${timestamp()}-${randomUUID().slice(0, 8)}`);
     if (originalExisted) await copyFile(this.configPath, backupPath);
     else await writeFile(backupPath, "", { encoding: "utf8", flag: "wx", mode: 0o600 });
 
-    const managed = buildManagedCodexConfig(original, { baseUrl: this.baseUrl, model: this.model, catalogFile: this.catalogFile, mcpUrl: this.mcpUrl });
+    const managed = buildManagedCodexConfig(original, {
+      baseUrl: this.baseUrl,
+      model: this.model,
+      catalogFile: this.catalogFile,
+      mcpUrl: this.mcpUrl,
+    });
     try {
       await writeFile(this.configPath, managed, { encoding: "utf8", mode: 0o600 });
       await this.#writeState({
-        version: 1,
+        version: 2,
         enabled: true,
         restartRequired: true,
         backupPath,
@@ -245,29 +363,31 @@ export class CodexConfigSwitcher {
     return this.status();
   }
 
-  async disable() {
+  async disable({ migrating = false } = {}) {
     const state = await this.#readState();
     if (!state.enabled) return this.status();
-    let current = "";
-    try {
-      current = await readFile(this.configPath, "utf8");
-    } catch (error) {
-      if (error.code !== "ENOENT") throw error;
-    }
+    let current = await this.#readCurrent();
     const routeActive = hasManagedRoute(current);
     let backup = "";
     if (routeActive) {
       try {
         backup = await readFile(state.backupPath, "utf8");
       } catch (error) {
-        throw Object.assign(new Error("ModelDock backup is missing while its provider is still active; restore requires manual review."), {
+        throw Object.assign(new Error("ModelDock backup is missing while its route is still active; restore requires manual review."), {
           code: "STATE_INVALID",
           cause: error,
         });
       }
-      const expected = buildManagedCodexConfig(backup, { baseUrl: this.baseUrl, model: this.model, mcpUrl: this.mcpUrl });
-      if (sha256(current) !== state.managedHash && managedSignature(current) !== managedSignature(expected)) {
-        throw Object.assign(new Error("ModelDock-managed provider fields changed outside ModelDock; refusing an ambiguous restore."), {
+      const expected = buildManagedCodexConfig(backup, {
+        baseUrl: this.baseUrl,
+        model: this.model,
+        catalogFile: this.catalogFile,
+        mcpUrl: this.mcpUrl,
+      });
+      // `migrating` is only ever set by enable() when the on-disk config is our
+      // own pre-transparent modeldock_go shape; that is not user drift.
+      if (!migrating && sha256(current) !== state.managedHash && managedSignature(current) !== managedSignature(expected)) {
+        throw Object.assign(new Error("ModelDock-managed route fields changed outside ModelDock; refusing an ambiguous restore."), {
           code: "CONFIG_DRIFTED",
         });
       }
@@ -278,7 +398,7 @@ export class CodexConfigSwitcher {
         await writeFile(this.configPath, restored, { encoding: "utf8", mode: 0o600 });
       } else if (routeActive) await unlink(this.configPath);
       await this.#writeState({
-        version: 1,
+        version: 2,
         enabled: false,
         restartRequired: routeActive ? true : Boolean(state.restartRequired),
         lastBackupPath: state.backupPath,

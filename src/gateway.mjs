@@ -28,6 +28,135 @@ function redactBearer(value) {
 
 export { redactBearer };
 
+// Native GPT passthrough (the parallel leg). Model slugs the catalog does not
+// publish - the built-in provider's own GPT-5.x ids that the App picker lists
+// from its native model list - are forwarded verbatim to ChatGPT's Codex
+// backend with the client's signed-in headers. That is what keeps native GPT
+// usable in the same picker as our catalog models while the openai_base_url
+// managed config is active. Same shape as codex-router's native leg.
+const NATIVE_BASE = process.env.CODEX_NATIVE_BASE_URL || "https://chatgpt.com/backend-api/codex";
+
+export const NATIVE_IMAGE_PATHS = new Set([
+  "/images/edits",
+  "/images/generations",
+  "/v1/images/edits",
+  "/v1/images/generations",
+]);
+
+// Headers Codex's signed-in transport sends that the native backend needs.
+// Everything else (tokens for routed providers, loopback bookkeeping) stays out.
+const NATIVE_FORWARD_HEADERS = new Set([
+  "authorization",
+  "chatgpt-account-id",
+  "openai-beta",
+  "originator",
+  "session_id",
+  "session-id",
+  "thread-id",
+  "x-client-request-id",
+  "x-codex-beta-features",
+  "x-codex-installation-id",
+  "x-codex-parent-thread-id",
+  "x-codex-turn-metadata",
+  "x-codex-turn-state",
+  "x-codex-window-id",
+  "x-oai-attestation",
+  "x-openai-subagent",
+  "x-responsesapi-include-timing-metrics",
+]);
+
+function nativeHeaders(incoming) {
+  const headers = {
+    "Content-Type": "application/json",
+    "Accept-Encoding": "identity",
+    "User-Agent": "modeldock-gateway/0.1",
+  };
+  for (const name of NATIVE_FORWARD_HEADERS) {
+    const value = incoming?.[name];
+    if (value !== undefined) headers[name] = Array.isArray(value) ? value.join(", ") : value;
+  }
+  return headers;
+}
+
+function splitRequestUrl(url) {
+  const question = String(url || "").indexOf("?");
+  return question < 0
+    ? { pathname: String(url || ""), search: "" }
+    : { pathname: String(url).slice(0, question), search: String(url).slice(question) };
+}
+
+// Map the path Codex sent (keyed /c/<key>/v1/... or bare /v1/...) onto the
+// native backend path (no /v1 prefix). /v1/responses -> /responses.
+export function nativeTarget(pathname, search) {
+  const withoutPrefix = String(pathname)
+    .replace(/^\/c\/[^/]+\/v1/, "")
+    .replace(/^\/v1(?=\/|$)/, "");
+  return `${NATIVE_BASE}${withoutPrefix}${search || ""}`;
+}
+
+// A slug we do not serve is native GPT traffic. Empty models (provider defaults
+// with no id) stay on the routed path so the dashboard selection still applies.
+export function isNativeModel(requestedModel, knownModels) {
+  return (
+    typeof requestedModel === "string"
+    && requestedModel.length > 0
+    && !(knownModels && knownModels.has(requestedModel))
+  );
+}
+
+function isOpaqueEncryptedContent(value) {
+  return typeof value === "string" && value.length > 0 && !/\s/.test(value);
+}
+
+// OpenAI-issued reasoning encrypted_content is an opaque Fernet-style token with
+// no whitespace. Local providers that mimic the shape with a plain-text summary
+// must be stripped before replay to the native backend, which rejects the blob
+// with "Encrypted content could not be decrypted or parsed." The item's summary
+// still carries the readable reasoning.
+function sanitizeReasoningForNative(item) {
+  if (item?.encrypted_content === undefined) return item;
+  if (isOpaqueEncryptedContent(item.encrypted_content)) return item;
+  const { encrypted_content, ...rest } = item;
+  return rest;
+}
+
+function compactionSummaryText(item) {
+  if (Array.isArray(item?.encrypted_content)) {
+    return item.encrypted_content
+      .filter((part) => ["summary_text", "text"].includes(part?.type) && typeof part.text === "string")
+      .map((part) => part.text)
+      .join("\n");
+  }
+  if (typeof item?.encrypted_content === "string" && item.encrypted_content.length) {
+    if (isOpaqueEncryptedContent(item.encrypted_content)) return undefined;
+    return item.encrypted_content;
+  }
+  return undefined;
+}
+
+// Native input rewrites: strip non-opaque reasoning blobs and expand compaction
+// summaries into a plain message the native backend accepts. Opaque native
+// tokens pass through untouched.
+export function normalizeNativeInput(input) {
+  if (!Array.isArray(input)) return input;
+  return input.map((item) => {
+    if (item?.type === "reasoning") return sanitizeReasoningForNative(item);
+    if (item?.type !== "compaction") return item;
+    const summary = compactionSummaryText(item);
+    if (summary === undefined) return item;
+    return {
+      type: "message",
+      role: "user",
+      content: [
+        {
+          type: "input_text",
+          text: `Another language model started this task and produced a continuation summary. Use it to continue without repeating completed work:\n\n${summary}`,
+        },
+      ],
+    };
+  });
+}
+
 // The only input rewriting the gateway is allowed to do. Everything else in the
 // history must pass through untouched.
 export function normalizeGatewayInput(input) {
@@ -269,12 +398,156 @@ export async function pipeGatewayStream(upstreamBody, res, tee) {
   return bytes;
 }
 
+// Native passthrough for a Responses request. Unlike the routed path there is no
+// tool policy, no historical-image rewrite, and no image escalation: the native
+// backend owns hosted tools, history images, and its own vision. Only the input
+// normalization above and previous_response_id removal apply, then the stream is
+// piped byte-for-byte with the client's signed-in headers.
+export async function relayNativeResponses(payload, res, services, { signal } = {}) {
+  const { incomingHeaders, requestUrl, metrics } = services;
+  const native = { ...payload };
+  if (Array.isArray(payload.input)) native.input = normalizeNativeInput(payload.input);
+  delete native.previous_response_id;
+  const { pathname, search } = splitRequestUrl(requestUrl);
+  const target = nativeTarget(pathname, search);
+  const finish = metrics?.begin?.("responses", {
+    operation: "native_passthrough",
+    model: payload.model,
+    upstream: "openai",
+    routeReason: "native_passthrough",
+  });
+  const startedAt = Date.now();
+  let usage;
+  const tee = createUsageTee((event) => {
+    const eventUsage = usageFromEvent(event);
+    if (eventUsage) usage = eventUsage;
+  });
+  try {
+    const upstream = await fetch(target, {
+      method: "POST",
+      headers: nativeHeaders(incomingHeaders),
+      body: JSON.stringify(native),
+      signal,
+    });
+    const upstreamBytes = Buffer.byteLength(JSON.stringify(native));
+    if (!upstream.ok) {
+      const raw = await upstream.text();
+      if (!res.headersSent) {
+        res.statusCode = upstream.status;
+        res.setHeader("Content-Type", upstream.headers.get("content-type") || "application/json");
+        res.setHeader("Cache-Control", "no-cache, no-transform");
+        res.end(raw);
+      }
+      finish?.({ ok: false, httpStatus: upstream.status, upstream: "openai", error: redactBearer(raw).slice(0, 400) });
+      metrics?.recordResponseUsage?.({ bytesOut: 0, usage });
+      (services.recordUsage || recordUsageEvent)({
+        model: payload.model,
+        provider: "openai",
+        route: "native_passthrough",
+        status: upstream.status,
+        durationMs: Date.now() - startedAt,
+      });
+      return { ok: false, httpStatus: upstream.status, route: { model: payload.model, reason: "native_passthrough" }, error: raw.slice(0, 400), upstreamBytes };
+    }
+
+    if (!res.headersSent) {
+      res.statusCode = upstream.status;
+      res.setHeader("Content-Type", upstream.headers.get("content-type") || "text/event-stream; charset=utf-8");
+      res.setHeader("Cache-Control", "no-cache, no-transform");
+      res.flushHeaders();
+    }
+    const bytesOut = await pipeGatewayStream(upstream.body, res, tee);
+    finish?.({ ok: true, httpStatus: upstream.status, upstream: "openai", bytesOut });
+    metrics?.recordResponseUsage?.({ bytesOut, usage });
+    (services.recordUsage || recordUsageEvent)({
+      model: payload.model,
+      provider: "openai",
+      route: "native_passthrough",
+      status: upstream.status,
+      durationMs: Date.now() - startedAt,
+      inputTokens: usage?.input_tokens,
+      outputTokens: usage?.output_tokens,
+      totalTokens: usage?.total_tokens,
+    });
+    return {
+      ok: true,
+      httpStatus: upstream.status,
+      route: { model: payload.model, reason: "native_passthrough" },
+      usage,
+      bytesOut,
+      upstreamBytes,
+      latencyMs: Date.now() - startedAt,
+      upstream: "openai",
+    };
+  } catch (error) {
+    finish?.({ ok: false, error: error.message });
+    if (!res.headersSent) {
+      res.statusCode = 502;
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ error: { type: "upstream_failed", message: redactBearer(error.message) } }));
+    } else {
+      res.destroy();
+    }
+    return { ok: false, httpStatus: 502, route: { model: payload.model, reason: "native_passthrough" }, error: error.message };
+  }
+}
+
+// Native passthrough for the image endpoints the built-in image_gen tool posts
+// to (the openai_base_url redirect lands them here). The body is forwarded as
+// received; the native backend and the client's subscription do the rest.
+export async function relayNativeImage(payload, res, services, { signal } = {}) {
+  const { incomingHeaders, requestUrl } = services;
+  const { pathname, search } = splitRequestUrl(requestUrl);
+  const target = nativeTarget(pathname, search);
+  const body = typeof payload === "string" || Buffer.isBuffer(payload)
+    ? payload
+    : JSON.stringify(payload || {});
+  try {
+    const upstream = await fetch(target, {
+      method: "POST",
+      headers: nativeHeaders(incomingHeaders),
+      body,
+      signal,
+    });
+    if (!upstream.ok) {
+      const raw = await upstream.text();
+      if (!res.headersSent) {
+        res.statusCode = upstream.status;
+        res.setHeader("Content-Type", upstream.headers.get("content-type") || "application/json");
+        res.end(raw);
+      }
+      return { ok: false, httpStatus: upstream.status, error: raw.slice(0, 400) };
+    }
+    if (!res.headersSent) {
+      res.statusCode = upstream.status;
+      res.setHeader("Content-Type", upstream.headers.get("content-type") || "application/json");
+      res.setHeader("Cache-Control", "no-cache, no-transform");
+      res.flushHeaders();
+    }
+    await pipeGatewayStream(upstream.body, res, null);
+    return { ok: true, httpStatus: upstream.status };
+  } catch (error) {
+    if (!res.headersSent) {
+      res.statusCode = 502;
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ error: { type: "upstream_failed", message: redactBearer(error.message) } }));
+    } else {
+      res.destroy();
+    }
+    return { ok: false, httpStatus: 502, error: error.message };
+  }
+}
+
 // Relay one Responses request: normalize, route (with image escalation and
 // affinity), apply tool policy, choose upstream, forward, pipe, and tee.
 // `services` carries { config, metrics, mediaStore, routeAffinity, modelSelection,
 // knownModels, visionModelOf } so the caller decides wiring.
 export async function relayResponses(payload, res, services, { signal } = {}) {
   const { config, metrics, mediaStore, routeAffinity, knownModels } = services;
+  const requestedModel = typeof payload.model === "string" ? payload.model : "";
+  if (isNativeModel(requestedModel, knownModels)) {
+    return relayNativeResponses(payload, res, services, { signal });
+  }
   const mainModel = services.mainModel || config.mainModel;
   const visionModel = services.visionModel || config.visionModel;
   const route = routeGatewayRequest(payload, {

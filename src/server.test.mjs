@@ -200,7 +200,7 @@ test("config API defaults off and performs reversible user-triggered switching",
   });
   assert.equal(enabled.status, 200);
   assert.equal((await enabled.json()).restartRequired, true);
-  assert.match(await readFile(configPath, "utf8"), /model_provider = "modeldock_go"/);
+  assert.match(await readFile(configPath, "utf8"), /openai_base_url = "http:\/\/127\.0\.0\.1:\d+\/c\/[^"]+\/v1"/);
 
   const disabled = await fetch(`${instance.base}/api/config/disable`, {
     method: "POST",
@@ -238,6 +238,36 @@ test("GET / serves the dashboard", async (t) => {
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type"), /text\/html/);
   assert.match(await response.text(), /ModelDock/);
+});
+
+test("image generation posts pass through to the native backend", async (t) => {
+  const instance = await startApp();
+  t.after(instance.stop);
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    if (String(url).startsWith("http://127.0.0.1:")) return originalFetch(url, options);
+    calls.push({ url, headers: options.headers, body: JSON.parse(options.body) });
+    return new Response(JSON.stringify({ data: [{ b64_json: "abc" }] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const response = await fetch(`${instance.base}/v1/images/generations`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: "Bearer chatgpt-token" },
+    body: JSON.stringify({ model: "gpt-image-2", prompt: "dashboard mockup" }),
+  });
+  assert.equal(response.status, 200);
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].url, /chatgpt\.com\/backend-api\/codex\/images\/generations/);
+  assert.equal(calls[0].headers.authorization, "Bearer chatgpt-token");
+  assert.equal(calls[0].body.prompt, "dashboard mockup");
+  assert.match(await response.text(), /b64_json/);
 });
 
 test("api/status exposes debug flags without dump path leaks", async (t) => {
