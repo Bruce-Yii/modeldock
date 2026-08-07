@@ -91,7 +91,10 @@ function isGitCheckout() {
 
 function gitPull() {
   return new Promise((resolve, reject) => {
-    execFile("git", ["pull", "--ff-only"], { cwd: root, windowsHide: true }, (error, stdout, stderr) => {
+    // Explicit remote/branch so the update never depends on the checkout's
+    // configured upstream (a detached or custom branch would otherwise fail
+    // with "no tracking information").
+    execFile("git", ["pull", "--ff-only", "origin", "main"], { cwd: root, windowsHide: true }, (error, stdout, stderr) => {
       if (error) reject(new Error(stderr?.trim() || error.message));
       else resolve(stdout);
     });
