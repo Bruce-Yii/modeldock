@@ -6,6 +6,7 @@ import {
   applyToolPolicy,
   createUsageTee,
   currentTurnStartForTesting,
+  dropUnpairedToolItems,
   isNativeModel,
   nativeTarget,
   normalizeNativeInput,
@@ -84,10 +85,43 @@ test("normalizeGatewayInput removes compaction triggers and expands compaction s
   assert.equal(normalized[1].content[0].text, "earlier context");
 });
 
-test("normalizeGatewayInput keeps non-compaction items untouched", () => {
-  const item = { type: "function_call", call_id: "call_00_x", name: "ls", arguments: "{}" };
-  const normalized = normalizeGatewayInput([item]);
-  assert.deepEqual(normalized, [item]);
+test("normalizeGatewayInput keeps paired tool history untouched", () => {
+  const input = [
+    { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
+    { type: "function_call", call_id: "call_00_x", name: "ls", arguments: "{}" },
+    { type: "function_call_output", call_id: "call_00_x", output: "[]" },
+  ];
+  const normalized = normalizeGatewayInput(input);
+  assert.deepEqual(normalized, input);
+});
+
+test("dropUnpairedToolItems keeps paired calls and drops both orphan sides", () => {
+  const input = [
+    { type: "function_call", call_id: "a", name: "f", arguments: "{}" },
+    { type: "function_call_output", call_id: "a", output: "1" },
+    { type: "custom_tool_call", call_id: "b", name: "g", arguments: "{}" },
+    { type: "custom_tool_call_output", call_id: "b", output: "2" },
+    { type: "function_call", call_id: "orphan", name: "h", arguments: "{}" },
+    { type: "function_call_output", call_id: "dangling", output: "3" },
+    { type: "message", role: "user", content: [] },
+  ];
+  const out = dropUnpairedToolItems(input);
+  assert.deepEqual(out.map((item) => item.call_id ?? item.type), ["a", "a", "b", "b", "message"]);
+});
+
+test("normalizeGatewayInput drops unpaired tool items from a sliced compact history", () => {
+  const input = [
+    { type: "function_call", call_id: "call_00_orphan", name: "ls", arguments: "{}" },
+    { type: "custom_tool_call_output", call_id: "call_00_dangling", output: "{}" },
+    { type: "function_call", call_id: "call_00_paired", name: "read", arguments: "{}" },
+    { type: "function_call_output", call_id: "call_00_paired", output: "{}" },
+    { type: "message", role: "user", content: [{ type: "input_text", text: "go on" }] },
+  ];
+  const normalized = normalizeGatewayInput(input);
+  assert.deepEqual(
+    normalized.map((item) => item.call_id ?? item.type),
+    ["call_00_paired", "call_00_paired", "message"],
+  );
 });
 
 test("currentTurnStart is the item after the last assistant turn", () => {
@@ -493,6 +527,12 @@ test("normalizeNativeInput strips non-opaque reasoning and expands summaries", (
   assert.equal(out[4], input[4]);
 });
 
+test("normalizeNativeInput leaves orphaned tool items untouched (native leg has no pairing filter)", () => {
+  const orphan = { type: "function_call", call_id: "call_00_orphan", name: "ls", arguments: "{}" };
+  const out = normalizeNativeInput([orphan]);
+  assert.deepEqual(out, [orphan]);
+});
+
 test("relayNativeResponses forwards native GPT traffic to the ChatGPT backend", async () => {
   const sink = collectStream();
   const res = responseStub(sink);
@@ -661,4 +701,22 @@ test("legacy provider/model slugs route to us instead of the native backend", as
   assert.equal(normalizeLegacySlug("gpt-5.6-sol", known), "gpt-5.6-sol");
   assert.equal(normalizeLegacySlug("weird/unknown-model", known), "weird/unknown-model");
   assert.equal(isNativeModel(normalizeLegacySlug("opencode-go/deepseek-v4-flash", known), known), false, "legacy slug must not be treated as native");
+});
+
+test("unpaired tool calls and outputs are dropped before the upstream sees them", async () => {
+  const { dropUnpairedToolItems } = await import("./gateway.mjs");
+  const input = [
+    { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
+    { type: "function_call", call_id: "call_ok", name: "ls", arguments: "{}" },
+    { type: "function_call_output", call_id: "call_ok", output: "done" },
+    // A compact-task slice severed this call from its output (Go 400s on it):
+    { type: "function_call", call_id: "call_00_zViPA3xCB2wYsU7H6dZW5091", name: "ls", arguments: "{}" },
+    // ...and this output from its call:
+    { type: "custom_tool_call_output", call_id: "call_gone", output: "orphan" },
+  ];
+  const kept = dropUnpairedToolItems(input);
+  assert.deepEqual(kept.map((item) => item.call_id ?? item.type), ["message", "call_ok", "call_ok"]);
+  // And the full pipeline applies it:
+  const normalized = normalizeGatewayInput(input);
+  assert.ok(!normalized.some((item) => item.call_id === "call_00_zViPA3xCB2wYsU7H6dZW5091"));
 });

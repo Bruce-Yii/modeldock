@@ -173,11 +173,33 @@ export function normalizeNativeInput(input) {
   });
 }
 
+// Go validates tool pairing strictly and rejects the whole request when a
+// function_call has no matching output ("No tool output found for tool call
+// ..."). Codex genuinely produces such orphans - a remote compact task slices
+// history and can sever a call from its output at the cut. Drop the unpaired
+// side (both directions) so the turn survives; paired history is untouched.
+export function dropUnpairedToolItems(input) {
+  if (!Array.isArray(input)) return input;
+  const callIds = new Set();
+  const outputIds = new Set();
+  for (const item of input) {
+    if (item?.type === "function_call" || item?.type === "custom_tool_call") callIds.add(item.call_id);
+    if (item?.type === "function_call_output" || item?.type === "custom_tool_call_output") outputIds.add(item.call_id);
+  }
+  return input.filter((item) => {
+    if (item?.type === "function_call" || item?.type === "custom_tool_call") return outputIds.has(item.call_id);
+    if (item?.type === "function_call_output" || item?.type === "custom_tool_call_output") return callIds.has(item.call_id);
+    return true;
+  });
+}
+
 // The only input rewriting the gateway is allowed to do. Everything else in the
-// history must pass through untouched.
+// history must pass through untouched. Tool items are additionally paired so a
+// sliced compact history (call without output, or output without call) cannot
+// fail the whole request under Go's strict validation; paired history survives.
 export function normalizeGatewayInput(input) {
   if (!Array.isArray(input)) return input;
-  return input
+  return dropUnpairedToolItems(input)
     .filter((item) => item?.type !== "compaction_trigger")
     .map((item) => {
       if (item?.type !== "compaction") return item;
