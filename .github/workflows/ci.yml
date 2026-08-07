@@ -44,8 +44,9 @@ jobs:
       - run: npm run build
       - run: node --test test/install-mock.test.mjs
 
-  # install.sh on a real macOS runner (same script as Linux, but exercises the
-  # macos platform branch: launchd paths, open, $HOME/.modeldock layout).
+  # install.sh on a real macOS runner. macos-latest is an Apple Silicon (arm64)
+  # hosted image, so this leg exercises the launchd paths, the /opt/homebrew node
+  # layout, open, and the $HOME/.modeldock install layout.
   install-macos:
     runs-on: macos-latest
     steps:
