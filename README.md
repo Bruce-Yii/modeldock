@@ -194,6 +194,30 @@ ChatGPT 订阅而不是外部上游。
 **开机自启与更新** - Model Dock 默认在每次登录时隐藏启动；可在设置中
 切换 Autostart 开关。有新版本时出现绿色更新按钮，一键下载、重启并刷新。
 
+### 手动恢复
+
+如果网关无法访问，使用安装附带的小型恢复菜单，它只有两个操作：
+
+Windows：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.modeldock\scripts\recover.ps1"
+```
+
+macOS 或 Linux：
+
+```sh
+sh ~/.modeldock/scripts/recover.sh
+```
+
+1. **重启 ModelDock 网关** - 只停止本安装拥有的网关，重新启动并等待
+   `/healthz`。
+2. **恢复 Codex 原生路线** - 先请运行中的网关关闭其路线；如果网关已停止，
+   则直接从最后验证的 `config.toml` 备份还原，并标记 Codex 需要重启。
+   替换前会把当前配置保存为 `.native-recovery-*.bak` 文件。
+
+任一路线变更后，请完全退出并重启 Codex。恢复菜单不会删除 ModelDock 或备份。
+
 ---
 
 ## 日本語
@@ -273,6 +297,33 @@ owner サフィックス（例 `deepseek-v4-flash@deepseek-official`）で上流
 **自動起動と更新** - Model Dock はデフォルトでログイン時に隠れて起動します。
 設定の Autostart スイッチで変更できます。新バージョンがあると緑の更新
 ボタンが現れ、ワンクリックでダウンロード、再起動、リロードします。
+
+### 手動リカバリ
+
+ゲートウェイに接続できない場合は、インストールに同梱されている小さな
+リカバリメニューを使ってください。操作は次の2つだけです：
+
+Windows：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.modeldock\scripts\recover.ps1"
+```
+
+macOS / Linux：
+
+```sh
+sh ~/.modeldock/scripts/recover.sh
+```
+
+1. **ModelDock ゲートウェイを再起動** - このインストールが所有するゲートウェイ
+   だけを停止して再起動し、`/healthz` を待ちます。
+2. **Codex ネイティブルートを復元** - まず実行中のゲートウェイにルートの無効化を
+   依頼します。ゲートウェイが停止している場合は、最後に検証された `config.toml`
+   バックアップから直接復元し、Codex の再起動をマークします。置き換え前に現在の
+   設定は `.native-recovery-*.bak` として保存されます。
+
+どちらの設定変更後も、Codex を完全に終了して再起動してください。リカバリメニューは
+ModelDock やバックアップを削除しません。
 
 ---
 
@@ -356,6 +407,35 @@ connexion par défaut ; le commutateur Autostart se trouve dans Réglages.
 Un bouton vert apparaît quand une nouvelle version est prête - un clic
 télécharge, redémarre et recharge.
 
+### Récupération manuelle
+
+Si la passerelle est injoignable, utilisez le petit menu de récupération fourni
+avec l'installation. Il propose exactement deux actions :
+
+Windows :
+
+```powershell
+powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.modeldock\scripts\recover.ps1"
+```
+
+macOS ou Linux :
+
+```sh
+sh ~/.modeldock/scripts/recover.sh
+```
+
+1. **Redémarrer la passerelle ModelDock** arrête uniquement la passerelle
+   appartenant à cette installation, la redémarre et attend `/healthz`.
+2. **Restaurer la route native Codex** demande d'abord à la passerelle
+   d'arrêter sa route. Si la passerelle est arrêtée, il restaure directement la
+   dernière sauvegarde vérifiée de `config.toml` et marque Codex pour
+   redémarrage. La configuration actuelle est enregistrée sous
+   `.native-recovery-*.bak` avant le remplacement.
+
+Après toute modification de configuration, quittez complètement Codex et
+redémarrez-le. Le menu de récupération ne supprime ni ModelDock ni les
+sauvegardes.
+
 ---
 
 ## Español
@@ -436,3 +516,31 @@ Cámbialo en Ajustes -> Idioma de la interfaz.
 **Autostart y actualizaciones** - Model Dock se inicia oculto en cada inicio de
 sesión por defecto; el interruptor Autostart está en Ajustes. Aparece un botón
 verde cuando hay una nueva versión - un clic descarga, reinicia y recarga.
+
+### Recuperación manual
+
+Si la puerta de enlace no es accesible, usa el pequeño menú de recuperación
+incluido en la instalación. Tiene exactamente dos acciones:
+
+Windows:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.modeldock\scripts\recover.ps1"
+```
+
+macOS o Linux:
+
+```sh
+sh ~/.modeldock/scripts/recover.sh
+```
+
+1. **Reiniciar la puerta de enlace de ModelDock** detiene solo la puerta de
+   enlace de esta instalación, la reinicia y espera a `/healthz`.
+2. **Restaurar la ruta nativa de Codex** primero pide a la puerta de enlace
+   que desactive su ruta. Si está detenida, restaura directamente la última
+   copia de seguridad verificada de `config.toml` y marca Codex para reinicio.
+   La configuración actual se guarda como `.native-recovery-*.bak` antes del
+   reemplazo.
+
+Tras cualquier cambio de configuración, sal por completo de Codex y reinícialo.
+El menú de recuperación no elimina ModelDock ni las copias de seguridad.
