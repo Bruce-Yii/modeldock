@@ -574,8 +574,14 @@ export function createServices(config = loadConfig()) {
     mediaStore,
     getVisionModel: () => modelSelection.visionModel,
   });
+  // The catalog file follows the same MODELDOCK_STATE_DIR redirect as owner
+  // records (instance-owner.mjs), so a gateway started from a throwaway install
+  // (mock-install tests) writes its own catalog instead of rewriting the real
+  // ~/.modeldock file with paths baked from the temp root.
   const catalogFile = mutableConfig.codexCatalogFile
-    || path.join(os.homedir(), ".modeldock", "codex-model-catalog.json");
+    || (process.env.MODELDOCK_STATE_DIR
+      ? path.join(path.resolve(process.env.MODELDOCK_STATE_DIR), "codex-model-catalog.json")
+      : path.join(os.homedir(), ".modeldock", "codex-model-catalog.json"));
   // The capability key rides in the base URL Codex reads from config.toml, so a
   // hostile local web page cannot reach the relay endpoints (see caller-key.mjs).
   const callerKey = mutableConfig.callerKey || loadOrCreateCallerKey();

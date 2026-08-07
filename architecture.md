@@ -381,8 +381,8 @@ reviewed per model and kept consistent within ModelDock's own catalog.
 
 | Field | Current | Target | Reason |
 | --- | --- | --- | --- |
-| `context_window` / `max_context_window` | 250000 (env override) | 250000 default; keep explicit | Lets Codex manage compaction instead of the gateway |
-| `auto_compact_token_limit` | 200000 (80%) | derived from context window | Keep |
+| `context_window` / `max_context_window` | 250000 default (`MODELDOCK_CONTEXT_WINDOW` env override); per-model overrides: 400000 for official DeepSeek entries, 272000 for native GPT merges | keep explicit per model | Lets Codex manage compaction instead of the gateway |
+| `auto_compact_token_limit` | `floor(context_window * 0.8)` (200000 at 250000, 320000 at 400000) | derived from context window | Keep |
 | `input_modalities` | text (deepseek) | `["text","image"]` on every published entry | Direct image escalation routes image turns to the vision model, so the endpoint effectively accepts images for every relayed model |
 | `supports_search_tool` | false | false | Go has no hosted search; search is the MCP tool |
 | `web_search_tool_type` | "text" | "text" | Keep |
@@ -390,7 +390,7 @@ reviewed per model and kept consistent within ModelDock's own catalog.
 | `reasoning_summary_format` | "experimental" | "experimental" | Matches Go dialect |
 | `default_reasoning_summary` | "none" | "none" | Keep |
 | `experimental_supported_tools` | artifact, tool_call_mcp_elicitation, workspace_dependencies, computer_use, browser_use | Curated; verify each against Go acceptance | Hosted tool *definitions* must not reach Go |
-| `truncation_policy` / `effective_context_window_percent` | tokens / 95 | Keep | Unchanged |
+| `truncation_policy` / `effective_context_window_percent` | tokens, limit 10000 / 95 | Keep | Unchanged |
 | native catalog merge | - | native `visibility: list` entries merged, labelled `OpenAI - <model>`, whole catalog re-ordered by provider label with sequential priorities | The App picker is a replacement, not a merge; native slugs must be republished in our catalog to stay selectable |
 
 ## 9. Security and operations

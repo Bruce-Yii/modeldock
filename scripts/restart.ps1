@@ -73,7 +73,13 @@ if (-not $nodeExe) {
   exit 1
 }
 
-Start-Process -FilePath $nodeExe -ArgumentList "src/server.mjs" -WorkingDirectory $root -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+# Prefer src/server.mjs (git checkout: restart the code being edited); fall back
+# to the built bundle (installed layout ships dist/modeldock.mjs only). Mirrors
+# the server-selection in start-hidden.ps1.
+$server = Join-Path $root "src\server.mjs"
+if (-not (Test-Path -LiteralPath $server)) { $server = Join-Path $root "dist\modeldock.mjs" }
+
+Start-Process -FilePath $nodeExe -ArgumentList $server -WorkingDirectory $root -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
 Write-Output "restart.ps1: started gateway from $root (logs: $logDir)"
 
 for ($i = 0; $i -lt 40; $i += 1) {

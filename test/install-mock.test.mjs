@@ -163,6 +163,7 @@ test("mock install: download -> install -> run", async (t) => {
   const launcher = path.join(installDir, "scripts", launcherName);
   assert.ok(existsSync(installedBundle), "dist/modeldock.mjs should be downloaded");
   assert.ok(existsSync(launcher), `${launcherName} launcher should be written`);
+  assert.ok(existsSync(path.join(installDir, "scripts", "restart.ps1")), "scripts/restart.ps1 should be written");
   assert.equal(readFileSync(installedBundle).length, asset.length, "bundle byte-identical");
 
   // 5. The installer already started the gateway in the background on $port. Hit
@@ -210,6 +211,29 @@ test("mock install: download -> install -> run", async (t) => {
     !existsSync(ownerFilePath(appPort, os.homedir())),
     "the real ~/.modeldock must stay untouched",
   );
+
+  // The model catalog follows the same redirect: a gateway started from a
+  // throwaway install bakes paths from that install root, so writing it to the
+  // real ~/.modeldock would leave the user's catalog pointing at a deleted temp
+  // dir. Assert the catalog stayed inside the throwaway root and references the
+  // install's own restart script.
+  const installedCatalog = path.join(installDir, ".modeldock", "codex-model-catalog.json");
+  assert.ok(existsSync(installedCatalog), "catalog should follow MODELDOCK_STATE_DIR");
+  const installedCatalogPayload = JSON.parse(readFileSync(installedCatalog, "utf8"));
+  const baked = installedCatalogPayload.models?.[0]?.base_instructions || "";
+  // The baked restart path is compared through realpath: Windows may render the
+  // temp parent as an 8.3 short name (CHENBA~1) while mkdtempSync returned the
+  // long form, so a raw string compare would be flaky.
+  const marker = `${path.sep}scripts${path.sep}restart.ps1`;
+  const bakedIndex = baked.indexOf(marker);
+  assert.ok(bakedIndex > 0, "catalog base_instructions should reference scripts/restart.ps1");
+  // The path is quoted inside the instruction ("...\scripts\restart.ps1"); walk
+  // back from the marker to that opening quote so dirname sees a real path.
+  const bakedRestartPath = baked.slice(baked.lastIndexOf('"', bakedIndex) + 1, bakedIndex + marker.length);
+  const bakedRoot = path.dirname(path.dirname(bakedRestartPath));
+  // Ancestor directories may render as 8.3 short names (CHENBA~1 for "Chen Bao"),
+  // but the mkdtemp install dir's own name is stable, so compare basenames.
+  assert.equal(path.basename(bakedRoot), path.basename(installDir), "restart path should point inside the install root");
 
   // 7. Stop the background gateway so cleanup can remove the temp install dir.
   killByPort(appPort);
