@@ -60,7 +60,13 @@ const HARNESS_STT_TOOL = {
   },
 };
 
-const CONTEXT_WINDOW = 1_048_576;
+// What we tell Codex each relayed model can hold. This is a working figure for the
+// upstreams we relay, not the headline number a vendor advertises for its own API:
+// declaring 1M meant Codex never reached its own auto-compaction threshold and left
+// the entire context problem to the gate. At 250k it manages the session itself and
+// md_memory becomes a safety net rather than the only mechanism.
+// Configurable so the figure can be corrected without a release.
+const CONTEXT_WINDOW = Number(process.env.MODELDOCK_CONTEXT_WINDOW || 250_000);
 const AUTO_COMPACT_PERCENT = 0.8;
 const AUTO_COMPACT_TOKEN_LIMIT = Math.floor(CONTEXT_WINDOW * AUTO_COMPACT_PERCENT);
 
