@@ -60,7 +60,7 @@ test("model catalog is generated per profile with distinct comp hashes", () => {
   assert.equal(goCatalog.models[0].comp_hash, "modeldock-opencode-go-v1");
   assert.equal(goCatalog.models[0].supports_search_tool, true);
   assert.equal(goCatalog.models[0].default_reasoning_level, "high");
-  assert.deepEqual(goCatalog.models[0].supported_reasoning_levels.map((level) => level.effort), ["low", "high", "max"]);
+  assert.deepEqual(goCatalog.models[0].supported_reasoning_levels.map((level) => level.effort), ["low", "high", "xhigh"]);
   assert.equal(officialCatalog.models[0].comp_hash, "modeldock-deepseek-official-v1");
   assert.equal(officialCatalog.models[0].supports_search_tool, false);
   assert.equal(officialCatalog.models[0].default_reasoning_level, "medium", "DeepSeek official defaults to medium thinking");

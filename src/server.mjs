@@ -990,7 +990,7 @@ export function codexModelCatalog(config) {
         supported_reasoning_levels: [
           { effort: "low", description: "Fast responses with lighter reasoning" },
           { effort: "high", description: "Deeper reasoning for complex work" },
-          { effort: "max", description: "Maximum reasoning depth" },
+          { effort: "xhigh", description: "Extra-deep reasoning for hard problems" },
         ],
         shell_type: "shell_command",
         visibility: "list",

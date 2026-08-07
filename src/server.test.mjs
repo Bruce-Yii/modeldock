@@ -871,7 +871,7 @@ test("models endpoint serves the local Codex catalog", async (t) => {
   const body = await response.json();
   assert.equal(body.models[0].slug, "deepseek-v4-flash");
   assert.equal(body.models[0].supports_parallel_tool_calls, false);
-  assert.deepEqual(body.models[0].supported_reasoning_levels.map((level) => level.effort), ["low", "high", "max"]);
+  assert.deepEqual(body.models[0].supported_reasoning_levels.map((level) => level.effort), ["low", "high", "xhigh"]);
   assert.match(body.models[0].base_instructions, /coding agent/);
 });
 

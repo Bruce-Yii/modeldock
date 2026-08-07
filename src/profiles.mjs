@@ -79,7 +79,6 @@ const DEEPSEEK_REASONING_LEVELS = [
   { effort: "medium", description: "Balanced reasoning for typical work" },
   { effort: "high", description: "Deeper reasoning for complex work" },
   { effort: "xhigh", description: "Extra-deep reasoning for hard problems" },
-  { effort: "max", description: "Maximum reasoning depth" },
 ];
 
 // Feature flags Codex reads from the model catalog to decide which client-side plugin
@@ -146,7 +145,7 @@ function catalogEntry({ slug, displayName, description, compHash, inputModalitie
   };
 }
 
-function modelCatalogDefaults({ mainModel, displayName, description, compHash, inputModalities, supportsSearchTool, baseInstructions, defaultReasoningLevel = "high", supportedReasoningLevels = [ { effort: "low", description: "Fast responses with lighter reasoning" }, { effort: "high", description: "Deeper reasoning for complex work" }, { effort: "max", description: "Maximum reasoning depth" } ], availableModels = [], autoRouteEntry = null }) {
+function modelCatalogDefaults({ mainModel, displayName, description, compHash, inputModalities, supportsSearchTool, baseInstructions, defaultReasoningLevel = "high", supportedReasoningLevels = [ { effort: "low", description: "Fast responses with lighter reasoning" }, { effort: "high", description: "Deeper reasoning for complex work" }, { effort: "xhigh", description: "Extra-deep reasoning for hard problems" } ], availableModels = [], autoRouteEntry = null }) {
   const base = { compHash, supportsSearchTool, baseInstructions, defaultReasoningLevel, supportedReasoningLevels };
   // Every provider's models in one list, each labelled with its source, so the picker
   // can switch upstream as well as model. The bare id stays with the default profile so
