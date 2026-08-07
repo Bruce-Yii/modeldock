@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { baseInstructionsFor, catalogFor, enabledProvidersFor } from "./catalog.mjs";
+import os from "node:os";
+import path from "node:path";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { baseInstructionsFor, catalogFor, enabledProvidersFor, mergeNativeCatalog } from "./catalog.mjs";
 import { OPENCODE_GO_PROFILE } from "./profiles.mjs";
 import { isNativeModel } from "./gateway.mjs";
 
@@ -12,6 +15,8 @@ function configStub() {
     visionModel: "gpt-5.6-luna",
     goToken: "go-token",
     tokens: { "opencode-go": "go-token", "deepseek-official": "" },
+    // Never read a real ~/.modeldock/native-catalog.json capture in tests.
+    nativeCatalogFile: path.join(os.tmpdir(), "modeldock-test-native-missing.json"),
   };
 }
 
@@ -90,6 +95,83 @@ test("the bare gpt-5.6-luna slot stays reserved for the native GPT pipeline", ()
   const known = new Set(slugs);
   assert.equal(isNativeModel("gpt-5.6-luna", known), true, "a native request for the bare id passes through to ChatGPT");
   assert.equal(isNativeModel("gpt-5.6-luna@opencode-go", known), false, "our qualified slug stays on the routed path");
+});
+
+test("mergeNativeCatalog publishes picker-visible native models grouped with their provider", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-native-test-"));
+  const file = path.join(dir, "native-catalog.json");
+  writeFileSync(file, JSON.stringify({
+    captured_with: "0.1.0",
+    models: [
+      { slug: "gpt-5.6-luna", display_name: "GPT-5.6-Luna", visibility: "list", priority: 3 },
+      { slug: "gpt-5.4-mini", display_name: "GPT-5.4-Mini", visibility: "hide", priority: 23 },
+      { slug: "codex-auto-review", display_name: "Codex Auto Review", visibility: "hide", priority: 43 },
+    ],
+  }), "utf8");
+  try {
+    const merged = mergeNativeCatalog(catalogFor(configStub()), { ...configStub(), nativeCatalogFile: file });
+    const slugs = merged.models.map((entry) => entry.slug);
+    const native = merged.models.find((entry) => entry.slug === "gpt-5.6-luna");
+    assert.ok(native, "list-visible native model is published");
+    assert.equal(native.display_name, "OpenAI - GPT-5.6-Luna", "native entries use the Provider - Model picker name");
+    assert.equal(native.provider, "openai", "native entries are tagged for provider grouping");
+    assert.ok(!slugs.includes("gpt-5.4-mini"), "picker-hidden native model stays out of the catalog");
+    assert.ok(!slugs.includes("codex-auto-review"), "hidden native models stay out of the catalog");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("catalogFor groups models by provider label with sequential priorities", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-native-test-"));
+  const file = path.join(dir, "native-catalog.json");
+  writeFileSync(file, JSON.stringify({
+    captured_with: "0.1.0",
+    models: [
+      { slug: "gpt-5.5", display_name: "GPT-5.5", visibility: "list", priority: 7 },
+      { slug: "gpt-5.2", display_name: "GPT-5.2", visibility: "list", priority: 29 },
+    ],
+  }), "utf8");
+  try {
+    const catalog = catalogFor({
+      ...configStub(),
+      tokens: { "opencode-go": "go-token", "deepseek-official": "ds-token" },
+      nativeCatalogFile: file,
+    });
+    const groups = [];
+    for (const entry of catalog.models) {
+      const label = entry.display_name.split(" - ")[0];
+      if (groups.at(-1)?.label !== label) groups.push({ label, slugs: [] });
+      groups.at(-1).slugs.push(entry.slug);
+    }
+    assert.deepEqual(groups.map((group) => group.label), ["DeepSeek Official", "OpenAI", "OpenCode Go"], "groups are ordered by provider label");
+    assert.deepEqual(groups[1].slugs, ["gpt-5.5", "gpt-5.2"], "native entries keep their captured order within the group");
+    assert.ok(groups[2].slugs[0].includes("deepseek-v4-flash") || groups[2].slugs[0] === "deepseek-v4-flash", "the curated main model opens the OpenCode Go group");
+    catalog.models.forEach((entry, index) => {
+      assert.equal(entry.priority, index + 1, `${entry.slug} carries a sequential picker priority`);
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a published native slug routes to the native leg despite being in the catalog", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-native-test-"));
+  const file = path.join(dir, "native-catalog.json");
+  writeFileSync(file, JSON.stringify({
+    captured_with: "0.1.0",
+    models: [{ slug: "gpt-5.6-luna", display_name: "GPT-5.6-Luna", visibility: "list" }],
+  }), "utf8");
+  try {
+    const catalog = catalogFor({ ...configStub(), nativeCatalogFile: file });
+    const known = new Set(catalog.models.map((entry) => entry.slug));
+    const nativeSlugs = new Set(["gpt-5.6-luna"]);
+    assert.ok(known.has("gpt-5.6-luna"), "bare native slug is now published so the picker lists it");
+    assert.equal(isNativeModel("gpt-5.6-luna", known, nativeSlugs), true, "native slug stays on the native leg");
+    assert.equal(isNativeModel("gpt-5.6-luna@opencode-go", known, nativeSlugs), false, "our qualified Luna stays routed");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("catalogFor never publishes chat-dialect models even if marked available", () => {

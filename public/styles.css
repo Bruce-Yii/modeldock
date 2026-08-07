@@ -108,10 +108,13 @@ h2 { margin: 0; font-size: 17px; }
 /* Context-token waveform card */
 .wave-card { display: flex; flex-direction: column; }
 .wave-stats { display: flex; gap: 16px; margin-top: 14px; color: var(--muted); font-size: 11px; }
-.wave-stats b { color: var(--amber); font-size: 20px; letter-spacing: -.02em; display: block; line-height: 1.15; }
+.wave-stats b { color: var(--accent); font-size: 20px; letter-spacing: -.02em; display: block; line-height: 1.15; }
 .wave-stats span { display: flex; flex-direction: column; gap: 2px; }
 .wave-wrap { position: relative; margin-top: auto; padding-top: 10px; }
 #context-wave { display: block; width: 100%; height: 92px; cursor: crosshair; }
+#cache-wave { display: block; width: 100%; height: 92px; cursor: crosshair; }
+#data-wave { display: block; width: 100%; height: 92px; cursor: crosshair; }
+#reason-wave { display: block; width: 100%; height: 92px; cursor: crosshair; }
 .wave-tooltip {
   position: absolute;
   top: 2px;
@@ -235,6 +238,19 @@ td.empty { text-align: center; color: var(--muted); padding: 42px; }
   background-repeat: no-repeat;
 }
 .field .lang-select option { background: var(--panel-2, #181b24); color: var(--fg, #e6e8ee); }
+
+/* Autostart switch inside the settings dialog. The generic .field input rules
+   style text fields; the hidden switch checkbox must keep the mode-toggle shape. */
+.field-switch .mode-toggle { margin-top: 2px; }
+.field-switch .mode-toggle input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+  border: 0;
+  background: none;
+  padding: 0;
+  width: auto;
+}
 
 .settings-actions { display: flex; align-items: center; gap: 10px; margin-top: 4px; }
 .settings-actions button {

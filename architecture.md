@@ -1,11 +1,12 @@
 # ModelDock Architecture (Rewrite)
 
-Status: draft for review
+Status: implemented design for the 2026-08-07 rewrite; this file is the
+tracked source of truth for how the gateway behaves.
 Date: 2026-08-07
-Scope: rewrite of the ModelDock gateway (D:\projects\modeldock) into a single
-standalone tool for DeepSeek (official API and OpenCode Go) with a thin
-Responses gateway, an MCP sidecar that adds web / vision / audio tools, a
-dashboard with observability, and a Codex config switch.
+Scope: the ModelDock gateway (D:\projects\modeldock) is a single standalone
+tool for DeepSeek (official API and OpenCode Go) plus a native GPT passthrough
+leg, with a thin Responses gateway, an MCP sidecar that adds web / vision /
+audio tools, a dashboard with observability, and a Codex config switch.
 
 ## 1. Positioning
 
@@ -53,8 +54,11 @@ request content.
 
 Goals:
 
-- Keep the Codex-to-Go conversation history byte-for-byte stable. Never rewrite
-  messages, reasoning items, call ids, or tool history.
+- Keep the Codex-to-Go conversation history stable except for the surgical,
+  documented rewrites in section 9: orphaned tool rows a compact slice severs
+  are dropped or re-paired, and remote compaction is synthesized for routed
+  models. Never rewrite messages, reasoning items, call ids, or tool history
+  otherwise.
 - Support two upstream families over the same passthrough pipeline: OpenCode Go
   (`opencode.ai/zen/go/v1`) and DeepSeek official (`api.deepseek.com`). Both
   speak the Responses protocol, so the gateway code path is identical.
@@ -85,11 +89,12 @@ Non-goals:
                                     |-- dashboard     /  + /api/*
                                     `-- config switch (~/.codex/config.toml)
                                           |-- OpenCode Go (opencode.ai/zen/go/v1)
-                                          `-- DeepSeek official (api.deepseek.com)
+                                          |-- DeepSeek official (api.deepseek.com)
+                                          `-- ChatGPT native (chatgpt.com/backend-api/codex)
 
   MCP sidecar tools:
     web_search_exa   -> Exa hosted MCP
-    vision_inspect   -> vision model (gpt-5.6-luna default) over OpenCode Go
+    vision_inspect   -> vision model (MODELDOCK_VISION_MODEL) over OpenCode Go
     speak / hear     -> local TTS (msedge-tts) / local STT (Windows SAPI)
 ```
 
@@ -98,7 +103,7 @@ process and listen on the same loopback port.
 
 ## 5. Core invariants
 
-1. The gateway never rewrites `input` items except for the two allowed
+1. The gateway never rewrites `input` items except for the allowed
    transformations in section 6.1.
 2. The upstream SSE body is piped to Codex as bytes. No event buffering, no
    re-emission, no `reasoning_text` to `summary` translation. A tee observer
@@ -125,6 +130,8 @@ Request handling:
    `api.deepseek.com`. Same shape, same pipeline.
 3. Apply the tool policy:
    - Keep standard `function` and `custom` tool definitions.
+   - Flatten MCP namespace tools (`mcp__*`) into plain `function` definitions
+     so text-only models see the sidecar tools as ordinary functions.
    - Defensively strip Codex hosted / special tool types that Go rejects
      (for example `web_search`, `computer_use`, `browser_use`, `artifact`) from
      `payload.tools`. The primary control is the catalog declaration
@@ -141,24 +148,62 @@ Request handling:
    token display. The tee never delays, drops, or modifies the bytes forwarded
    to Codex. This is how "byte passthrough" and "token display" coexist.
 7. On upstream error, forward status and body with the token redacted.
-8. Native GPT passthrough (the parallel leg): a model id the catalog does not
-   publish is native GPT traffic. The request is forwarded verbatim to
-   `https://chatgpt.com/backend-api/codex` with the client's signed-in headers
-   (authorization, chatgpt-account-id, x-oai-attestation, x-codex-*, session
-   and thread ids). No tool policy, no historical-image rewrite, no image
-   escalation: the native backend owns hosted tools, history images, and its own
-   vision. Non-opaque `reasoning` blobs and compaction summaries are normalized
-   for replay, and `previous_response_id` is dropped. Image generation and edits
-   (`/v1/images/generations`, `/v1/images/edits`) pass through the same way so
-   the built-in `image_gen` tool works on the ChatGPT subscription without a
-   Platform API key.
+8. Native GPT passthrough (the parallel leg): native slugs are merged into the
+   published catalog (see `src/native-catalog.mjs`) so the App picker keeps
+   listing them beside ours, and the gateway routes any request for those slugs
+   to ChatGPT's native backend instead of an external upstream. The request is
+   forwarded verbatim to `https://chatgpt.com/backend-api/codex` with the
+   client's signed-in headers (authorization, chatgpt-account-id,
+   x-oai-attestation, x-codex-*, session and thread ids). No tool policy, no
+   historical-image rewrite, no image escalation: the native backend owns hosted
+   tools, history images, and its own vision. Non-opaque `reasoning` blobs and
+   compaction summaries are normalized for replay, and `previous_response_id`
+   is dropped. Image generation and edits (`/v1/images/generations`,
+   `/v1/images/edits`) pass through the same way so the built-in `image_gen`
+   tool works on the ChatGPT subscription without a Platform API key.
+9. Remote compaction (v1/v2) is synthesized for routed models. Transparent mode
+   makes Codex believe it is talking to the native backend, so its compact task
+   expects a `compaction` output item back (v2, a Responses request whose last
+   input item is `compaction_trigger`) or replacement history (v1, `POST
+   /responses/compact`) instead of a plain summary - a protocol DeepSeek does
+   not speak. `relayCompaction` intercepts both shapes before they reach the
+   upstream, runs a separate non-streaming summarize call (COMPACT_PROMPT
+   appended, `stream: false`, `tools: []`, `tool_choice: "none"`), and answers
+   Codex with the summary wrapped in a `kcr1:` base64 `encrypted_content` (v2,
+   JSON or SSE) or with replacement history under `{ output }` (v1). On replay
+   the `kcr1:` payload is decoded back into a continuation message by both
+   `normalizeGatewayInput` and `normalizeNativeInput`. Native models are never
+   intercepted: the native backend owns the protocol and handles compaction
+   items itself.
 
 Allowed `input` transformations (the complete list):
 
+- Drop unpaired tool items (`dropUnpairedToolItems`, both dialects). A
+  `function_call` / `custom_tool_call` with no matching output, or an output
+  with no matching call, is removed. Codex produces such orphans when a remote
+  compact task slices history at a call/output boundary, and Go rejects the
+  whole request on the first unpaired call ("No tool output found for tool
+  call ..."). The chat dialect pairs the same way: assistant messages carrying
+  a `tool_calls` array are matched against `role:"tool"` messages with
+  `tool_call_id`; an assistant message whose calls were all severed is dropped
+  entirely when it carries no other text (an empty assistant turn is rejected
+  upstream too).
+- Re-pair severed tool rows (`relocateToolOutputs`). Existence pairing is not
+  enough: Go's Responses->chat translation rejects a tool result that does not
+  directly follow the assistant message that declared its call. A compact slice
+  can leave a call and its output in the history with an assistant text message
+  between them; `relocateToolOutputs` moves each output right after its call
+  group (parallel calls keep their group, interleaved text moves after the
+  outputs, duplicate outputs are dropped). Same intent as codex-router's
+  `coalesceAssistantMessages` + `ensureToolResultsForCalls`, applied on the
+  Responses shape we forward.
+- Delete `previous_response_id` on both legs. The input array is the
+  authoritative history; server-side continuation state could still carry the
+  orphaned call this filter just cleaned, so strict upstreams (Go) would reject
+  the request again.
 - Remove `compaction_trigger` items, and turn `compaction` items into plain user
-  summary messages.
-- Return a friendly 400 if an `input_image` part reaches a text-only model,
-  instead of forwarding a payload Go will reject.
+  summary messages. The native leg expands compaction items the same way and
+  additionally strips non-opaque `reasoning` blobs before replay.
 - Replace `input_image` parts in non-current turns with a lightweight
   `image_ref` placeholder text; the media store keeps the image so
   `vision_inspect` can re-read it. Current-turn images stay untouched (they are
@@ -167,11 +212,13 @@ Allowed `input` transformations (the complete list):
   on every later turn (hundreds of KB per request) and silently ignored
   (DeepSeek official returns `NO_IMAGE_RECEIVED`; Go rejects it), with no way to
   recover the pixels except `vision_inspect`.
+- Delete `client_metadata` on the routed leg (Codex-side metadata is not part
+  of the upstream contract).
 
 Direct image escalation (pasted images and tool screenshots):
 
 - If the current turn's `input` contains an `input_image` part, route the whole
-  request to the configured vision model (`gpt-5.6-luna` default) by changing
+  request to the configured vision model (`MODELDOCK_VISION_MODEL`) by changing
   only `payload.model`. The `input` bytes are forwarded verbatim, including the
   image: the vision model sees the real pixels, so no placeholder or image
   rewriting is needed for this path.
@@ -201,7 +248,7 @@ functions, the model calls them, Codex attaches results as
 | Tool | Backend | Notes |
 | --- | --- | --- |
 | `web_search_exa(query, numResults, livecrawl, type, contextMaxCharacters)` | Exa hosted MCP (`EXA_MCP_URL`, `EXA_API_KEY`) | Existing implementation in `upstreams.mjs` |
-| `vision_inspect(path, compare_image_ref?, question, mode)` | Vision model over OpenCode Go (`gpt-5.6-luna` default) | Text answer returned; image never enters the main request |
+| `vision_inspect(path, compare_image_ref?, question, mode)` | Vision model over OpenCode Go (`MODELDOCK_VISION_MODEL`) | Text answer returned; image never enters the main request |
 | `speak(text, voice?, output?)` | `msedge-tts` (on-demand install) | Returns absolute audio path |
 | `hear(file, language?, output?)` | Windows SAPI (System.Speech) | Returns text + confidence |
 
@@ -223,6 +270,23 @@ the turn is visual, Codex sends images directly and neither path is involved.
 Replaces the catalog-building half of `profiles.mjs`. This is the single place
 that answers "what can this model do" for Codex. It is served by `/v1/models`
 and emitted to `model_catalog_json`. See section 8 for the exact fields.
+
+`src/native-catalog.mjs` captures the Codex desktop CLI's bundled native model
+catalog (`codex debug models --bundled`, newest installed CLI under
+`%LOCALAPPDATA%\OpenAI\Codex\bin`), caches it at
+`~/.modeldock/native-catalog.json`, and refreshes it at gateway startup and on
+the model refresh timer. `catalogFor` merges the `visibility: list` native
+entries into the published catalog (labelled `OpenAI - <model>`) so the App
+picker keeps showing them beside ours, then `orderCatalogByProvider` re-orders
+the whole list by provider label (DeepSeek Official, OpenAI, OpenCode Go) and
+renumbers `priority` sequentially. The Codex picker sorts by `priority`, and
+the native entries carry their own priorities (1, 2, 3, 7, 29...) that would
+otherwise interleave with ours and scatter the native models across the list.
+Picker-hidden entries stay out of the list, but requests for their slugs are
+still routed to the native backend. A missing or stale cache degrades to the
+curated catalog alone. Overrides: `MODELDOCK_NATIVE_CATALOG_FILE` (cache path) and
+`MODELDOCK_REFRESH_NATIVE_CATALOG=0` (disable the desktop-CLI capture, e.g. in
+CI).
 
 ### 6.4 Dashboard and events (`public/`, `src/server.mjs`)
 
@@ -269,8 +333,10 @@ The switch writes `~/.codex/config.toml`. Behavior:
   (`http://127.0.0.1:4097/c/<key>/v1`), plus `model_catalog_json` and the
   realtime endpoint overrides; the top-level `model` key selects the active
   slug. ModelDock is the only manager of that block. This is the codex-router
-  transparent shape: `uses_codex_backend()` stays true, the App keeps listing
-  native GPT models beside ours, and the ChatGPT subscription stays intact.
+  transparent shape: `uses_codex_backend()` stays true and the ChatGPT
+  subscription stays intact. The transparent shape alone does NOT re-add native
+  GPT models to the picker (the App picker is a replacement, not a merge) -
+  the merged catalog in section 6.3 does that.
 - On enable: back up the current config, apply the change, ask the user to
   restart Codex, and wait for the restart acknowledgment (existing flow).
 - On disable: restore the backup. If the config changed outside ModelDock after
@@ -317,7 +383,7 @@ reviewed per model and kept consistent within ModelDock's own catalog.
 | --- | --- | --- | --- |
 | `context_window` / `max_context_window` | 250000 (env override) | 250000 default; keep explicit | Lets Codex manage compaction instead of the gateway |
 | `auto_compact_token_limit` | 200000 (80%) | derived from context window | Keep |
-| `input_modalities` | text (deepseek) | `["text"]` for text-only; `["text","image"]` only for vision-capable models routed directly | Prevents Codex from sending images to deepseek |
+| `input_modalities` | text (deepseek) | `["text","image"]` on every published entry | Direct image escalation routes image turns to the vision model, so the endpoint effectively accepts images for every relayed model |
 | `supports_search_tool` | false | false | Go has no hosted search; search is the MCP tool |
 | `web_search_tool_type` | "text" | "text" | Keep |
 | `supports_parallel_tool_calls` | false | false (catalog) and never forced in payload | Keep declaration only |
@@ -325,6 +391,7 @@ reviewed per model and kept consistent within ModelDock's own catalog.
 | `default_reasoning_summary` | "none" | "none" | Keep |
 | `experimental_supported_tools` | artifact, tool_call_mcp_elicitation, workspace_dependencies, computer_use, browser_use | Curated; verify each against Go acceptance | Hosted tool *definitions* must not reach Go |
 | `truncation_policy` / `effective_context_window_percent` | tokens / 95 | Keep | Unchanged |
+| native catalog merge | - | native `visibility: list` entries merged, labelled `OpenAI - <model>`, whole catalog re-ordered by provider label with sequential priorities | The App picker is a replacement, not a merge; native slugs must be republished in our catalog to stay selectable |
 
 ## 9. Security and operations
 
@@ -339,6 +406,12 @@ reviewed per model and kept consistent within ModelDock's own catalog.
 - Logging goes to `%TEMP%\modeldock\` as today.
 
 ## 10. Migration plan
+
+Status: phases 0-7 below are implemented as of 2026-08-07. The
+`MODELDOCK_LEGACY_RELAY` A/B flag described in phases 3/6 was dropped rather
+than shipped: the rewrite deleted the transform modules outright. This file is
+tracked in git (it is not ignored). Work after the rewrite added the native GPT
+passthrough leg and the bundled native catalog merge (sections 6.1 and 6.3).
 
 Phase 0 - Baseline: `npm test` green on the current tree; record the passing
 test list and total count.
@@ -361,9 +434,7 @@ against live upstreams; dashboard not required.
 Phase 3 - Server rewrite: `src/server.mjs` becomes thin wiring: gateway, MCP
 handler, dashboard routes, config switch, events. Delete `transform.mjs`,
 `md-memory.mjs`, `chat-bridge.mjs`, `live-responses.mjs`, `responses-sse.mjs`,
-`session-checker.mjs`, `auto-route.mjs` and their tests, but keep the deleted
-modules runnable behind `MODELDOCK_LEGACY_RELAY=1` for A/B comparison. The
-legacy flag is temporary and is removed in Phase 7. Acceptance: `npm test`
+`session-checker.mjs`, `auto-route.mjs` and their tests. Acceptance: `npm test`
 green with the reduced suite; a Codex session completes a multi-turn tool task
 with no reasoning or tool-call errors.
 
@@ -382,79 +453,80 @@ read-only; no stale transform metrics.
 
 Phase 6 - End-to-end: run Codex through the bridge; verify streaming
 (first-token latency, no buffered finish), vision via `vision_inspect`, web via
-`web_search_exa`, TTS/STT where available, and A/B comparison against
-`MODELDOCK_LEGACY_RELAY=1` so a regression can be attributed to the rewrite,
-not to the deletion batch. Direct image escalation is verified by pasting an
-image into a text-only-main-model conversation: the turn is served by the
-vision model, a tool call from the vision model continues on the vision model,
-and the next text turn returns to the main model. Then verify in a clean
-checkout (`git clone . <tmp> && npm ci && npm run build && npm test`).
+`web_search_exa`, TTS/STT where available. Direct image escalation is verified
+by pasting an image into a text-only-main-model conversation: the turn is
+served by the vision model, a tool call from the vision model continues on the
+vision model, and the next text turn returns to the main model. Then verify in
+a clean checkout (`git clone . <tmp> && npm ci && npm run build && npm test`).
 
-Phase 7 - Docs and packaging: this file plus README refresh; remove the
-`MODELDOCK_LEGACY_RELAY` flag and the modules it gates. This file is currently
-untracked and ignored (`.gitignore` line 28 ignores `ARCHITECTURE.md`), so the
-final version must be un-ignored and committed as the single source of truth;
-release flow otherwise unchanged.
+Phase 7 - Docs and packaging: this file plus README refresh. The legacy flag
+never shipped (see the phase status above); this file is tracked in git and is
+the single source of truth. Release flow otherwise unchanged.
 
 ## 11. Test strategy
 
-Keep and extend:
+Current suite (all green; run with `npm test`):
 
-- `upstreams.test.mjs`, `media-store.test.mjs`, `metrics.test.mjs`,
-  `config.test.mjs`, `secrets.test.mjs` (minor additions).
-- New `gateway.test.mjs` (pure passthrough, tool policy, pipe).
-- New `catalog.test.mjs` (declaration consistency).
-- New `mcp-server.test.mjs` (tool listing and call routing, mocked upstreams).
-- Rewrite `server.test.mjs` for the thin server.
-- Rewrite `config-switcher.test.mjs` for the single managed provider.
-
-Delete with the modules: `transform.test.mjs`, `md-memory.test.mjs`,
-`chat-bridge.test.mjs`, and the SSE-resynthesis assertions in
-`server.test.mjs`.
+- `gateway.test.mjs` (pure passthrough, tool policy, pipe, orphan pairing,
+  `previous_response_id` handling).
+- `catalog.test.mjs` + `native-catalog.test.mjs` (declaration consistency and
+  the bundled-native merge).
+- `mcp-server.test.mjs` (tool listing and call routing, mocked upstreams).
+- `server.test.mjs`, `server-gateway.test.mjs` (thin server and relay wiring).
+- `config-switcher.test.mjs` (single managed provider), plus the unit tests
+  for `config`, `secrets`, `metrics`, `usage-events`, `upstreams`,
+  `media-store`, `error-translation`, `profiles`, `router`, `caller-key`,
+  `instance-owner`, `update`, and `test/*` (`install-mock` needs a build).
 
 ## 12. File disposition
 
-Keep as-is: `config.mjs`, `secrets.mjs`, `metrics.mjs`, `media-store.mjs`,
-`tts.mjs`, `stt.mjs`, `upstreams.mjs`, `autostart.mjs`, `update.mjs`,
-`static-inline.mjs`, `scripts/restart.ps1`.
+Current layout (the rewrite is implemented; the old transform pipeline is
+gone):
 
-Extend: `mcp.mjs` (keep tool set, minor cleanup), `config-switcher.mjs`
-(single managed provider), `node-repl-tools.mjs` (catalog data only),
-`public/*` (minor UI adjustment: drop provider selector, simplify route
-display), `test/`.
+Core gateway: `server.mjs` (thin wiring), `gateway.mjs` (relay + passthrough),
+`router.mjs` (routing + affinity), `error-translation.mjs`, `caller-key.mjs`.
 
-Rewrite: `server.mjs` (thin), `profiles.mjs` -> `src/catalog.mjs`.
+Declarations and config: `profiles.mjs` (provider profiles and the curated
+model list), `catalog.mjs` (published catalog), `native-catalog.mjs` (bundled
+native catalog capture/merge), `config.mjs`, `config-switcher.mjs`.
 
-Delete: `transform.mjs`, `md-memory.mjs`, `chat-bridge.mjs`,
-`live-responses.mjs`, `responses-sse.mjs`, `session-checker.mjs`,
-`auto-route.mjs`, plus their tests. Move `vision-eval.mjs` to
-`scripts/vision-probe.mjs` as a dev-only tool (never runs at startup) so the
-hand-maintained vision scores can be regenerated manually.
+Capabilities: `mcp.mjs` + `mcp-server.mjs` (MCP sidecar), `upstreams.mjs`
+(`web_search_exa` / `vision_inspect` backends), `tts.mjs`, `stt.mjs`,
+`media-store.mjs`, `vision-eval.mjs` (dev-only probe; never runs at startup).
+
+Observability and ops: `metrics.mjs`, `usage-events.mjs`, `instance-owner.mjs`,
+`secrets.mjs`, `autostart.mjs`, `update.mjs`, `static-inline.mjs`,
+`scripts/restart.ps1`.
+
+Frontend: `public/*` (dashboard; the main model row is a read-only display).
+Tests live beside their modules (`src/*.test.mjs`) plus `test/`.
 
 ## 13. Open decisions
 
-1. `vision_inspect` scope: path-first (recommended). Confirm whether
-   dashboard image upload / media store should remain at all.
-2. `experimental_supported_tools`: which entries to keep after verifying each
-   against Go acceptance.
-3. TTS package policy: keep on-demand `msedge-tts` install (recommended) to
-   avoid CI packaging issues.
-4. Resolved: `vision-eval.mjs` survives as `scripts/vision-probe.mjs`
-   (dev-only, manual). Vision fields in the catalog are hand-maintained
-   constants.
-5. Direct image escalation: keep (recommended). Request-level routing to the
-   vision model when the current turn has `input_image`, with affinity pinning
-   for tool continuations and an honest response `model` field. The alternative
-   is placeholder text plus `vision_inspect`; escalation is simpler and keeps
-   the image bytes untouched.
+Resolved during the rewrite:
+
+1. `vision_inspect` is path-first: the model passes a local file path; the
+   media store keeps dashboard-uploaded images for `image_ref` reads.
+2. `experimental_supported_tools` stays curated to the five entries the App
+   needs for client-side plugin machinery; the gateway strips hosted tool
+   *definitions* (`web_search`, `computer_use`, `browser_use`, `artifact`,
+   `tool_search`) before they reach Go.
+3. TTS uses on-demand `msedge-tts` install (kept; avoids CI packaging issues).
+4. `vision-eval.mjs` survives as dev-only tooling (never runs at startup);
+   vision fields in the catalog are hand-maintained constants.
+5. Direct image escalation: kept. Request-level routing to the vision model
+   when the current turn has `input_image`, with affinity pinning for tool
+   continuations and an honest response `model` field.
 
 ## 14. Summary
 
 The rewrite removes the translation layer that caused every upstream error in
 the project history. What remains is a standalone bridge for DeepSeek on two
 upstreams (OpenCode Go and DeepSeek official) sharing one passthrough
-pipeline: a narrow gateway that pipes the Go dialect through untouched, an MCP
-sidecar that gives text-only models vision, web, and audio as tools, a
-dashboard and config switch that operate on the single bridge, and
-declarations that tell Codex the truth about each model. No codex-router
-dependency, no dual-target config management.
+pipeline, plus a native GPT leg for the ChatGPT subscription: a narrow gateway
+that pipes each dialect through untouched (after the allowed input
+transformations in section 6.1), an MCP sidecar that gives text-only models
+vision, web, and audio as tools, a dashboard and config switch that operate on
+the single bridge, and declarations (curated plus merged native) that tell
+Codex the truth about each model. No codex-router dependency, no dual-target
+config management.

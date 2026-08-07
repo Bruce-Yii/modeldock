@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { readFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
 import { createServer } from "node:http";
 import { spawn, execFileSync } from "node:child_process";
+import { ownerFilePath } from "../src/instance-owner.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -129,6 +130,11 @@ test("mock install: download -> install -> run", async (t) => {
   // dir open), then remove the dir.
   t.after(() => killByPort(appPort));
   t.after(() => rmSync(installDir, { recursive: true, force: true }));
+  // MODELDOCK_STATE_DIR (below) keeps the owner record inside installDir, but the
+  // gateway is stopped with a hard kill, so nothing here can rely on its shutdown
+  // hook running. Sweep the real home path too: if the redirect ever regresses,
+  // this test cleans up after itself instead of leaking a file per run.
+  t.after(() => rmSync(ownerFilePath(appPort, os.homedir()), { force: true }));
 
   // 3. Run the real installer with every default redirected through env vars.
   const installer = path.join(repoRoot, "scripts", installerScript);
@@ -138,6 +144,11 @@ test("mock install: download -> install -> run", async (t) => {
     MODELDOCK_RELEASE_URL: releaseUrl,
     MODELDOCK_PORT: String(appPort),
     MODELDOCK_SKIP_OPEN: "1",
+    // The installer starts a real gateway, which records port ownership on
+    // startup. Point that record at the throwaway root so removing installDir
+    // removes it too - the promise above ("never touches the real ~/.modeldock")
+    // was untrue while the owner file resolved against the home directory.
+    MODELDOCK_STATE_DIR: path.join(installDir, ".modeldock"),
   };
   const child = runInstaller(installer, env);
   let out = "";
@@ -190,7 +201,17 @@ test("mock install: download -> install -> run", async (t) => {
   assert.ok(payload.config?.bind, "api/status should expose config.bind");
   assert.ok("autostart" in payload, "api/status should expose autostart");
 
-  // 6. Stop the background gateway so cleanup can remove the temp install dir.
+  // 6. The gateway is up, so it has written its owner record. Assert it landed in
+  //    the throwaway root and not in the user's home: this test is stopped with a
+  //    hard kill, which skips the shutdown hook that would normally remove it, so
+  //    a record written to the real ~/.modeldock would survive every single run.
+  assert.ok(existsSync(ownerFilePath(appPort, installDir)), "owner record should follow MODELDOCK_STATE_DIR");
+  assert.ok(
+    !existsSync(ownerFilePath(appPort, os.homedir())),
+    "the real ~/.modeldock must stay untouched",
+  );
+
+  // 7. Stop the background gateway so cleanup can remove the temp install dir.
   killByPort(appPort);
   assert.ok(await waitForPortFree(appPort), "background gateway should stop");
 });

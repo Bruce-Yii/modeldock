@@ -6,6 +6,18 @@ function number(value) {
   return new Intl.NumberFormat("en-US", { notation: value >= 100_000 ? "compact" : "standard", maximumFractionDigits: 1 }).format(value || 0);
 }
 
+// Cache-rate percentage with one decimal place (99.3%). The value is a fraction
+// 0..1 from the trace records; null/undefined renders as an em dash.
+function percent(value) {
+  if (value === null || value === undefined || Number.isNaN(value)) return "—";
+  return `${(value * 100).toFixed(1)}%`;
+}
+
+function rgba(hex, alpha) {
+  const value = parseInt(hex.slice(1), 16);
+  return `rgba(${(value >> 16) & 255},${(value >> 8) & 255},${value & 255},${alpha})`;
+}
+
 function bytes(value) {
   if (!value) return "0 B";
   const units = ["B", "KB", "MB", "GB"];
@@ -31,10 +43,6 @@ function uptime(value) {
 function set(id, value) {
   const node = $(id);
   if (node) node.textContent = value;
-}
-
-function percent(ok, total) {
-  return total ? Math.round((ok / total) * 100) : 0;
 }
 
 function showTrace(item) {
@@ -100,10 +108,16 @@ function renderRecent(items) {
 // Context-token waveform: plots per-call input tokens from the responses metric
 // records (chronological, sessions interleaved) onto a small canvas. The history
 // buffer lives in the browser so the wave persists and grows across SSE updates.
-const waveHistory = [];
+// The context, cache, and transfer cards share one renderer (drawWave) and one
+// hover handler (attachAreaWaveHover), each with the card's own accent color.
 const WAVE_MAX_POINTS = 180;
-let waveHover = -1;
-let wavePeak = 0;
+const WAVE_AMBER = "#f7b955";
+const WAVE_BLUE = "#50b7ff";
+const WAVE_GREEN = "#48d6a0";
+const WAVE_VIOLET = "#a78bfa";
+const waveHistory = [];
+const wavePeakState = { peak: 0 };
+const waveHoverState = { hover: -1 };
 let wavePoints = [];
 
 function renderContextWave(recent) {
@@ -120,15 +134,18 @@ function renderContextWave(recent) {
   waveHistory.sort((a, b) => a.t - b.t);
   if (waveHistory.length > WAVE_MAX_POINTS) waveHistory.splice(0, waveHistory.length - WAVE_MAX_POINTS);
   const last = waveHistory.length ? waveHistory[waveHistory.length - 1].v : 0;
-  const peak = waveHistory.reduce((max, point) => Math.max(max, point.v), 0);
-  wavePeak = peak;
+  wavePeakState.peak = waveHistory.reduce((max, point) => Math.max(max, point.v), 0);
   set("wave-last", number(last));
-  set("wave-peak", number(peak));
+  set("wave-peak", number(wavePeakState.peak));
   set("wave-count", number(waveHistory.length));
-  drawWave(canvas, waveHistory, peak, waveHover);
+  drawWave(canvas, waveHistory, wavePeakState.peak, waveHoverState.hover, WAVE_AMBER, wavePoints);
 }
 
-function drawWave(canvas, history, peak, hoverIndex = -1) {
+// Shared area-wave renderer used by the context, cache, and transfer cards. The
+// card accent color and the per-wave points array (for hover hit-testing) are
+// parameters; everything else - gridlines, area fill, glow line, hover guide,
+// peak marker - is one implementation.
+function drawWave(canvas, history, peak, hoverIndex = -1, color = WAVE_AMBER, pointsRef = wavePoints) {
   const ctx = canvas.getContext("2d");
   const dpr = window.devicePixelRatio || 1;
   const width = canvas.clientWidth || canvas.width;
@@ -145,10 +162,10 @@ function drawWave(canvas, history, peak, hoverIndex = -1) {
   const plotH = height - pad * 2;
   const max = peak || 1;
   const n = history.length;
-  wavePoints = [];
+  pointsRef.length = 0;
 
   // Gridlines (3 horizontal ticks).
-  ctx.strokeStyle = "rgba(247,185,85,0.08)";
+  ctx.strokeStyle = rgba(color, 0.08);
   ctx.lineWidth = 1;
   for (let i = 1; i <= 3; i += 1) {
     const y = pad + (plotH / 3) * i;
@@ -162,14 +179,14 @@ function drawWave(canvas, history, peak, hoverIndex = -1) {
 
   // Area fill under the curve.
   const gradient = ctx.createLinearGradient(0, pad, 0, pad + plotH);
-  gradient.addColorStop(0, "rgba(247,185,85,0.35)");
-  gradient.addColorStop(1, "rgba(247,185,85,0)");
+  gradient.addColorStop(0, rgba(color, 0.35));
+  gradient.addColorStop(1, rgba(color, 0));
   ctx.beginPath();
   ctx.moveTo(pad, pad + plotH);
   history.forEach((point, index) => {
     const x = pad + (n === 1 ? plotW / 2 : (plotW * index) / (n - 1));
     const y = pad + plotH - Math.min(1, point.v / max) * plotH;
-    wavePoints.push({ x, y, v: point.v, t: point.t });
+    pointsRef.push({ x, y, v: point.v, t: point.t });
     ctx.lineTo(x, y);
   });
   ctx.lineTo(width - pad, pad + plotH);
@@ -185,17 +202,17 @@ function drawWave(canvas, history, peak, hoverIndex = -1) {
     if (index === 0) ctx.moveTo(x, y);
     else ctx.lineTo(x, y);
   });
-  ctx.strokeStyle = "rgba(247,185,85,0.9)";
+  ctx.strokeStyle = rgba(color, 0.9);
   ctx.lineWidth = 2;
-  ctx.shadowColor = "rgba(247,185,85,0.5)";
+  ctx.shadowColor = rgba(color, 0.5);
   ctx.shadowBlur = 8;
   ctx.stroke();
   ctx.shadowBlur = 0;
 
   // Hover guide: vertical rule + highlighted sample.
-  if (hoverIndex >= 0 && wavePoints[hoverIndex]) {
-    const p = wavePoints[hoverIndex];
-    ctx.strokeStyle = "rgba(247,185,85,0.55)";
+  if (hoverIndex >= 0 && pointsRef[hoverIndex]) {
+    const p = pointsRef[hoverIndex];
+    ctx.strokeStyle = rgba(color, 0.55);
     ctx.lineWidth = 1;
     ctx.setLineDash([3, 3]);
     ctx.beginPath();
@@ -205,7 +222,7 @@ function drawWave(canvas, history, peak, hoverIndex = -1) {
     ctx.setLineDash([]);
     ctx.beginPath();
     ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
-    ctx.fillStyle = "#f7b955";
+    ctx.fillStyle = color;
     ctx.fill();
     ctx.beginPath();
     ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
@@ -222,14 +239,17 @@ function drawWave(canvas, history, peak, hoverIndex = -1) {
     const py = pad + plotH - (history[peakIndex].v / max) * plotH;
     ctx.beginPath();
     ctx.arc(px, py, 2.5, 0, Math.PI * 2);
-    ctx.fillStyle = "#f7b955";
+    ctx.fillStyle = color;
     ctx.fill();
   }
 }
 
-function attachWaveHover() {
-  const canvas = $("context-wave");
-  const tooltip = $("wave-tooltip");
+// Shared waveform hover: nearest-sample guide line, tooltip with the formatted
+// value and wall-clock time, redraw on movement, reset on leave. One handler
+// serves the context, cache, and transfer cards.
+function attachAreaWaveHover({ canvasId, tooltipId, pointsRef, hoverState, draw, formatValue }) {
+  const canvas = $(canvasId);
+  const tooltip = $(tooltipId);
   if (!canvas || !tooltip) return;
 
   canvas.addEventListener("mousemove", (event) => {
@@ -237,23 +257,23 @@ function attachWaveHover() {
     const x = event.clientX - rect.left;
     let nearest = -1;
     let best = Infinity;
-    wavePoints.forEach((point, index) => {
+    pointsRef.forEach((point, index) => {
       const distance = Math.abs(point.x - x);
       if (distance < best) {
         best = distance;
         nearest = index;
       }
     });
-    if (nearest !== waveHover) {
-      waveHover = nearest;
-      drawWave(canvas, waveHistory, wavePeak, waveHover);
+    if (nearest !== hoverState.hover) {
+      hoverState.hover = nearest;
+      draw(canvas, nearest);
     }
     if (nearest >= 0) {
-      const point = wavePoints[nearest];
+      const point = pointsRef[nearest];
       const percentX = Math.max(0, Math.min(rect.width, point.x)) / rect.width;
       tooltip.style.left = `${(point.x / rect.width) * 100}%`;
       tooltip.style.transform = `translateX(${percentX < 0.08 ? "0%" : percentX > 0.92 ? "-100%" : "-50%"})`;
-      tooltip.innerHTML = `<b>${number(point.v)}</b><small>${formatWaveTime(point.t)}</small>`;
+      tooltip.innerHTML = `<b>${formatValue(point.v)}</b><small>${formatWaveTime(point.t)}</small>`;
       tooltip.hidden = false;
     } else {
       tooltip.hidden = true;
@@ -261,9 +281,9 @@ function attachWaveHover() {
   });
 
   canvas.addEventListener("mouseleave", () => {
-    waveHover = -1;
+    hoverState.hover = -1;
     tooltip.hidden = true;
-    drawWave(canvas, waveHistory, wavePeak, waveHover);
+    draw(canvas, -1);
   });
 }
 
@@ -272,7 +292,206 @@ function formatWaveTime(timestamp) {
   return new Date(timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
+// Cache-rate waveform on the Requests card: per-call prompt-cache hit rate
+// (cachedTokens / inputTokens) from the same trace records as the context wave,
+// plotted on a fixed 0..100% scale. The drawing code mirrors the context wave
+// (area fill, glow line, hover guide, tooltip, peak marker) with the card's own
+// accent color (--blue). Beyond cost visibility this is a passthrough canary:
+// prefix-cache collapse means something started rewriting conversation history.
+const cacheHistory = [];
+const cacheHoverState = { hover: -1 };
+let cacheWavePoints = [];
+
+function renderCacheWave(recent) {
+  const canvas = $("cache-wave");
+  if (!canvas) return;
+  const seen = new Set(cacheHistory.map((point) => point.id));
+  for (const item of recent) {
+    // Only sample completed responses that carry input-token usage; in-flight
+    // records have none yet and would pin the newest sample at 0.
+    if (item.kind !== "responses" || item.status !== "ok" || seen.has(item.id)) continue;
+    const input = Number(item.inputTokens) || 0;
+    if (input <= 0) continue;
+    cacheHistory.push({
+      id: item.id,
+      t: item.startedAt || 0,
+      v: Math.min(1, Math.max(0, (Number(item.cachedTokens) || 0) / input)),
+    });
+  }
+  cacheHistory.sort((a, b) => a.t - b.t);
+  if (cacheHistory.length > WAVE_MAX_POINTS) cacheHistory.splice(0, cacheHistory.length - WAVE_MAX_POINTS);
+  const last = cacheHistory.length ? cacheHistory[cacheHistory.length - 1].v : null;
+  const avg = cacheHistory.length ? cacheHistory.reduce((sum, point) => sum + point.v, 0) / cacheHistory.length : null;
+  set("cache-last", percent(last));
+  set("cache-avg", percent(avg));
+  set("cache-count", number(cacheHistory.length));
+  drawCacheWave(canvas, cacheHistory, cacheHoverState.hover);
+}
+
+function drawCacheWave(canvas, history, hoverIndex = -1) {
+  const ctx = canvas.getContext("2d");
+  const dpr = window.devicePixelRatio || 1;
+  const width = canvas.clientWidth || canvas.width;
+  const height = canvas.clientHeight || canvas.height;
+  if (canvas.width !== Math.round(width * dpr) || canvas.height !== Math.round(height * dpr)) {
+    canvas.width = Math.round(width * dpr);
+    canvas.height = Math.round(height * dpr);
+  }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+
+  const pad = 4;
+  const plotW = width - pad * 2;
+  const plotH = height - pad * 2;
+  const n = history.length;
+  cacheWavePoints = [];
+  const xFor = (index) => pad + (n === 1 ? plotW / 2 : (plotW * index) / (n - 1));
+  const yFor = (value) => pad + plotH - Math.min(1, Math.max(0, value)) * plotH;
+
+  // Gridlines (3 horizontal ticks on the fixed 0-100% scale).
+  ctx.strokeStyle = "rgba(80,183,255,0.08)";
+  ctx.lineWidth = 1;
+  for (let i = 1; i <= 3; i += 1) {
+    const y = pad + (plotH / 3) * i;
+    ctx.beginPath();
+    ctx.moveTo(pad, y);
+    ctx.lineTo(width - pad, y);
+    ctx.stroke();
+  }
+
+  if (n === 0) return;
+
+  // Area fill under the curve.
+  const gradient = ctx.createLinearGradient(0, pad, 0, pad + plotH);
+  gradient.addColorStop(0, "rgba(80,183,255,0.35)");
+  gradient.addColorStop(1, "rgba(80,183,255,0)");
+  ctx.beginPath();
+  ctx.moveTo(pad, pad + plotH);
+  history.forEach((point, index) => {
+    const x = xFor(index);
+    const y = yFor(point.v);
+    cacheWavePoints.push({ x, y, v: point.v, t: point.t });
+    ctx.lineTo(x, y);
+  });
+  ctx.lineTo(xFor(n - 1), pad + plotH);
+  ctx.closePath();
+  ctx.fillStyle = gradient;
+  ctx.fill();
+
+  // Line with a soft glow.
+  ctx.beginPath();
+  history.forEach((point, index) => {
+    const x = xFor(index);
+    const y = yFor(point.v);
+    if (index === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  });
+  ctx.strokeStyle = "rgba(80,183,255,0.9)";
+  ctx.lineWidth = 2;
+  ctx.shadowColor = "rgba(80,183,255,0.5)";
+  ctx.shadowBlur = 8;
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+
+  // Hover guide: vertical rule + highlighted sample.
+  if (hoverIndex >= 0 && cacheWavePoints[hoverIndex]) {
+    const p = cacheWavePoints[hoverIndex];
+    ctx.strokeStyle = "rgba(80,183,255,0.55)";
+    ctx.lineWidth = 1;
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath();
+    ctx.moveTo(p.x, pad);
+    ctx.lineTo(p.x, pad + plotH);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
+    ctx.fillStyle = "#50b7ff";
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
+    ctx.strokeStyle = "rgba(8,16,24,.8)";
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  }
+
+  // Peak marker dot (highest hit rate).
+  if (n > 0) {
+    let peakIndex = 0;
+    history.forEach((point, index) => { if (point.v >= history[peakIndex].v) peakIndex = index; });
+    const px = xFor(peakIndex);
+    const py = yFor(history[peakIndex].v);
+    ctx.beginPath();
+    ctx.arc(px, py, 2.5, 0, Math.PI * 2);
+    ctx.fillStyle = "#50b7ff";
+    ctx.fill();
+  }
+}
+
+// Transfer waveform on the green card: per-call response bytes (bytesOut) over
+// time from the same trace records as the token waves. The grand total rides in
+// the card header (top-right); the wave shows how the bytes were spread across
+// calls. History lives in the browser so the plot persists across SSE updates.
+const dataHistory = [];
+const dataPeakState = { peak: 0 };
+const dataHoverState = { hover: -1 };
+const dataWavePoints = [];
+
+function renderDataWave(recent) {
+  const canvas = $("data-wave");
+  if (!canvas) return;
+  const seen = new Set(dataHistory.map((point) => point.id));
+  for (const item of recent) {
+    // Sample completed responses that actually streamed bytes; failed relays
+    // and in-flight records carry no bytesOut and would pin a flat zero.
+    if (item.kind !== "responses" || item.status !== "ok" || seen.has(item.id)) continue;
+    const value = Number(item.bytesOut) || 0;
+    if (value <= 0) continue;
+    dataHistory.push({ id: item.id, t: item.startedAt || 0, v: value });
+  }
+  dataHistory.sort((a, b) => a.t - b.t);
+  if (dataHistory.length > WAVE_MAX_POINTS) dataHistory.splice(0, dataHistory.length - WAVE_MAX_POINTS);
+  dataPeakState.peak = dataHistory.reduce((max, point) => Math.max(max, point.v), 0);
+  drawWave(canvas, dataHistory, dataPeakState.peak, dataHoverState.hover, WAVE_GREEN, dataWavePoints);
+}
+
 let lastData = null;
+
+// Reasoning-intensity waveform on the Tokens card: per-call reasoning/output
+// ratio (how much of each response's output tokens went to thinking) from the
+// same trace records as the token waves, plotted on a fixed 0..100% scale.
+// History lives in the browser so the plot persists across SSE updates.
+const reasonHistory = [];
+const reasonHoverState = { hover: -1 };
+const reasonWavePoints = [];
+
+function renderReasonWave(recent) {
+  const canvas = $("reason-wave");
+  if (!canvas) return;
+  const seen = new Set(reasonHistory.map((point) => point.id));
+  for (const item of recent) {
+    // Only completed responses with real output tokens carry a usable ratio;
+    // in-flight and failed records have none and would pin a flat zero.
+    if (item.kind !== "responses" || item.status !== "ok" || seen.has(item.id)) continue;
+    const output = Number(item.outputTokens) || 0;
+    if (output <= 0) continue;
+    reasonHistory.push({
+      id: item.id,
+      t: item.startedAt || 0,
+      v: Math.min(1, Math.max(0, (Number(item.reasoningTokens) || 0) / output)),
+    });
+  }
+  reasonHistory.sort((a, b) => a.t - b.t);
+  if (reasonHistory.length > WAVE_MAX_POINTS) reasonHistory.splice(0, reasonHistory.length - WAVE_MAX_POINTS);
+  const last = reasonHistory.length ? reasonHistory[reasonHistory.length - 1].v : null;
+  const avg = reasonHistory.length ? reasonHistory.reduce((sum, point) => sum + point.v, 0) / reasonHistory.length : null;
+  set("reason-last", percent(last));
+  set("reason-avg", percent(avg));
+
+  // peak=1 fixes the y scale at 0..100% (the ratio is a 0..1 fraction); the
+  // violet reuses the Tokens card accent so no new color is introduced.
+  drawWave(canvas, reasonHistory, 1, reasonHoverState.hover, WAVE_VIOLET, reasonWavePoints);
+}
 
 function render(data) {
   lastData = data;
@@ -287,22 +506,21 @@ function render(data) {
   if (data.config.mainWire) set("route-wire", data.config.mainWire === "chat" ? "chat/completions" : "responses");
 
   const responses = data.responses;
-  const success = percent(responses.ok, responses.total);
-  set("active-requests", `${responses.active} ${t("metric.active")}`);
+  set("requests-active", number(responses.active));
   set("requests-total", number(responses.total));
-  set("requests-success", `${success}%`);
-  set("requests-latency", duration(responses.averageLatencyMs));
-  $("requests-success-meter").style.width = `${success}%`;
 
   const inputTokens = responses.inputTokens || 0;
   const outputTokens = responses.outputTokens || 0;
-  const tokens = inputTokens + outputTokens;
-  set("tokens-total", number(tokens));
+
+
   set("tokens-input", number(inputTokens));
   set("tokens-output", number(outputTokens));
-  $("token-meter-input").style.width = `${tokens ? Math.round((inputTokens / tokens) * 100) : 0}%`;
+  // token meter removed: In/Out now live in the card header.
 
   renderContextWave(data.recent || []);
+  renderCacheWave(data.recent || []);
+  renderDataWave(data.recent || []);
+  renderReasonWave(data.recent || []);
   set("bytes-total", bytes(responses.bytesIn + responses.bytesOut));
   set("bytes-in", bytes(responses.bytesIn));
   set("bytes-out", bytes(responses.bytesOut));
@@ -428,11 +646,12 @@ async function setModels() {
 function renderAutostart(data) {
   autostartEnabled = Boolean(data.autostart?.enabled);
   const supported = Boolean(data.autostart?.supported);
-  const toggle = $("autostart-toggle");
+  const toggle = $("settings-autostart-toggle");
+  if (!toggle) return;
   toggle.checked = autostartEnabled;
   toggle.disabled = autostartBusy || !supported;
-  $("autostart-off-label").classList.toggle("active", !autostartEnabled);
-  $("autostart-on-label").classList.toggle("active", autostartEnabled);
+  $("settings-autostart-off-label").classList.toggle("active", !autostartEnabled);
+  $("settings-autostart-on-label").classList.toggle("active", autostartEnabled);
   toggle.title = supported
     ? (autostartEnabled ? t("autostart.titleOn") : t("autostart.titleOff"))
     : t("autostart.unsupported");
@@ -440,7 +659,7 @@ function renderAutostart(data) {
 
 async function setAutostartEnabled(enabled) {
   autostartBusy = true;
-  $("autostart-toggle").disabled = true;
+  $("settings-autostart-toggle").disabled = true;
   try {
     const response = await fetch("/api/autostart", {
       method: "POST",
@@ -455,7 +674,7 @@ async function setAutostartEnabled(enabled) {
     window.alert(error.message);
   } finally {
     autostartBusy = false;
-    $("autostart-toggle").disabled = false;
+    $("settings-autostart-toggle").disabled = false;
   }
 }
 
@@ -587,7 +806,10 @@ events.onerror = () => {
   poll().catch(() => {});
   };
 
-attachWaveHover();
+  attachAreaWaveHover({ canvasId: "context-wave", tooltipId: "wave-tooltip", pointsRef: wavePoints, hoverState: waveHoverState, draw: (canvas, hover) => drawWave(canvas, waveHistory, wavePeakState.peak, hover, WAVE_AMBER, wavePoints), formatValue: number });
+  attachAreaWaveHover({ canvasId: "cache-wave", tooltipId: "cache-wave-tooltip", pointsRef: cacheWavePoints, hoverState: cacheHoverState, draw: (canvas, hover) => drawCacheWave(canvas, cacheHistory, hover), formatValue: percent });
+  attachAreaWaveHover({ canvasId: "data-wave", tooltipId: "data-wave-tooltip", pointsRef: dataWavePoints, hoverState: dataHoverState, draw: (canvas, hover) => drawWave(canvas, dataHistory, dataPeakState.peak, hover, WAVE_GREEN, dataWavePoints), formatValue: bytes });
+  attachAreaWaveHover({ canvasId: "reason-wave", tooltipId: "reason-wave-tooltip", pointsRef: reasonWavePoints, hoverState: reasonHoverState, draw: (canvas, hover) => drawWave(canvas, reasonHistory, 1, hover, WAVE_VIOLET, reasonWavePoints), formatValue: percent });
 
 poll().catch(() => set("event-connection", t("event.unavailable")));
 pollConfig().catch((error) => {
@@ -610,7 +832,7 @@ $("proxy-toggle").addEventListener("change", async (event) => {
   await configAction(enabling ? "enable" : "disable");
 });
 
-$("autostart-toggle").addEventListener("change", (event) => {
+$("settings-autostart-toggle").addEventListener("change", (event) => {
   setAutostartEnabled(event.target.checked);
 });
 
@@ -676,6 +898,7 @@ async function openSettings() {
     dsInput.placeholder = ds?.tokenConfigured ? t("settings.configured") : t("settings.optional");
     $("settings-status").textContent = "";
     $("settings-envfile").textContent = data.envFile || "";
+    renderAutostart(data);
     if (typeof dialog.showModal === "function") dialog.showModal();
     else dialog.setAttribute("open", "");
   } catch (error) {

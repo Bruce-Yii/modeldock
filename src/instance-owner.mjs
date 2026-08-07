@@ -9,8 +9,20 @@ import path from "node:path";
 // startup records {pid, root, startedAt} per port, and restart.ps1 refuses to
 // kill a process whose recorded root is a different checkout unless forced.
 
-export function ownerFilePath(port, home = os.homedir()) {
-  return path.join(home, ".modeldock", `owner-${port}.json`);
+// Where owner records live. MODELDOCK_STATE_DIR redirects them so a spawned
+// gateway (the mock-install test runs the real installer, which starts a real
+// gateway on a random port) keeps its bookkeeping inside its own throwaway
+// root instead of littering the user's ~/.modeldock with one file per run.
+// An explicit `home` still wins, so the unit tests below stay hermetic even
+// when the variable is set in the surrounding environment.
+export function ownerFilePath(port, home) {
+  const base =
+    home !== undefined
+      ? path.join(home, ".modeldock")
+      : process.env.MODELDOCK_STATE_DIR
+        ? path.resolve(process.env.MODELDOCK_STATE_DIR)
+        : path.join(os.homedir(), ".modeldock");
+  return path.join(base, `owner-${port}.json`);
 }
 
 export function writeOwnerFile(port, { root = process.cwd(), pid = process.pid, home } = {}) {

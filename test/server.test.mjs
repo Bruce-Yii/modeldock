@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
+import os from "node:os";
+import path from "node:path";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { codexModelCatalog, createApp, createServices } from "../src/server.mjs";
 import { loadConfig } from "../src/config.mjs";
@@ -14,7 +16,13 @@ async function listen(server) {
 }
 
 test("publishes a complete Codex model catalog schema", () => {
-  const catalog = codexModelCatalog({ mainModel: "deepseek-v4-flash" });
+  const catalog = codexModelCatalog({
+    mainModel: "deepseek-v4-flash",
+    // Keep the schema check hermetic: without a configured native catalog file
+    // the merge would read the real ~/.modeldock capture on a dev machine and
+    // the provider-grouped order would put a native GPT model first.
+    nativeCatalogFile: path.join(os.tmpdir(), "modeldock-test-native-missing.json"),
+  });
   assert.equal(catalog.models[0].slug, "deepseek-v4-flash");
   assert.equal(catalog.models[0].supports_reasoning_summaries, true);
   assert.match(catalog.models[0].base_instructions, /coding agent/);

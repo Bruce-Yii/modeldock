@@ -67,6 +67,25 @@ test("managed config without mcpUrl writes no mcp_servers.modeldock section", ()
   assert.doesNotMatch(managed, /\[mcp_servers\.modeldock\]/);
 });
 
+test("managed config writes the stdio bridge when mcpCommand is set", () => {
+  const managed = buildManagedCodexConfig(originalConfig, {
+    baseUrl: "http://127.0.0.1:4097/c/callerkey/v1",
+    model: "deepseek-v4-flash",
+    mcpCommand: "C:/Program Files/nodejs/node.exe",
+    mcpArgs: ["D:/projects/modeldock/src/mcp-standalone.mjs"],
+    mcpEnv: { MODELDOCK_GATEWAY_URL: "http://127.0.0.1:4097" },
+  });
+  assert.match(managed, /\[mcp_servers\.modeldock\]/);
+  assert.match(managed, /command = "C:\/Program Files\/nodejs\/node\.exe"/);
+  assert.match(managed, /args = \["D:\/projects\/modeldock\/src\/mcp-standalone\.mjs"\]/);
+  assert.match(managed, /env = \{ "MODELDOCK_GATEWAY_URL" = "http:\/\/127\.0\.0\.1:4097" \}/);
+  assert.doesNotMatch(
+    managed,
+    /\[mcp_servers\.modeldock\][\s\S]*?^url = /m,
+    "stdio mode writes command/args instead of url",
+  );
+});
+
 test("managed config without catalogFile writes no model_catalog_json", () => {
   const managed = buildManagedCodexConfig(originalConfig, {
     baseUrl: "http://127.0.0.1:4097/v1",

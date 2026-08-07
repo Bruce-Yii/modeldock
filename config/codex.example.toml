@@ -1,11 +1,29 @@
-# Merge these settings into the Codex config you want to use for OpenCode Go.
+# The shape ModelDock writes into ~/.codex/config.toml when you flip the
+# dashboard switch (the "# BEGIN modeldock-managed" block): it keeps the
+# built-in openai provider, points openai_base_url at the local gate, and
+# publishes the model catalog file so the App picker lists both our models and
+# the native GPT models (merged from the Codex desktop CLI's bundled catalog).
 model = "deepseek-v4-flash"
-model_provider = "modeldock_go"
-web_search = "disabled"
+openai_base_url = "http://127.0.0.1:4097/c/<caller-key>/v1"
+model_catalog_json = "C:\\Users\\you\\.modeldock\\codex-model-catalog.json"
+experimental_realtime_webrtc_call_base_url = "https://chatgpt.com/backend-api/codex"
+experimental_realtime_ws_base_url = "https://api.openai.com/v1"
 
-[model_providers.modeldock_go]
-name = "ModelDock"
-base_url = "http://127.0.0.1:4097/v1"
-wire_api = "responses"
-# This token is local-only. The gate replaces it with OPENCODE_GO_TOKEN upstream.
-experimental_bearer_token = "local-modeldock"
+# The MCP sidecar ModelDock also manages: web_search_exa / vision_inspect /
+# speak / hear become available to the model once this is set. Default transport
+# is the stdio bridge (MODELDOCK_MCP_TRANSPORT=stdio), which Codex spawns itself
+# so gateway restarts never drop a session's tools:
+[mcp_servers.modeldock]
+# Managed by ModelDock: web_search_exa / vision_inspect / speak / hear stdio bridge.
+command = "C:\\Program Files\\nodejs\\node.exe"
+args = ["C:\\Users\\you\\modeldock\\src\\mcp-standalone.mjs"]
+env = { "MODELDOCK_GATEWAY_URL" = "http://127.0.0.1:4097" }
+
+# With MODELDOCK_MCP_TRANSPORT=url in .env, the managed block points at the
+# gateway's streamable-HTTP /mcp endpoint instead:
+# [mcp_servers.modeldock]
+# url = "http://127.0.0.1:4097/mcp"
+
+# The legacy `model_provider = "modeldock_go"` shape (a custom provider with an
+# experimental_bearer_token) is migrated in place when ModelDock re-enables the
+# switch; there is no need to keep it.

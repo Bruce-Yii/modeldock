@@ -192,7 +192,9 @@ const OPENCODE_GO_PROFILE = {
   modelCatalog({ mainModel, visionModel, baseInstructions }) {
     return modelCatalogDefaults({
       mainModel,
-      displayName: `${OPENCODE_GO_PROFILE.availableModels.find((m) => m.id === bareModelId(mainModel))?.label || mainModel} (OpenCode Go)`,
+      // The same "Provider - Model" label the rest of the catalog uses, so the
+      // main entry does not render differently in the App picker.
+      displayName: `${OPENCODE_GO_PROFILE.label} - ${OPENCODE_GO_PROFILE.availableModels.find((m) => m.id === bareModelId(mainModel))?.label || mainModel}`,
       description: "OpenCode Go through the local ModelDock Responses gate.",
       compHash: "modeldock-opencode-go-v1",
       inputModalities: ["text", "image"],

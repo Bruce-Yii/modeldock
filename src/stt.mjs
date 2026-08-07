@@ -91,6 +91,10 @@ export async function sttTranscribe({ file = "", language = "auto", output = "" 
     await run(ffmpeg, ["-y", "-i", file, "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wav], { timeout: 120_000, windowsHide: true });
   }
   const script = [
+    // PowerShell 5.1 pipes text out in the console OEM codepage (GBK on a Chinese
+    // system); node decodes child stdout as UTF-8, so force UTF-8 here or Chinese
+    // recognition results come back as mojibake.
+    "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8",
     "Add-Type -AssemblyName System.Speech",
     "$ci = [System.Globalization.CultureInfo]::GetCultureInfo($env:MODELDOCK_STT_CULTURE)",
     "$engine = New-Object System.Speech.Recognition.SpeechRecognitionEngine($ci)",

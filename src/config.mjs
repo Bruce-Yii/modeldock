@@ -226,6 +226,11 @@ export function loadConfig() {
     noReasoning: process.env.MODELDOCK_NO_REASONING === "1",
     dumpDir: process.env.MODELDOCK_DUMP_DIR || "",
   };
+  // How the managed [mcp_servers.modeldock] entry connects: "stdio" (default) spawns
+  // src/mcp-standalone.mjs as a Codex-owned child that survives gateway restarts;
+  // "url" points Codex at the gateway's own streamable-HTTP /mcp endpoint instead.
+  const mcpTransportRaw = (process.env.MODELDOCK_MCP_TRANSPORT || "stdio").trim().toLowerCase();
+  const mcpTransport = ["stdio", "url"].includes(mcpTransportRaw) ? mcpTransportRaw : "stdio";
 
   return Object.freeze({
     host,
@@ -244,6 +249,7 @@ export function loadConfig() {
     mainModel,
     visionModel,
     visionFallbackModel,
+    mcpTransport,
     visionTimeoutMs: integer("MODELDOCK_VISION_TIMEOUT_MS", 90_000, { min: 1_000, max: 300_000 }),
     mediaTtlMs: integer("MODELDOCK_MEDIA_TTL_MS", 3_600_000, { min: 60_000 }),
     mediaMaxBytes: integer("MODELDOCK_MEDIA_MAX_BYTES", 10 * 1024 * 1024, { min: 1_024 }),
@@ -257,12 +263,21 @@ export function loadConfig() {
     // Set MODELDOCK_MD_MEMORY=0 to hand context management back to the client and
     // compare the two - the code stays in place either way.
     mdMemory: !["0", "false", "off"].includes(String(process.env.MODELDOCK_MD_MEMORY || "").toLowerCase()),
-    // Model catalog refresh. Off by default: the shipped curated catalog in profiles.mjs
+    // Model catalog refresh. Off by default: the shipped curated catalog in catalog.mjs
     // is the primary source and is published with the release. When enabled it only does a
     // light GET /models merge (new ids appended, vision metadata untouched). The heavier
     // vision probe/evaluation code in server.mjs is dev-only test tooling and is never
     // triggered here or at startup.
     modelProbeEnabled: process.env.MODELDOCK_MODEL_PROBE_ENABLED === "1",
+    // Native GPT models captured from the Codex desktop CLI, merged into the
+    // published catalog so they stay selectable in the App picker. The cache
+    // lives at ~/.modeldock/native-catalog.json by default.
+    nativeCatalogFile: process.env.MODELDOCK_NATIVE_CATALOG_FILE
+      ? path.resolve(process.env.MODELDOCK_NATIVE_CATALOG_FILE)
+      : "",
+    refreshNativeCatalog: !["0", "false", "off"].includes(
+      String(process.env.MODELDOCK_REFRESH_NATIVE_CATALOG || "").toLowerCase(),
+    ),
     codexHome,
     envFile: envFileFor(),
   });

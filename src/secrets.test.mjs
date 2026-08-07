@@ -40,8 +40,10 @@ test("encrypt then decrypt round-trips to the original", () => {
   assert.equal(decryptSecret(encrypted), token);
 });
 
-test("dpapi-prefixed value on a non-Windows host reads back as empty, never crashes", (t) => {
-  if (dpapiSupported()) return t.skip("DPAPI is supported here");
+// Holds on every platform: on non-Windows the dpapi: branch returns early, on
+// Windows the DPAPI unprotect fails for this junk payload and the catch branch
+// returns "". Either way decryptSecret never throws.
+test("dpapi-prefixed value that cannot be decrypted reads back as empty, never crashes", () => {
   assert.equal(decryptSecret(`${PREFIX}not-valid-base64!`), "");
 });
 

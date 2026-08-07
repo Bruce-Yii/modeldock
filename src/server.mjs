@@ -1,12 +1,14 @@
 import path from "node:path";
 import os from "node:os";
 import { mkdirSync, writeFileSync } from "node:fs";
+import { access, mkdir, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import express from "express";
 import zlib from "node:zlib";
 import { createMcpExpressApp } from "@modelcontextprotocol/express";
 import { loadConfig, publicConfig, writeEnvFile, envFileFor, migrateEnvSecrets } from "./config.mjs";
 import { catalogFor } from "./catalog.mjs";
+import { nativeModelSlugs, refreshNativeCatalog } from "./native-catalog.mjs";
 import { MediaStore } from "./media-store.mjs";
 import { Metrics } from "./metrics.mjs";
 import { NATIVE_IMAGE_PATHS, relayNativeImage, relayResponses as relayGatewayResponses } from "./gateway.mjs";
@@ -410,6 +412,7 @@ async function relayGatewayRequest(req, res, services) {
     mediaStore,
     routeAffinity,
     knownModels: publishedModelIds(config),
+    nativeSlugs: services.nativeSlugs,
     mainModel: modelSelection?.mainModel || config.mainModel,
     visionModel: modelSelection?.visionModel || config.visionModel,
     // The native passthrough leg forwards these to ChatGPT's backend untouched.
@@ -576,10 +579,16 @@ export function createServices(config = loadConfig()) {
   // The capability key rides in the base URL Codex reads from config.toml, so a
   // hostile local web page cannot reach the relay endpoints (see caller-key.mjs).
   const callerKey = mutableConfig.callerKey || loadOrCreateCallerKey();
+  const mcpUrl = `http://${urlHost(mutableConfig.host)}:${mutableConfig.port}/mcp`;
   const configSwitcher = new CodexConfigSwitcher({
     codexHome: mutableConfig.codexHome,
     baseUrl: `http://${urlHost(mutableConfig.host)}:${mutableConfig.port}${callerBasePath(callerKey)}`,
-    mcpUrl: `http://${urlHost(mutableConfig.host)}:${mutableConfig.port}/mcp`,
+    // stdio (default) spawns the standalone bridge as a Codex-owned child so gateway
+    // restarts never kill the session's MCP tools; url keeps the old HTTP wiring.
+    mcpUrl: mutableConfig.mcpTransport === "url" ? mcpUrl : "",
+    mcpCommand: mutableConfig.mcpTransport === "stdio" ? process.execPath : "",
+    mcpArgs: mutableConfig.mcpTransport === "stdio" ? [path.join(dirname, "mcp-standalone.mjs")] : [],
+    mcpEnv: mutableConfig.mcpTransport === "stdio" ? { MODELDOCK_GATEWAY_URL: mcpUrl.replace(/\/mcp$/, "") } : {},
     model: mutableConfig.mainModel,
     catalogFile,
   });
@@ -589,6 +598,10 @@ export function createServices(config = loadConfig()) {
   updater.check().catch(() => {});
   const routeAffinity = new RouteAffinity();
   const runtime = { profile: mutableConfig.profile, profileId: mutableConfig.profileId };
+  // Captured native GPT slugs from the Codex desktop CLI (see native-catalog.mjs).
+  // Requests for these go to the ChatGPT backend even though they are published
+  // in our catalog for the App picker.
+  const nativeSlugs = nativeModelSlugs(mutableConfig);
   // The Codex App never fetches a custom provider's /models: its refresh predicate is
   // `uses_codex_backend() || has_command_auth()`, and an API-key provider satisfies
   // neither (openai/codex#32119), so the App picker shows "Custom" for everything it
@@ -610,10 +623,25 @@ export function createServices(config = loadConfig()) {
       return 0;
     }
   };
-  const refreshModelCatalog = () => refreshProfileModels(mutableConfig.profile, mutableConfig).then(
-    () => {
+  const refreshModelCatalog = () => Promise.all([
+    refreshProfileModels(mutableConfig.profile, mutableConfig),
+    // Opt-out keeps the desktop-app refresh out of unit tests; production turns
+    // it on by default so the picker keeps showing native GPT models.
+    mutableConfig.refreshNativeCatalog === false
+      ? null
+      : refreshNativeCatalog(mutableConfig).then((models) => {
+          if (models?.length) {
+            nativeSlugs.clear();
+            for (const model of models) {
+              if (typeof model?.slug === "string" && model.slug) nativeSlugs.add(model.slug);
+            }
+          }
+          return models;
+        }),
+  ]).then(
+    ([, nativeModels]) => {
       const written = writeCatalogFile();
-      console.log(`[gate] model refresh done, availableModels=${(mutableConfig.profile?.availableModels || []).length}, catalog file=${written} models`);
+      console.log(`[gate] model refresh done, availableModels=${(mutableConfig.profile?.availableModels || []).length}, native=${nativeModels?.length || 0}, catalog file=${written} models`);
     },
     (error) => console.log(`[gate] model refresh error: ${error.message}`),
   );
@@ -627,7 +655,7 @@ export function createServices(config = loadConfig()) {
   if (modelRefreshTimer) modelRefreshTimer.unref();
   return Object.assign(services, {
     config: mutableConfig, runtime, metrics, mediaStore, upstreams, configSwitcher,
-    autostart, updater, routeAffinity, modelSelection, callerKey,
+    autostart, updater, routeAffinity, modelSelection, callerKey, nativeSlugs,
     refreshModelCatalog, modelRefreshTimer,
   });
 }
@@ -693,6 +721,8 @@ export function createApp(services = createServices()) {
     return res.status(401).json({ error: { type: "invalid_caller_key", message: "Unknown caller key; re-enable the Codex switch to refresh the URL." } });
   };
   app.post(`${CALLER_PATH_PREFIX}/:key/v1/responses`, requireCallerKey, (req, res) => relayGatewayRequest(req, res, services));
+  app.post(`${CALLER_PATH_PREFIX}/:key/v1/responses/compact`, requireCallerKey, (req, res) => relayGatewayRequest(req, res, services));
+  app.post(`${CALLER_PATH_PREFIX}/:key/responses/compact`, requireCallerKey, (req, res) => relayGatewayRequest(req, res, services));
   app.get(`${CALLER_PATH_PREFIX}/:key/v1/models`, requireCallerKey, (req, res) => serveModels(req, res, services));
   // The built-in image_gen tool posts to the openai_base_url's images endpoints;
   // with the transparent config those land here and go straight to the native
@@ -718,6 +748,7 @@ export function createApp(services = createServices()) {
     return nativeImageRelay(req, res);
   };
   app.post(["/v1/responses", "/responses"], bareRelay);
+  app.post(["/v1/responses/compact", "/responses/compact"], bareRelay);
   app.post([...NATIVE_IMAGE_PATHS], bareNativeImageRelay);
   app.get(["/v1/models", "/models"], (req, res) => serveModels(req, res, services));
   app.get("/healthz", (req, res) => {
@@ -876,10 +907,55 @@ export function createApp(services = createServices()) {
   return { app: outer, close: () => mcpHandler.close?.(), services };
 }
 
+// New installs start with login autostart ON. The decision is recorded in a state
+// file so a later explicit off stays off across restarts; only the very first run
+// auto-enables. Safe to call repeatedly: it no-ops once the mark exists.
+export async function initAutostartDefault(autostart, {
+  stateDir = path.join(os.homedir(), ".modeldock"),
+  markName = "autostart-initialized",
+} = {}) {
+  if (!autostart?.supported?.()) return false;
+  await autostart.refresh?.().catch(() => {});
+  const mark = path.join(stateDir, markName);
+  try {
+    await access(mark);
+    return false;
+  } catch {
+    // First run: default autostart ON.
+  }
+  try {
+    if (!autostart.enabled?.()) {
+      const result = await autostart.setEnabled(true);
+      if (!result?.enabled) return false;
+    }
+    await mkdir(stateDir, { recursive: true });
+    await writeFile(mark, `${new Date().toISOString()}\n`, "utf8");
+    console.log("[modeldock] autostart initialized (default: on)");
+    return true;
+  } catch (error) {
+    console.warn(`[modeldock] autostart default-on failed: ${error.message}`);
+    return false;
+  }
+}
+
 export async function startServer(config = loadConfig()) {
   const instance = createApp(createServices(config));
+  // Tests opt out with autostartDefault: false so they never touch the real
+  // registry or the real ~/.modeldock state file.
+  if (config.autostartDefault !== false) {
+    initAutostartDefault(instance.services.autostart).catch(() => {});
+  }
   const server = await new Promise((resolve, reject) => {
     const listener = instance.app.listen(config.port, config.host, () => resolve(listener));
+    // Codex desktop first attempts a Responses WebSocket (ws://127.0.0.1:<port>/...
+    // /v1/responses) for sampling and remote compaction v2. This gate is HTTP-only:
+    // decline every upgrade with 426 so Codex falls back to HTTP immediately instead
+    // of treating a 404 as a retryable failure and burning 5 backoff retries per turn
+    // (same shape codex-router uses; verified against Codex's responses_retry logs).
+    listener.on("upgrade", (_request, socket) => {
+      socket.on("error", () => {});
+      socket.end("HTTP/1.1 426 Upgrade Required\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
+    });
     listener.once("error", reject);
   });
   return {

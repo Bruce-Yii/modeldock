@@ -1,4 +1,8 @@
 import { Readable } from "node:stream";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { bareModelId, modelEntryFor, providerForModel } from "./profiles.mjs";
 import { recordUsageEvent } from "./usage-events.mjs";
 import { translateUpstreamError } from "./error-translation.mjs";
@@ -27,6 +31,67 @@ function redactBearer(value) {
 }
 
 export { redactBearer };
+
+// MODELDOCK_DUMP_DIR diagnostics: write the exact upstream request body so a
+// stuck turn (tool-pairing rejections, quota edge cases) can be reproduced from
+// the file. A dump failure must never break the relay.
+function dumpRequestBody(dir, body) {
+  try {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path.join(dir, `request-${Date.now()}.json`), JSON.stringify(body, null, 2), "utf8");
+  } catch {
+    // Diagnostics only.
+  }
+}
+
+// Compaction is the one request we rewrite wholesale and cannot replay from the
+// Codex session log, and it is rare enough that a per-failure record costs
+// nothing. Full-traffic dumping (MODELDOCK_DUMP_DIR) stays off: it produced
+// gigabytes for the one payload anybody ever wanted to read. Only the tool-item
+// skeleton is kept - ids and types, never arguments, output text or prompts.
+export function compactFailureReport(body, { status, upstreamError } = {}) {
+  const input = Array.isArray(body?.input) ? body.input : [];
+  const calls = new Map();
+  for (const item of input) {
+    const type = item?.type;
+    if (type === "function_call" || type === "custom_tool_call" || type === "local_shell_call") {
+      calls.set(item.call_id ?? item.id, { ...(calls.get(item.call_id ?? item.id) || {}), call: type });
+    }
+    if (type === "function_call_output" || type === "custom_tool_call_output" || type === "local_shell_call_output") {
+      calls.set(item.call_id ?? item.id, { ...(calls.get(item.call_id ?? item.id) || {}), output: type });
+    }
+  }
+  const unpaired = [...calls.entries()]
+    .filter(([, sides]) => !sides.call || !sides.output)
+    .map(([id, sides]) => ({ id, ...sides }));
+  const itemTypes = {};
+  for (const item of input) itemTypes[item?.type ?? "unknown"] = (itemTypes[item?.type ?? "unknown"] || 0) + 1;
+  return {
+    at: new Date().toISOString(),
+    status,
+    upstreamError: String(upstreamError || "").slice(0, 400),
+    model: body?.model,
+    // Server-side continuation keys are the prime suspect when the input we sent
+    // is fully paired but the upstream still reports an orphan: whatever state
+    // they resolve is history this gateway never saw and could not clean.
+    stateKeys: Object.keys(body || {}).filter((key) => /^(previous_response_id|conversation|prompt_cache_key|store)$/.test(key)),
+    inputItems: input.length,
+    itemTypes,
+    unpairedToolItems: unpaired,
+  };
+}
+
+function writeCompactFailureReport(report) {
+  try {
+    const dir = process.env.MODELDOCK_STATE_DIR
+      ? path.resolve(process.env.MODELDOCK_STATE_DIR)
+      : path.join(homedir(), ".modeldock");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path.join(dir, "compact-failures.jsonl"), `${JSON.stringify(report)}\n`, { encoding: "utf8", flag: "a" });
+  } catch {
+    // Diagnostics must never take a request down.
+  }
+}
 
 // Native GPT passthrough (the parallel leg). Model slugs the catalog does not
 // publish - the built-in provider's own GPT-5.x ids that the App picker lists
@@ -125,6 +190,52 @@ function isOpaqueEncryptedContent(value) {
   return typeof value === "string" && value.length > 0 && !/\s/.test(value);
 }
 
+// Remote compaction (v1/v2) is Codex's client-side protocol for context-full
+// sessions. In transparent mode Codex believes it is talking to the native
+// backend, so a compact request expects a `compaction` output item back (v2) or
+// replacement history (v1) instead of a plain summary. Routed models (DeepSeek)
+// do not speak that protocol, so ModelDock synthesizes it exactly like
+// codex-router does: the model writes a handoff summary, which is wrapped in a
+// kcr1: payload and decoded back into a continuation message when Codex replays
+// the compacted history.
+const COMPACT_PROMPT = `You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another language model that will resume the task.
+
+Include current progress, key decisions, constraints, user preferences, remaining steps, and critical data or references. Be concise, structured, and focused on seamless continuation.`;
+const SUMMARY_PREFIX =
+  "Another language model started this task and produced a continuation summary. Use it to continue without repeating completed work:";
+const COMPACTION_PREFIX = "kcr1:";
+// The v1 replacement-history budget: keep the most recent user messages up to
+// this many characters, then append the continuation message.
+const COMPACT_BUDGET_CHARS = 80_000;
+const MAX_COMPACT_RESPONSE_BYTES = 32 * 1024 * 1024;
+
+export function encodeCompactionSummary(summary) {
+  return COMPACTION_PREFIX + Buffer.from(summary, "utf8").toString("base64");
+}
+
+export function decodeCompactionSummary(value) {
+  if (typeof value !== "string" || !value.startsWith(COMPACTION_PREFIX)) return undefined;
+  const payload = value.slice(COMPACTION_PREFIX.length);
+  // Buffer.from(base64) is lenient about garbage; only accept canonical base64
+  // (the payloads this gateway produces) so junk never decodes to noise.
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(payload) || payload.length % 4 !== 0) return undefined;
+  try {
+    return Buffer.from(payload, "base64").toString("utf8");
+  } catch {
+    return undefined;
+  }
+}
+
+// compactV1: POST /responses/compact (the older replacement-history contract).
+export function isCompactV1Request(requestUrl) {
+  return /\/responses\/compact$/.test(splitRequestUrl(requestUrl).pathname);
+}
+
+// compactV2: a Responses request whose last input item is compaction_trigger.
+export function isCompactV2Request(payload) {
+  return Array.isArray(payload?.input) && payload.input.at(-1)?.type === "compaction_trigger";
+}
+
 // OpenAI-issued reasoning encrypted_content is an opaque Fernet-style token with
 // no whitespace. Local providers that mimic the shape with a plain-text summary
 // must be stripped before replay to the native backend, which rejects the blob
@@ -138,15 +249,18 @@ function sanitizeReasoningForNative(item) {
 }
 
 function compactionSummaryText(item) {
+  if (typeof item?.encrypted_content === "string" && item.encrypted_content.length) {
+    // Ours: a kcr1: payload produced by this gateway's compact synthesis.
+    const decoded = decodeCompactionSummary(item.encrypted_content);
+    if (decoded !== undefined) return decoded;
+    if (isOpaqueEncryptedContent(item.encrypted_content)) return undefined;
+    return item.encrypted_content;
+  }
   if (Array.isArray(item?.encrypted_content)) {
     return item.encrypted_content
       .filter((part) => ["summary_text", "text"].includes(part?.type) && typeof part.text === "string")
       .map((part) => part.text)
       .join("\n");
-  }
-  if (typeof item?.encrypted_content === "string" && item.encrypted_content.length) {
-    if (isOpaqueEncryptedContent(item.encrypted_content)) return undefined;
-    return item.encrypted_content;
   }
   return undefined;
 }
@@ -174,24 +288,116 @@ export function normalizeNativeInput(input) {
   });
 }
 
-// Go validates tool pairing strictly and rejects the whole request when a
-// function_call has no matching output ("No tool output found for tool call
+function isToolCallItem(item) {
+  return item?.type === "function_call" || item?.type === "custom_tool_call";
+}
+
+function isToolOutputItem(item) {
+  return item?.type === "function_call_output" || item?.type === "custom_tool_call_output";
+}
+
+// Go (Console Go) validates tool pairing strictly and rejects the whole request
+// when a tool call has no matching output ("No tool output found for tool call
 // ..."). Codex genuinely produces such orphans - a remote compact task slices
-// history and can sever a call from its output at the cut. Drop the unpaired
-// side (both directions) so the turn survives; paired history is untouched.
+// history and can sever a call from its output at the cut. Both dialects Codex
+// emits are paired here: the Responses shape (top-level function_call /
+// custom_tool_call items with function_call_output / custom_tool_call_output)
+// and the chat shape (an assistant message carrying a `tool_calls` array whose
+// results are role:"tool" messages with tool_call_id). The unpaired side is
+// dropped in both directions so the turn survives; paired history is untouched.
 export function dropUnpairedToolItems(input) {
   if (!Array.isArray(input)) return input;
   const callIds = new Set();
   const outputIds = new Set();
   for (const item of input) {
-    if (item?.type === "function_call" || item?.type === "custom_tool_call") callIds.add(item.call_id);
-    if (item?.type === "function_call_output" || item?.type === "custom_tool_call_output") outputIds.add(item.call_id);
+    if (isToolCallItem(item)) callIds.add(item.call_id);
+    if (isToolOutputItem(item)) outputIds.add(item.call_id);
+    if (item?.type === "message" && item?.role === "assistant" && Array.isArray(item.tool_calls)) {
+      for (const call of item.tool_calls) {
+        const id = typeof call === "object" && call !== null ? (call.id ?? call.call_id) : undefined;
+        if (typeof id === "string" && id) callIds.add(id);
+      }
+    }
+    if (item?.type === "message" && item?.role === "tool" && typeof item.tool_call_id === "string" && item.tool_call_id) {
+      outputIds.add(item.tool_call_id);
+    }
   }
-  return input.filter((item) => {
-    if (item?.type === "function_call" || item?.type === "custom_tool_call") return outputIds.has(item.call_id);
-    if (item?.type === "function_call_output" || item?.type === "custom_tool_call_output") return callIds.has(item.call_id);
-    return true;
-  });
+  const paired = input
+    .map((item) => {
+      if (isToolCallItem(item)) {
+        return outputIds.has(item.call_id) ? item : null;
+      }
+      if (isToolOutputItem(item)) {
+        return callIds.has(item.call_id) ? item : null;
+      }
+      if (item?.type === "message" && item?.role === "tool") {
+        return callIds.has(item.tool_call_id) ? item : null;
+      }
+      if (item?.type === "message" && item?.role === "assistant" && Array.isArray(item.tool_calls)) {
+        const kept = item.tool_calls.filter((call) => {
+          const id = typeof call === "object" && call !== null ? (call.id ?? call.call_id) : undefined;
+          return outputIds.has(id);
+        });
+        if (kept.length === item.tool_calls.length) return item;
+        // A message whose calls all got severed and that carries no other text
+        // would reach the upstream as an empty assistant turn, which strict
+        // upstreams reject ("content or tool_calls must be set"). Drop it.
+        const hasContent = Array.isArray(item.content)
+          ? item.content.length > 0
+          : typeof item.content === "string" && item.content.trim() !== "";
+        if (kept.length === 0 && !hasContent) return null;
+        const next = { ...item, tool_calls: kept };
+        if (kept.length === 0) delete next.tool_calls;
+        return next;
+      }
+      return item;
+    })
+    .filter((item) => item !== null);
+  return relocateToolOutputs(paired);
+}
+
+// Go's Responses->chat translation only accepts a tool result when it directly
+// follows the assistant message that declared the call. A remote compact task
+// slices an assistant turn apart, so a call can still be paired with its output
+// while an assistant text message sits between them; the chat translation then
+// emits the tool row after a different assistant and strict upstreams reject
+// the whole request ("No tool output found for tool call ..."). Relocate each
+// output to sit right after its call group (parallel calls keep their group,
+// interleaved text moves after the outputs) so the translated chat stays
+// well-formed. Everything else keeps its position. Same intent as codex-router's
+// coalesceAssistantMessages + ensureToolResultsForCalls, applied on the
+// Responses shape we forward.
+function relocateToolOutputs(items) {
+  const firstOutputById = new Map();
+  for (const item of items) {
+    if (isToolOutputItem(item) && !firstOutputById.has(item.call_id)) {
+      firstOutputById.set(item.call_id, item);
+    }
+  }
+  const out = [];
+  let index = 0;
+  while (index < items.length) {
+    const item = items[index];
+    if (!isToolCallItem(item)) {
+      // A stray or duplicate output already had its home relocated (or no call
+      // at all); an extra tool row after a different assistant would break the
+      // contract again, so it is dropped here.
+      if (!isToolOutputItem(item)) out.push(item);
+      index += 1;
+      continue;
+    }
+    const group = [];
+    while (index < items.length && isToolCallItem(items[index])) group.push(items[index++]);
+    for (const call of group) out.push(call);
+    for (const call of group) {
+      const output = firstOutputById.get(call.call_id);
+      if (output) {
+        out.push(output);
+        firstOutputById.delete(call.call_id);
+      }
+    }
+  }
+  return out;
 }
 
 // The only input rewriting the gateway is allowed to do. Everything else in the
@@ -204,12 +410,7 @@ export function normalizeGatewayInput(input) {
     .filter((item) => item?.type !== "compaction_trigger")
     .map((item) => {
       if (item?.type !== "compaction") return item;
-      const text = Array.isArray(item.encrypted_content)
-        ? item.encrypted_content
-            .filter((part) => ["summary_text", "text"].includes(part?.type) && typeof part.text === "string")
-            .map((part) => part.text)
-            .join("\n")
-        : "";
+      const text = compactionSummaryText(item);
       return {
         type: "message",
         role: "user",
@@ -447,6 +648,7 @@ export async function relayNativeResponses(payload, res, services, { signal } = 
   const native = { ...payload };
   if (Array.isArray(payload.input)) native.input = normalizeNativeInput(payload.input);
   delete native.previous_response_id;
+  const bytesIn = Buffer.byteLength(JSON.stringify(payload));
   const { pathname, search } = splitRequestUrl(requestUrl);
   const target = nativeTarget(pathname, search);
   const finish = metrics?.begin?.("responses", {
@@ -479,6 +681,16 @@ export async function relayNativeResponses(payload, res, services, { signal } = 
       }
       finish?.({ ok: false, httpStatus: upstream.status, upstream: "openai", error: redactBearer(raw).slice(0, 400) });
       metrics?.recordResponseUsage?.({ bytesOut: 0, usage });
+      metrics?.recordResponseTransform?.({
+        blocked: { tool_search: 0, web_search: 0 },
+        toolChoiceRewritten: false,
+        imageRefs: [],
+        directVision: false,
+        droppedAssistantMessages: 0,
+        nativeToolCalls: 0,
+        nativeToolOutputs: 0,
+        fallbackToolResults: 0,
+      }, { streaming: false, routeReason: "native_passthrough", bytesIn });
       (services.recordUsage || recordUsageEvent)({
         model: payload.model,
         provider: "openai",
@@ -498,6 +710,16 @@ export async function relayNativeResponses(payload, res, services, { signal } = 
     const bytesOut = await pipeGatewayStream(upstream.body, res, tee);
     finish?.({ ok: true, httpStatus: upstream.status, upstream: "openai", bytesOut });
     metrics?.recordResponseUsage?.({ bytesOut, usage });
+    metrics?.recordResponseTransform?.({
+      blocked: { tool_search: 0, web_search: 0 },
+      toolChoiceRewritten: false,
+      imageRefs: [],
+      directVision: false,
+      droppedAssistantMessages: 0,
+      nativeToolCalls: 0,
+      nativeToolOutputs: 0,
+      fallbackToolResults: 0,
+    }, { streaming: payload.stream !== false, routeReason: "native_passthrough", bytesIn });
     (services.recordUsage || recordUsageEvent)({
       model: payload.model,
       provider: "openai",
@@ -579,6 +801,298 @@ export async function relayNativeImage(payload, res, services, { signal } = {}) 
   }
 }
 
+function messageItem(text) {
+  return { type: "message", role: "user", content: [{ type: "input_text", text }] };
+}
+
+// Pull the model's plain-text answer out of a Responses payload (JSON body or a
+// streamed response that was already parsed by the caller).
+function extractResponseText(payload) {
+  if (typeof payload?.output_text === "string") return payload.output_text;
+  const texts = [];
+  for (const item of Array.isArray(payload?.output) ? payload.output : []) {
+    if (item?.type !== "message") continue;
+    for (const part of Array.isArray(item?.content) ? item.content : []) {
+      if (["output_text", "text"].includes(part?.type) && typeof part.text === "string") {
+        texts.push(part.text);
+      }
+    }
+  }
+  return texts.join("\n").trim();
+}
+
+// The v1 compact response follows Codex's replacement-history contract: the
+// recent user messages (up to a character budget) plus the continuation summary.
+function compactOutput(input, summary) {
+  const selected = [];
+  let remaining = COMPACT_BUDGET_CHARS;
+  const messages = extractUserMessages(input);
+  for (let index = messages.length - 1; index >= 0 && remaining > 0; index -= 1) {
+    const value = messages[index];
+    if (value.length <= remaining) {
+      selected.push(value);
+      remaining -= value.length;
+    } else {
+      selected.push(value.slice(value.length - remaining));
+      break;
+    }
+  }
+  selected.reverse();
+  return [
+    ...selected.map(messageItem),
+    messageItem(summary.trim() ? `${SUMMARY_PREFIX}\n${summary}` : "(no summary available)"),
+  ];
+}
+
+function extractUserMessages(input) {
+  if (!Array.isArray(input)) return [];
+  const messages = [];
+  for (const item of input) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    if (item.type !== undefined && item.type !== "message") continue;
+    if (item.role !== "user") continue;
+    const text = Array.isArray(item.content)
+      ? item.content
+          .filter((part) => ["input_text", "text"].includes(part?.type) && typeof part.text === "string")
+          .map((part) => part.text)
+          .join("")
+      : typeof item.content === "string"
+        ? item.content
+        : "";
+    if (text.trim()) messages.push(text);
+  }
+  return messages;
+}
+
+function compactionItem(summary) {
+  return {
+    type: "compaction",
+    id: `cmp_${randomUUID().replaceAll("-", "")}`,
+    encrypted_content: encodeCompactionSummary(summary),
+  };
+}
+
+function compactionSnapshot(model, item, usage) {
+  return {
+    id: `resp_${randomUUID().replaceAll("-", "")}`,
+    object: "response",
+    created_at: Math.floor(Date.now() / 1_000),
+    status: "completed",
+    model,
+    output: item ? [item] : [],
+    usage: usage || null,
+  };
+}
+
+function writeCompactionSse(res, model, summary) {
+  const item = compactionItem(summary);
+  const created = { ...compactionSnapshot(model, undefined, null), status: "in_progress" };
+  const completed = { ...created, status: "completed", output: [item] };
+  const events = [
+    ["response.created", { response: created }],
+    ["response.output_item.done", { output_index: 0, item }],
+    ["response.completed", { response: completed }],
+  ];
+  res.statusCode = 200;
+  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders();
+  events.forEach(([type, data], sequence) => {
+    res.write(`event: ${type}\ndata: ${JSON.stringify({ type, sequence_number: sequence, ...data })}\n\n`);
+  });
+  res.end("data: [DONE]\n\n");
+}
+
+// Synthesize the compaction response Codex expects instead of forwarding the
+// compact request to a routed model that would answer with a plain summary.
+// The model is asked for a handoff summary in a separate non-streaming call;
+// that summary rides back as a compaction item whose encrypted_content is a
+// kcr1: payload. v2 returns a single compaction output item (JSON or SSE);
+// v1 returns replacement history under { output }.
+export async function relayCompaction(payload, res, services, { signal } = {}, v2 = true) {
+  const { config, metrics, mediaStore, routeAffinity, knownModels } = services;
+  const requestedModel = normalizeLegacySlug(typeof payload.model === "string" ? payload.model : "", knownModels);
+  if (requestedModel !== payload.model && requestedModel) payload = { ...payload, model: requestedModel };
+  const mainModel = services.mainModel || config.mainModel;
+  const visionModel = services.visionModel || config.visionModel;
+  const route = routeGatewayRequest(payload, {
+    mainModel,
+    visionModel,
+    affinity: routeAffinity,
+    knownModels,
+  });
+  const summarizeBody = {
+    ...payload,
+    model: route.model,
+    stream: false,
+    tools: [],
+    tool_choice: "none",
+    input: [...rewriteHistoricalImages(normalizeGatewayInput(payload.input), mediaStore), messageItem(COMPACT_PROMPT)],
+  };
+  delete summarizeBody.previous_response_id;
+  delete summarizeBody.client_metadata;
+  const bytesIn = Buffer.byteLength(JSON.stringify(payload));
+
+  const target = upstreamTargetFor(config, route.model);
+  const upstreamModel = target.model;
+  const operation = v2 ? "compact_v2" : "compact_v1";
+  const finish = metrics?.begin?.("responses", {
+    operation,
+    model: route.model,
+    upstream: target.provider,
+    routeReason: route.reason,
+  });
+  const startedAt = Date.now();
+  let usage;
+  try {
+    if (!target.token) {
+      const body = JSON.stringify({
+        error: {
+          type: "configuration_error",
+          message: `No API token configured for provider ${target.provider}.`,
+        },
+      });
+      res.statusCode = 503;
+      res.setHeader("Content-Type", "application/json");
+      res.end(body);
+      finish?.({ ok: false, httpStatus: 503, error: `No API token configured for provider ${target.provider}.` });
+      (services.recordUsage || recordUsageEvent)({
+        model: route.model,
+        provider: target.provider,
+        route: operation,
+        status: 503,
+        durationMs: Date.now() - startedAt,
+      });
+      return { ok: false, httpStatus: 503, route, error: body };
+    }
+    if (config.debug?.dumpDir) dumpRequestBody(config.debug.dumpDir, { ...summarizeBody, model: upstreamModel });
+    const upstream = await fetch(target.url, {
+      method: "POST",
+      headers: upstreamHeaders(target),
+      body: JSON.stringify({ ...summarizeBody, model: upstreamModel }),
+      signal,
+    });
+    const bytes = Buffer.from(await upstream.arrayBuffer());
+    if (bytes.length > MAX_COMPACT_RESPONSE_BYTES) {
+      const body = JSON.stringify({ error: { type: "upstream_failed", message: "Compact response is too large." } });
+      if (!res.headersSent) {
+        res.statusCode = 502;
+        res.setHeader("Content-Type", "application/json");
+        res.end(body);
+      }
+      finish?.({ ok: false, httpStatus: 502, error: "Compact response is too large." });
+      (services.recordUsage || recordUsageEvent)({
+        model: route.model,
+        provider: target.provider,
+        route: operation,
+        status: 502,
+        durationMs: Date.now() - startedAt,
+      });
+      return { ok: false, httpStatus: 502, route, error: "Compact response is too large." };
+    }
+    const parsed = JSON.parse(bytes.toString("utf8"));
+    usage = extractResponseUsage(parsed);
+    if (!upstream.ok) {
+      const translated = translateUpstreamError({ provider: target.provider, status: upstream.status, bodyText: redactBearer(bytes.toString("utf8")) });
+      writeCompactFailureReport(
+        compactFailureReport(
+          { ...summarizeBody, model: upstreamModel },
+          { status: upstream.status, upstreamError: translated.body.error.message },
+        ),
+      );
+      const body = JSON.stringify(translated.body);
+      if (!res.headersSent) {
+        res.statusCode = upstream.status;
+        res.setHeader("Content-Type", "application/json");
+        res.end(body);
+      }
+      finish?.({ ok: false, httpStatus: upstream.status, upstream: target.provider, error: translated.body.error.message.slice(0, 400) });
+      metrics?.recordResponseTransform?.({
+        blocked: { tool_search: 0, web_search: 0 },
+        toolChoiceRewritten: false,
+        imageRefs: [],
+        directVision: false,
+        droppedAssistantMessages: 0,
+        nativeToolCalls: 0,
+        nativeToolOutputs: 0,
+        fallbackToolResults: 0,
+      }, { streaming: false, routeReason: operation, bytesIn });
+      (services.recordUsage || recordUsageEvent)({
+        model: route.model,
+        provider: target.provider,
+        route: operation,
+        status: upstream.status,
+        durationMs: Date.now() - startedAt,
+      });
+      return { ok: false, httpStatus: upstream.status, route, error: translated.body.error.message.slice(0, 400), upstreamBytes: bytes.length };
+    }
+
+    const summary = extractResponseText(parsed);
+    if (v2) {
+      if (payload.stream === false) {
+        res.statusCode = 200;
+        res.setHeader("Content-Type", "application/json");
+        res.end(JSON.stringify(compactionSnapshot(payload.model, compactionItem(summary), usage)));
+      } else {
+        writeCompactionSse(res, payload.model, summary);
+      }
+    } else {
+      res.statusCode = 200;
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ output: compactOutput(payload.input, summary) }));
+    }
+    finish?.({
+      ok: true,
+      httpStatus: 200,
+      upstream: target.provider,
+      bytesOut: bytes.length,
+      inputTokens: usage?.input_tokens || 0,
+      outputTokens: usage?.output_tokens || 0,
+    });
+    metrics?.recordResponseUsage?.({ bytesOut: bytes.length, usage });
+    metrics?.recordResponseTransform?.({
+      blocked: { tool_search: 0, web_search: 0 },
+      toolChoiceRewritten: false,
+      imageRefs: [],
+      directVision: false,
+      droppedAssistantMessages: 0,
+      nativeToolCalls: 0,
+      nativeToolOutputs: 0,
+      fallbackToolResults: 0,
+    }, { streaming: payload.stream !== false, routeReason: operation, bytesIn });
+    (services.recordUsage || recordUsageEvent)({
+      model: route.model,
+      provider: target.provider,
+      route: operation,
+      status: 200,
+      durationMs: Date.now() - startedAt,
+      inputTokens: usage?.input_tokens,
+      outputTokens: usage?.output_tokens,
+      totalTokens: usage?.total_tokens,
+    });
+    return {
+      ok: true,
+      httpStatus: 200,
+      route,
+      usage,
+      bytesOut: bytes.length,
+      latencyMs: Date.now() - startedAt,
+      upstream: target.provider,
+    };
+  } catch (error) {
+    finish?.({ ok: false, error: error.message });
+    if (!res.headersSent) {
+      res.statusCode = 502;
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ error: { type: "upstream_failed", message: redactBearer(error.message) } }));
+    } else {
+      res.destroy();
+    }
+    return { ok: false, httpStatus: 502, route, error: error.message };
+  }
+}
+
 // Relay one Responses request: normalize, route (with image escalation and
 // affinity), apply tool policy, choose upstream, forward, pipe, and tee.
 // `services` carries { config, metrics, mediaStore, routeAffinity, modelSelection,
@@ -589,6 +1103,15 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   if (requestedModel !== payload.model && requestedModel) payload = { ...payload, model: requestedModel };
   if (isNativeModel(requestedModel, knownModels, services.nativeSlugs)) {
     return relayNativeResponses(payload, res, services, { signal });
+  }
+  // Remote compaction for routed models: Codex expects a compaction output item
+  // (v2) or replacement history (v1) back, which DeepSeek does not produce
+  // natively. Intercept instead of forwarding the raw request.
+  if (isCompactV1Request(services.requestUrl)) {
+    return relayCompaction(payload, res, services, { signal }, false);
+  }
+  if (isCompactV2Request(payload)) {
+    return relayCompaction(payload, res, services, { signal }, true);
   }
   const mainModel = services.mainModel || config.mainModel;
   const visionModel = services.visionModel || config.visionModel;
@@ -605,6 +1128,15 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     model: route.model,
   };
   delete normalizedPayload.client_metadata;
+  // The input array is the authoritative history here. A previous_response_id
+  // would make the upstream resolve continuation state server-side - state
+  // that can still carry the orphaned tool call this gateway just cleaned, so
+  // strict upstreams (Go) would reject the request again.
+  delete normalizedPayload.previous_response_id;
+
+  // Transfer-card "in": the request body bytes the client actually sent this
+  // gate. Re-serializing the parsed payload is the honest post-decode size.
+  const bytesIn = Buffer.byteLength(JSON.stringify(payload));
 
   const { tools, stripped } = applyToolPolicy(normalizedPayload.tools);
   if (tools !== normalizedPayload.tools) normalizedPayload.tools = tools;
@@ -614,6 +1146,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   // stays in the response and affinity so provider resolution keeps working on
   // continuation requests.
   const upstreamModel = target.model;
+  if (config.debug?.dumpDir) dumpRequestBody(config.debug.dumpDir, { ...normalizedPayload, model: upstreamModel });
   if (!target.token) {
     const error = {
       error: {
@@ -633,7 +1166,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       nativeToolCalls: 0,
       nativeToolOutputs: 0,
       fallbackToolResults: 0,
-    }, { streaming: false, routeReason: route.reason });
+    }, { streaming: false, routeReason: route.reason, bytesIn });
     return { ok: false, httpStatus: 503, route, error };
   }
 
@@ -682,10 +1215,10 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
         imageRefs: [],
         directVision: route.directVision,
         droppedAssistantMessages: 0,
-        nativeToolCalls: 0,
-        nativeToolOutputs: 0,
-        fallbackToolResults: 0,
-      }, { streaming: false, routeReason: route.reason });
+      nativeToolCalls: 0,
+      nativeToolOutputs: 0,
+      fallbackToolResults: 0,
+    }, { streaming: false, routeReason: route.reason, bytesIn });
       return { ok: false, httpStatus: upstream.status, route, error: translated.body.error.message.slice(0, 400), upstreamBytes };
     }
 
@@ -723,7 +1256,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       nativeToolCalls: 0,
       nativeToolOutputs: 0,
       fallbackToolResults: 0,
-    }, { streaming: true, routeReason: route.reason });
+    }, { streaming: true, routeReason: route.reason, bytesIn });
     metrics?.recordResponseUsage?.({ bytesOut, usage });
     // Injectable so unit tests do not append to the real ~/.modeldock file.
     (services.recordUsage || recordUsageEvent)({

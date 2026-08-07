@@ -21,6 +21,30 @@ test("write/read/clear round-trips the owner record", (t) => {
   assert.equal(existsSync(file), false);
 });
 
+test("MODELDOCK_STATE_DIR redirects the record, and an explicit home still wins", (t) => {
+  const stateDir = tempHome();
+  const home = tempHome();
+  const previous = process.env.MODELDOCK_STATE_DIR;
+  process.env.MODELDOCK_STATE_DIR = stateDir;
+  t.after(() => {
+    if (previous === undefined) delete process.env.MODELDOCK_STATE_DIR;
+    else process.env.MODELDOCK_STATE_DIR = previous;
+    rmSync(stateDir, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  // A spawned gateway passes no home, so the redirect keeps its record out of
+  // the real ~/.modeldock - that leak was one file per mock-install test run.
+  assert.equal(ownerFilePath(4097), path.join(stateDir, "owner-4097.json"));
+  assert.equal(writeOwnerFile(4097, { root: "D:/checkout" }), path.join(stateDir, "owner-4097.json"));
+  assert.equal(readOwnerFile(4097).root, path.resolve("D:/checkout"));
+
+  // The unit tests here pass home explicitly and must stay hermetic even when
+  // the variable is set in the surrounding environment.
+  assert.equal(ownerFilePath(4097, home), path.join(home, ".modeldock", "owner-4097.json"));
+  assert.equal(readOwnerFile(4097, { home }), undefined, "explicit home sees its own (empty) directory");
+});
+
 test("clearOwnerFile leaves another process's record alone", (t) => {
   const home = tempHome();
   t.after(() => rmSync(home, { recursive: true, force: true }));

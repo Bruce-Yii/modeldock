@@ -69,15 +69,7 @@
               <button id="speech-tts-install" type="button" class="mini-button" hidden>Install</button>
             </div>
           </div>
-          <div class="debug-default">
-            <span data-i18n="defaults.autostart">AUTOSTART</span>
-            <label class="mode-toggle" for="autostart-toggle">
-              <b id="autostart-off-label" data-i18n="autostart.off">Off</b>
-              <input id="autostart-toggle" type="checkbox" role="switch" aria-label="Start ModelDock at login" />
-              <span class="mode-track"><i></i></span>
-              <b id="autostart-on-label" data-i18n="autostart.on">On</b>
-            </label>
-          </div>
+          <div class="debug-default" aria-hidden="true"></div>
         </div>
         <div class="control-meta">
           <strong id="switch-message" aria-live="polite"></strong>
@@ -90,17 +82,22 @@
       </section>
 
       <section class="metric-grid">
-        <article class="metric-card accent-blue">
-          <div class="metric-head"><span data-i18n="metric.requests">Requests</span><b id="active-requests">0 active</b></div>
-          <strong class="metric-value" id="requests-total">0</strong>
-          <div class="meter"><i id="requests-success-meter"></i></div>
-          <p><span id="requests-success">0%</span> <span data-i18n="metric.successful">successful</span> · <span id="requests-latency">0 ms</span> <span data-i18n="metric.avg">avg</span></p>
+        <article class="metric-card accent-blue wave-card">
+          <div class="metric-head"><span data-i18n="metric.requests">Requests</span><b><span id="requests-active">0</span> <span data-i18n="metric.active">active</span> · <span id="requests-total">0</span> <span data-i18n="metric.total">total</span></b></div>
+          <div class="wave-stats"><span><b id="cache-last">—</b> <span data-i18n="metric.cacheLast">cache last</span></span><span><b id="cache-avg">—</b> <span data-i18n="metric.cacheAvg">avg</span></span></div>
+          <div class="wave-wrap">
+            <canvas id="cache-wave" width="340" height="92"></canvas>
+            <div id="cache-wave-tooltip" class="wave-tooltip" hidden></div>
+          </div>
+          <p><span id="cache-count">0</span> <span data-i18n="metric.callsObserved">calls observed</span></p>
         </article>
-        <article class="metric-card accent-violet">
-          <div class="metric-head"><span data-i18n="metric.tokens">Tokens</span><b data-i18n="metric.forwarded">forwarded</b></div>
-          <strong class="metric-value" id="tokens-total">0</strong>
-          <div class="split-stats"><span><i class="dot input"></i><b id="tokens-input">0</b> <span data-i18n="metric.input">input</span></span><span><i class="dot output"></i><b id="tokens-output">0</b> <span data-i18n="metric.output">output</span></span></div>
-          <div class="meter token"><i id="token-meter-input"></i></div>
+        <article class="metric-card accent-violet wave-card">
+          <div class="metric-head"><span data-i18n="metric.tokens">Tokens</span><b><span id="tokens-input">0</span> <span data-i18n="metric.in">in</span> &middot; <span id="tokens-output">0</span> <span data-i18n="metric.out">out</span></b></div>
+          <div class="wave-stats"><span><b id="reason-last">&mdash;</b> <span data-i18n="metric.reasonLast">reason/output</span></span><span><b id="reason-avg">&mdash;</b> <span data-i18n="metric.reasonAvg">avg</span></span></div>
+          <div class="wave-wrap">
+            <canvas id="reason-wave" width="340" height="92"></canvas>
+            <div id="reason-wave-tooltip" class="wave-tooltip" hidden></div>
+          </div>
         </article>
         <article class="metric-card accent-amber wave-card">
           <div class="metric-head"><span data-i18n="metric.context">Context tokens</span><b data-i18n="metric.perCall">per call · live</b></div>
@@ -112,9 +109,12 @@
           <p><span id="wave-count">0</span> <span data-i18n="metric.callsObserved">calls observed</span></p>
         </article>
         <article class="metric-card accent-green">
-          <div class="metric-head"><span data-i18n="metric.transfer">Transfer</span><b data-i18n="metric.sse">SSE + JSON</b></div>
-          <strong class="metric-value" id="bytes-total">0 B</strong>
-          <div class="split-stats"><span><b id="bytes-in">0 B</b> <span data-i18n="metric.in">in</span></span><span><b id="bytes-out">0 B</b> <span data-i18n="metric.out">out</span></span></div>
+          <div class="metric-head"><span data-i18n="metric.transfer">Transfer</span><b id="bytes-total">0 B</b></div>
+          <div class="wave-stats"><span><b id="bytes-in">0 B</b> <span data-i18n="metric.in">in</span></span><span><b id="bytes-out">0 B</b> <span data-i18n="metric.out">out</span></span></div>
+          <div class="wave-wrap">
+            <canvas id="data-wave" width="340" height="92"></canvas>
+            <div id="data-wave-tooltip" class="wave-tooltip" hidden></div>
+          </div>
           <p><span id="stream-count">0</span> <span data-i18n="metric.streamed">streamed responses</span></p>
         </article>
       </section>
@@ -186,6 +186,17 @@
             <option value="es" data-i18n="lang.es">Español</option>
           </select>
         </label>
+        <div class="field field-switch">
+          <div class="field-head">
+            <span data-i18n="settings.autostart">Start at login</span>
+          </div>
+          <label class="mode-toggle" for="settings-autostart-toggle">
+            <b id="settings-autostart-off-label" data-i18n="autostart.off">Off</b>
+            <input id="settings-autostart-toggle" type="checkbox" role="switch" aria-label="Start ModelDock at login" />
+            <span class="mode-track"><i></i></span>
+            <b id="settings-autostart-on-label" data-i18n="autostart.on">On</b>
+          </label>
+        </div>
         <div class="settings-actions">
           <button id="settings-save" type="button" data-i18n="settings.save">Save</button>
           <span id="settings-status" aria-live="polite"></span>

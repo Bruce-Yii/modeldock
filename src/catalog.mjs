@@ -1,6 +1,7 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { profileById } from "./profiles.mjs";
+import { readNativeCatalog } from "./native-catalog.mjs";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -43,7 +44,65 @@ export function catalogFor(config) {
     return enabledProviderIds.has(owner)
       && !(modelEntry?.endpoint === "chat" || modelEntry?.status === "unavailable");
   });
-  return { ...catalog, models };
+  const merged = mergeNativeCatalog({ ...catalog, models }, config);
+  return { ...merged, models: orderCatalogByProvider(merged.models) };
+}
+
+// The Codex App picker list is the model_catalog_json file when configured, not
+// a merge with the app's own native models, so native GPT models must be
+// published in our catalog to stay selectable beside ours (verified live
+// 2026-08-07: `codex debug models` returns the bundled native catalog with no
+// catalog file, and exactly the catalog file when one is set). Native entries
+// are appended after ours and the whole list is re-ordered by provider (see
+// orderCatalogByProvider); picker-hidden entries stay out of the list (requests
+// for them still route natively through the unknown-slug path in the gateway).
+// A missing or stale cache degrades to the curated catalog alone.
+export function mergeNativeCatalog(catalog, config) {
+  const native = readNativeCatalog(config);
+  if (!native?.models?.length) return catalog;
+  const published = new Set((catalog.models || []).map((entry) => entry?.slug));
+  const extra = native.models.filter((model) => (
+    model?.slug
+    && model.visibility === "list"
+    && !published.has(model.slug)
+  )).map(nativeEntryForCatalog);
+  if (!extra.length) return catalog;
+  return { ...catalog, models: [...(catalog.models || []), ...extra] };
+}
+
+// Provider labels in picker order. The Codex picker orders catalog entries by
+// their `priority` field: the curated catalog numbers priorities 1..N while the
+// merged native entries carry their own native priorities (1, 2, 3, 7, 29...),
+// so without renumbering the native models interleave with ours and scatter
+// across the picker. Renumber priorities so every provider's models sit
+// together - groups ordered by provider label, existing within-group order
+// preserved.
+const PROVIDER_LABELS = {
+  "opencode-go": "OpenCode Go",
+  "deepseek-official": "DeepSeek Official",
+  openai: "OpenAI",
+};
+
+function providerLabelFor(entry) {
+  const provider = entry?.provider || ownerProviderFor(entry?.slug);
+  return PROVIDER_LABELS[provider] || provider;
+}
+
+export function orderCatalogByProvider(models) {
+  if (!Array.isArray(models)) return models;
+  return models
+    .map((entry, index) => ({ entry, label: providerLabelFor(entry), index }))
+    .sort((left, right) => String(left.label).localeCompare(String(right.label)) || left.index - right.index)
+    .map(({ entry }, index) => ({ ...entry, priority: index + 1 }));
+}
+
+// Native entries keep their full metadata (capabilities, instructions) but the
+// picker name gets the same "Provider - Model" shape the curated catalog uses,
+// so the App list reads "OpenAI - GPT-5.5" instead of a bare "GPT-5.5".
+// `provider: "openai"` tags them for the provider-grouped ordering above.
+function nativeEntryForCatalog(model) {
+  if (typeof model.display_name !== "string") return { ...model, provider: "openai" };
+  return { ...model, display_name: `OpenAI - ${model.display_name}`, provider: "openai" };
 }
 
 export function enabledProvidersFor(config) {

@@ -10,13 +10,11 @@ function errorResult(error) {
   return { isError: true, content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }] };
 }
 
-export function createMcpNodeHandler({ upstreams, onError = () => {} }) {
-  const handler = createMcpHandler(
-    () => {
-      const server = new McpServer(
-        { name: "modeldock-opencode-go", version: "0.1.0" },
-        { capabilities: { tools: {}, resources: {} } },
-      );
+export function createMcpServer({ upstreams }) {
+  const server = new McpServer(
+    { name: "modeldock-opencode-go", version: "0.1.0" },
+    { capabilities: { tools: {}, resources: {} } },
+  );
 
       server.registerTool(
         "web_search_exa",
@@ -124,11 +122,14 @@ export function createMcpNodeHandler({ upstreams, onError = () => {} }) {
         },
       );
 
-      return server;
-    },
+  return server;
+}
+
+export function createMcpNodeHandler({ upstreams, onError = () => {} }) {
+  const handler = createMcpHandler(
+    () => createMcpServer({ upstreams }),
     { legacy: "stateless", onerror: onError },
   );
-
   const nodeHandler = toNodeHandler(handler);
   nodeHandler.close = () => handler.close();
   return nodeHandler;

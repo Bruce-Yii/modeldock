@@ -1,10 +1,11 @@
 import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { createApp, createServices, codexModelCatalog } from "./server.mjs";
+import { createApp, createServices, startServer, initAutostartDefault, codexModelCatalog } from "./server.mjs";
 import { OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE } from "./profiles.mjs";
 
 const TEST_PROFILE = { ...OPENCODE_GO_PROFILE };
@@ -28,6 +29,7 @@ function baseConfig() {
     exaApiKey: "",
     recentLimit: 50,
     debug: { noSessionCheck: true },
+    refreshNativeCatalog: false,
   };
 }
 
@@ -48,6 +50,13 @@ async function startApp(configOverrides = {}) {
   if (!config.summariesFile) {
     const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-summaries-"));
     config.summariesFile = path.join(dir, "summaries.json");
+  }
+  // Isolate the catalog file and native capture: tests must never read or write
+  // the real ~/.modeldock state (a test run was polluting the live gate's files).
+  if (!config.codexCatalogFile || !config.nativeCatalogFile) {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-catalog-test-"));
+    config.codexCatalogFile = config.codexCatalogFile || path.join(dir, "codex-model-catalog.json");
+    config.nativeCatalogFile = config.nativeCatalogFile || path.join(dir, "native-catalog.json");
   }
   const services = createServices(config);
   const { app } = createApp(services);
@@ -150,7 +159,13 @@ test("models endpoint serves the local Codex catalog", async (t) => {
 });
 
 test("codexModelCatalog matches Codex schema requirements", () => {
-  const catalog = codexModelCatalog({ mainModel: "deepseek-v4-flash" });
+  const catalog = codexModelCatalog({
+    mainModel: "deepseek-v4-flash",
+    // Keep the schema check hermetic: without a configured native catalog file
+    // the merge would read the real ~/.modeldock capture on a dev machine and
+    // the provider-grouped order would put a native GPT model first.
+    nativeCatalogFile: path.join(os.tmpdir(), "modeldock-test-native-missing.json"),
+  });
   const model = catalog.models[0];
   assert.equal(model.slug, "deepseek-v4-flash");
   assert.equal(model.supports_reasoning_summaries, true);
@@ -307,4 +322,134 @@ test("host guard rejects non-loopback Host headers (DNS rebinding)", async (t) =
 
   const legit = await fetch(`${instance.base}/api/status`);
   assert.equal(legit.status, 200);
+});
+
+test("WebSocket upgrades are declined with 426 so Codex falls back to HTTP", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-upgrade-test-"));
+  const config = {
+    ...baseConfig(),
+    port: 0,
+    autostartDefault: false,
+    codexCatalogFile: path.join(dir, "codex-model-catalog.json"),
+    nativeCatalogFile: path.join(dir, "native-catalog.json"),
+  };
+  const instance = await startServer(config);
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  t.after(instance.stop);
+  const port = instance.server.address().port;
+
+  const upgrade = (pathname) => new Promise((resolve, reject) => {
+    const socket = net.connect(port, "127.0.0.1", () => {
+      socket.write(
+        `GET ${pathname} HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n`,
+      );
+    });
+    const chunks = [];
+    socket.setTimeout(3_000, () => {
+      socket.destroy();
+      reject(new Error("upgrade response timeout"));
+    });
+    socket.on("data", (chunk) => {
+      chunks.push(chunk);
+      if (Buffer.concat(chunks).toString().includes("\r\n\r\n")) {
+        socket.destroy();
+        resolve(Buffer.concat(chunks).toString());
+      }
+    });
+    socket.on("error", reject);
+  });
+
+  const bare = await upgrade("/v1/responses");
+  assert.match(bare, /^HTTP\/1\.1 426 Upgrade Required/, "bare responses path is declined with 426");
+  assert.match(bare, /Connection: close/i);
+
+  const keyed = await upgrade("/c/some-key/v1/responses");
+  assert.match(keyed, /^HTTP\/1\.1 426 Upgrade Required/, "keyed responses path is declined with 426");
+
+  // Ordinary HTTP traffic is untouched: the gate still serves healthz.
+  const health = await fetch(`http://127.0.0.1:${port}/healthz`);
+  assert.equal(health.status, 200);
+});
+
+test("initAutostartDefault enables login autostart on first run and records the decision", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-autostart-default-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const calls = [];
+  const autostart = {
+    supported: () => true,
+    enabled: () => false,
+    async refresh() {},
+    async setEnabled(value) {
+      calls.push(value);
+      return { enabled: value, supported: true };
+    },
+  };
+
+  assert.equal(await initAutostartDefault(autostart, { stateDir: dir }), true);
+  assert.deepEqual(calls, [true], "first run enables autostart");
+  assert.equal(await readFile(path.join(dir, "autostart-initialized"), "utf8").then(Boolean), true);
+});
+
+test("initAutostartDefault never re-enables after the decision is recorded", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-autostart-marked-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await writeFile(path.join(dir, "autostart-initialized"), "once\n", "utf8");
+  let setCalls = 0;
+  const autostart = {
+    supported: () => true,
+    enabled: () => false,
+    async refresh() {},
+    async setEnabled() {
+      setCalls += 1;
+      return { enabled: true, supported: true };
+    },
+  };
+
+  assert.equal(await initAutostartDefault(autostart, { stateDir: dir }), false);
+  assert.equal(setCalls, 0, "an existing mark means the user's preference is respected");
+});
+
+test("initAutostartDefault records the mark even when autostart is already enabled", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-autostart-already-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  let setCalls = 0;
+  const autostart = {
+    supported: () => true,
+    enabled: () => true,
+    async refresh() {},
+    async setEnabled() {
+      setCalls += 1;
+      return { enabled: true, supported: true };
+    },
+  };
+
+  assert.equal(await initAutostartDefault(autostart, { stateDir: dir }), true);
+  assert.equal(setCalls, 0, "already enabled needs no registry write");
+});
+
+test("initAutostartDefault leaves no mark when the platform is unsupported or enabling fails", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-autostart-fail-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+
+  const unsupported = {
+    supported: () => false,
+    enabled: () => false,
+    async refresh() {},
+    async setEnabled() {
+      throw new Error("unreachable");
+    },
+  };
+  assert.equal(await initAutostartDefault(unsupported, { stateDir: dir }), false);
+  await assert.rejects(readFile(path.join(dir, "autostart-initialized"), "utf8"));
+
+  const failing = {
+    supported: () => true,
+    enabled: () => false,
+    async refresh() {},
+    async setEnabled() {
+      throw new Error("registry denied");
+    },
+  };
+  assert.equal(await initAutostartDefault(failing, { stateDir: dir }), false);
+  await assert.rejects(readFile(path.join(dir, "autostart-initialized"), "utf8"));
 });

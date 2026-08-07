@@ -185,7 +185,7 @@ function setTopLevel(lines, key, value) {
 // base URL is redirected to the local gate, and the realtime endpoints point at
 // OpenAI so Codex Voice never dials the loopback. The catalog file keeps naming
 // our models in the App picker (openai/codex#32119 only affects custom providers).
-export function buildManagedCodexConfig(source, { baseUrl, model, catalogFile = "", mcpUrl = "" }) {
+export function buildManagedCodexConfig(source, { baseUrl, model, catalogFile = "", mcpUrl = "", mcpCommand = "", mcpArgs = [], mcpEnv = {} }) {
   const newline = source.includes("\r\n") ? "\r\n" : "\n";
   let lines = removeManagedRoute(source.replace(/\r\n/g, "\n").split("\n"));
   while (lines.length && !lines.at(-1).trim()) lines.pop();
@@ -212,12 +212,24 @@ export function buildManagedCodexConfig(source, { baseUrl, model, catalogFile = 
       "# Managed by ModelDock: web_search_exa / vision_inspect / speak / hear sidecar.",
       `url = ${tomlString(mcpUrl)}`,
     );
+  } else if (mcpCommand) {
+    lines.push(
+      "",
+      "[mcp_servers.modeldock]",
+      "# Managed by ModelDock: web_search_exa / vision_inspect / speak / hear stdio bridge.",
+      `command = ${tomlString(mcpCommand)}`,
+      `args = [${mcpArgs.map((arg) => tomlString(arg)).join(", ")}]`,
+    );
+    const envEntries = Object.entries(mcpEnv);
+    if (envEntries.length) {
+      lines.push(`env = { ${envEntries.map(([key, value]) => `${tomlString(key)} = ${tomlString(value)}`).join(", ")} }`);
+    }
   }
   return `${lines.join("\n").replace(/\n/g, newline)}${newline}`;
 }
 
 export class CodexConfigSwitcher {
-  constructor({ codexHome, baseUrl, model, catalogFile = "", mcpUrl = "" }) {
+  constructor({ codexHome, baseUrl, model, catalogFile = "", mcpUrl = "", mcpCommand = "", mcpArgs = [], mcpEnv = {} }) {
     this.codexHome = path.resolve(codexHome || path.join(process.cwd(), ".modeldock-codex-home"));
     this.configPath = path.join(this.codexHome, "config.toml");
     this.stateDir = path.join(this.codexHome, "modeldock");
@@ -226,6 +238,9 @@ export class CodexConfigSwitcher {
     this.model = model;
     this.catalogFile = catalogFile;
     this.mcpUrl = mcpUrl;
+    this.mcpCommand = mcpCommand;
+    this.mcpArgs = mcpArgs;
+    this.mcpEnv = mcpEnv;
   }
 
   async #readState() {
@@ -327,6 +342,9 @@ export class CodexConfigSwitcher {
       model: this.model,
       catalogFile: this.catalogFile,
       mcpUrl: this.mcpUrl,
+      mcpCommand: this.mcpCommand,
+      mcpArgs: this.mcpArgs,
+      mcpEnv: this.mcpEnv,
     });
     try {
       await writeFile(this.configPath, managed, { encoding: "utf8", mode: 0o600 });

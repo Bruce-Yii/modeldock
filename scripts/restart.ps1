@@ -32,7 +32,10 @@ if ($listener) {
   # ~/.modeldock/owner-<port>.json. If the recorded owner is a *different*
   # checkout, killing it would swap live traffic onto this checkout's code -
   # exactly the lookalike-instance mixup we have hit before. Refuse unless -Force.
-  $ownerFile = Join-Path $env:USERPROFILE ".modeldock\owner-$port.json"
+  # Must match ownerFilePath() in src/instance-owner.mjs, including the
+  # MODELDOCK_STATE_DIR redirect, or the guard reads a file the gateway never wrote.
+  $stateDir = if ($env:MODELDOCK_STATE_DIR) { $env:MODELDOCK_STATE_DIR } else { Join-Path $env:USERPROFILE ".modeldock" }
+  $ownerFile = Join-Path $stateDir "owner-$port.json"
   if ((Test-Path $ownerFile) -and (-not $args.Contains("-Force"))) {
     try {
       $owner = Get-Content $ownerFile -Raw | ConvertFrom-Json

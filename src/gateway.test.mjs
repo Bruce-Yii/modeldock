@@ -4,15 +4,21 @@ import { Writable } from "node:stream";
 import {
   RouteAffinity,
   applyToolPolicy,
+  compactFailureReport,
   createUsageTee,
   currentTurnStartForTesting,
+  decodeCompactionSummary,
   dropUnpairedToolItems,
+  encodeCompactionSummary,
+  isCompactV1Request,
+  isCompactV2Request,
   isNativeModel,
   nativeTarget,
   normalizeNativeInput,
   normalizeGatewayInput,
   pipeGatewayStream,
   redactBearer,
+  relayCompaction,
   relayNativeImage,
   relayNativeResponses,
   relayResponses,
@@ -85,6 +91,57 @@ test("normalizeGatewayInput removes compaction triggers and expands compaction s
   assert.equal(normalized[1].content[0].text, "earlier context");
 });
 
+test("compaction summaries round-trip through the kcr1 payload", () => {
+  const encoded = encodeCompactionSummary("keep this handoff");
+  assert.match(encoded, /^kcr1:/);
+  assert.equal(decodeCompactionSummary(encoded), "keep this handoff");
+  assert.equal(decodeCompactionSummary("kcr1:!!not-base64!!"), undefined);
+  assert.equal(decodeCompactionSummary("gAAAAAopaque"), undefined);
+  assert.equal(decodeCompactionSummary("not prefixed"), undefined);
+});
+
+test("compact request detection distinguishes v1 paths and v2 triggers", () => {
+  assert.equal(isCompactV1Request("/c/k123/v1/responses/compact"), true);
+  assert.equal(isCompactV1Request("/v1/responses/compact"), true);
+  assert.equal(isCompactV1Request("/responses/compact"), true);
+  assert.equal(isCompactV1Request("/v1/responses"), false);
+  assert.equal(isCompactV1Request(undefined), false);
+  assert.equal(
+    isCompactV2Request({
+      input: [
+        { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
+        { type: "compaction_trigger" },
+      ],
+    }),
+    true,
+  );
+  assert.equal(isCompactV2Request({ input: [{ type: "message", role: "user", content: [] }] }), false);
+  assert.equal(isCompactV2Request({}), false);
+});
+
+test("normalizeGatewayInput expands kcr1 compaction items into continuation messages", () => {
+  const input = [
+    { type: "compaction", encrypted_content: encodeCompactionSummary("earlier context") },
+    { type: "compaction_trigger", skipped: true },
+  ];
+  const normalized = normalizeGatewayInput(input);
+  assert.equal(normalized.length, 1);
+  assert.equal(normalized[0].type, "message");
+  assert.equal(normalized[0].role, "user");
+  assert.match(normalized[0].content[0].text, /earlier context/);
+});
+
+test("normalizeNativeInput expands kcr1 compaction items and keeps opaque native tokens", () => {
+  const input = [
+    { type: "compaction", encrypted_content: encodeCompactionSummary("earlier context") },
+    { type: "compaction", encrypted_content: "gAAAAABopaque_fernettoken" },
+  ];
+  const out = normalizeNativeInput(input);
+  assert.equal(out[0].type, "message");
+  assert.match(out[0].content[0].text, /earlier context/);
+  assert.equal(out[1].encrypted_content, "gAAAAABopaque_fernettoken", "opaque native compaction token passes through");
+});
+
 test("normalizeGatewayInput keeps paired tool history untouched", () => {
   const input = [
     { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
@@ -109,6 +166,41 @@ test("dropUnpairedToolItems keeps paired calls and drops both orphan sides", () 
   assert.deepEqual(out.map((item) => item.call_id ?? item.type), ["a", "a", "b", "b", "message"]);
 });
 
+test("dropUnpairedToolItems pairs the chat shape (message.tool_calls + role:tool) too", () => {
+  const input = [
+    {
+      type: "message",
+      role: "assistant",
+      content: [{ type: "output_text", text: "let me check" }],
+      tool_calls: [
+        { id: "call_00_orphan", type: "function", function: { name: "ls", arguments: "{}" } },
+        { id: "call_00_paired", type: "function", function: { name: "read", arguments: "{}" } },
+      ],
+    },
+    { type: "message", role: "tool", tool_call_id: "call_00_paired", content: "[]" },
+    { type: "message", role: "tool", tool_call_id: "call_00_dangling", content: "[]" },
+    { type: "message", role: "user", content: [{ type: "input_text", text: "go on" }] },
+  ];
+  const out = dropUnpairedToolItems(input);
+  assert.equal(out.length, 3, "dangling tool message is dropped");
+  assert.deepEqual(out[0].tool_calls.map((call) => call.id), ["call_00_paired"], "orphaned chat call is trimmed from the assistant message");
+  assert.equal(out[1].tool_call_id, "call_00_paired");
+  assert.equal(out[2].type, "message");
+});
+
+test("dropUnpairedToolItems drops an assistant message whose chat calls all lack results", () => {
+  const input = [
+    {
+      type: "message",
+      role: "assistant",
+      tool_calls: [{ id: "call_00_zViPA3xCB2wYsU7H6dZW5091", type: "function", function: { name: "shell_command", arguments: "{}" } }],
+    },
+    { type: "message", role: "user", content: [{ type: "input_text", text: "continue" }] },
+  ];
+  const out = dropUnpairedToolItems(input);
+  assert.deepEqual(out.map((item) => item.role), ["user"], "orphaned assistant tool call does not reach the upstream");
+});
+
 test("normalizeGatewayInput drops unpaired tool items from a sliced compact history", () => {
   const input = [
     { type: "function_call", call_id: "call_00_orphan", name: "ls", arguments: "{}" },
@@ -122,6 +214,89 @@ test("normalizeGatewayInput drops unpaired tool items from a sliced compact hist
     normalized.map((item) => item.call_id ?? item.type),
     ["call_00_paired", "call_00_paired", "message"],
   );
+});
+
+test("dropUnpairedToolItems relocates a severed output past an intervening assistant text", () => {
+  // The compact task sliced an assistant turn apart: the tool result no longer
+  // directly follows its call. Go's chat translation then emits the tool row
+  // after a different assistant and rejects the whole request.
+  const input = [
+    { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
+    { type: "function_call", call_id: "call_00_severed", name: "shell_command", arguments: "{}" },
+    { type: "message", role: "assistant", content: [{ type: "output_text", text: "lead-in text" }] },
+    { type: "function_call_output", call_id: "call_00_severed", output: "done" },
+    { type: "message", role: "user", content: [{ type: "input_text", text: "go on" }] },
+  ];
+  const out = dropUnpairedToolItems(input);
+  assert.deepEqual(out.map((item) => item.call_id ?? item.type), [
+    "message",
+    "call_00_severed",
+    "call_00_severed",
+    "message",
+    "message",
+  ]);
+  assert.equal(out[1].type, "function_call");
+  assert.equal(out[2].type, "function_call_output", "output is relocated to directly follow its call");
+  assert.equal(out[3].role, "assistant", "intervening assistant text moves after the tool row");
+});
+
+test("dropUnpairedToolItems keeps a parallel call group intact and moves interleaved text after the outputs", () => {
+  const input = [
+    { type: "function_call", call_id: "call_a", name: "f", arguments: "{}" },
+    { type: "function_call", call_id: "call_b", name: "g", arguments: "{}" },
+    { type: "message", role: "assistant", content: [{ type: "output_text", text: "splitting note" }] },
+    { type: "function_call_output", call_id: "call_a", output: "1" },
+    { type: "function_call_output", call_id: "call_b", output: "2" },
+    { type: "message", role: "user", content: [{ type: "input_text", text: "continue" }] },
+  ];
+  const out = dropUnpairedToolItems(input);
+  assert.deepEqual(out.map((item) => item.call_id ?? item.type), [
+    "call_a",
+    "call_b",
+    "call_a",
+    "call_b",
+    "message",
+    "message",
+  ]);
+});
+
+test("dropUnpairedToolItems drops duplicate outputs and an output that precedes its call", () => {
+  const input = [
+    { type: "function_call_output", call_id: "call_a", output: "first" },
+    { type: "function_call", call_id: "call_a", name: "f", arguments: "{}" },
+    { type: "function_call_output", call_id: "call_a", output: "duplicate" },
+    { type: "message", role: "user", content: [{ type: "input_text", text: "go on" }] },
+  ];
+  const out = dropUnpairedToolItems(input);
+  assert.deepEqual(out.map((item) => item.call_id ?? item.type), ["call_a", "call_a", "message"]);
+  assert.equal(out[1].output, "first", "the relocated output is the first one for the call");
+});
+
+test("normalizeGatewayInput repairs the real severed compact history shape", () => {
+  // Live repro: an assistant text message sat between function_call
+  // call_00_zViPA3xCB2wYsU7H6dZW5091 and its output; the upstream rejected the
+  // request with "No tool output found for tool call call_00_...".
+  const input = [
+    { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
+    { type: "function_call", call_id: "call_00_zViPA3xCB2wYsU7H6dZW5091", name: "shell_command", arguments: "{}" },
+    { type: "message", role: "assistant", content: [{ type: "output_text", text: "lead-in" }] },
+    { type: "function_call_output", call_id: "call_00_zViPA3xCB2wYsU7H6dZW5091", output: "done" },
+    { type: "function_call", call_id: "call_00_next", name: "shell_command", arguments: "{}" },
+    { type: "message", role: "assistant", content: [{ type: "output_text", text: "another lead-in" }] },
+    { type: "function_call_output", call_id: "call_00_next", output: "ok" },
+    { type: "message", role: "user", content: [{ type: "input_text", text: "continue" }] },
+  ];
+  const normalized = normalizeGatewayInput(input);
+  const calls = normalized.filter((item) => item.type === "function_call");
+  const outputs = normalized.filter((item) => item.type === "function_call_output");
+  assert.equal(calls.length, 2);
+  assert.equal(outputs.length, 2);
+  // Each call is immediately followed by its own output in the repaired list.
+  for (const call of calls) {
+    const position = normalized.indexOf(call);
+    assert.equal(normalized[position + 1]?.call_id, call.call_id);
+    assert.equal(normalized[position + 1]?.type, "function_call_output");
+  }
 });
 
 test("currentTurnStart is the item after the last assistant turn", () => {
@@ -503,6 +678,15 @@ test("isNativeModel distinguishes catalog slugs from native GPT ids", () => {
   assert.equal(isNativeModel(undefined, known), false);
 });
 
+test("isNativeModel sends published native slugs to the native leg even when in the catalog", () => {
+  const known = new Set(["deepseek-v4-flash", "gpt-5.6-luna", "gpt-5.6-sol"]);
+  const nativeSlugs = new Set(["gpt-5.6-luna", "gpt-5.6-sol"]);
+  assert.equal(isNativeModel("gpt-5.6-luna", known, nativeSlugs), true, "captured native slug routes native");
+  assert.equal(isNativeModel("gpt-5.6-sol", known, nativeSlugs), true, "captured native slug routes native");
+  assert.equal(isNativeModel("deepseek-v4-flash", known, nativeSlugs), false, "catalog model stays routed");
+  assert.equal(isNativeModel("", known, nativeSlugs), false, "empty id stays on the routed path");
+});
+
 test("nativeTarget strips the keyed and bare /v1 prefixes", () => {
   assert.equal(nativeTarget("/c/k123/v1/responses", ""), "https://chatgpt.com/backend-api/codex/responses");
   assert.equal(nativeTarget("/v1/responses", ""), "https://chatgpt.com/backend-api/codex/responses");
@@ -658,6 +842,54 @@ test("relayResponses routes unknown slugs to the native leg instead of default_m
   }
 });
 
+test("relayResponses drops orphaned tool calls and previous_response_id on the routed leg", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, body: JSON.parse(options.body) });
+    return new Response(
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(Buffer.from('event: response.completed\ndata: {"type":"response.completed","response":{"output":[],"usage":{"input_tokens":1,"output_tokens":1}}}\n\n'));
+          controller.close();
+        },
+      }),
+      { status: 200, headers: { "content-type": "text/event-stream" } },
+    );
+  };
+  try {
+    const result = await relayResponses(
+      {
+        model: "deepseek-v4-flash",
+        previous_response_id: "resp_1",
+        input: [
+          { type: "function_call", call_id: "call_00_zViPA3xCB2wYsU7H6dZW5091", name: "shell_command", arguments: "{}" },
+          { type: "message", role: "user", content: [{ type: "input_text", text: "continue" }] },
+        ],
+      },
+      res,
+      {
+        recordUsage: () => {},
+        config: configStub(),
+        metrics: { begin: () => () => {}, recordResponseUsage: () => {} },
+        routeAffinity: new RouteAffinity(),
+        knownModels: new Set(["deepseek-v4-flash"]),
+        mainModel: "deepseek-v4-flash",
+        visionModel: "gpt-5.6-luna",
+      },
+    );
+    assert.equal(result.ok, true);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].body.previous_response_id, undefined, "routed leg replays full history, no server-side continuation");
+    assert.ok(!calls[0].body.input.some((item) => item.call_id === "call_00_zViPA3xCB2wYsU7H6dZW5091"), "orphaned call never reaches the upstream");
+    assert.equal(calls[0].body.input.length, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("relayNativeImage forwards image generation to the native backend", async () => {
   const sink = collectStream();
   const res = responseStub(sink);
@@ -719,4 +951,185 @@ test("unpaired tool calls and outputs are dropped before the upstream sees them"
   // And the full pipeline applies it:
   const normalized = normalizeGatewayInput(input);
   assert.ok(!normalized.some((item) => item.call_id === "call_00_zViPA3xCB2wYsU7H6dZW5091"));
+});
+
+function compactServices() {
+  return {
+    recordUsage: () => {},
+    config: configStub(),
+    metrics: { begin: () => () => {}, recordResponseUsage: () => {} },
+    mediaStore: undefined,
+    routeAffinity: new RouteAffinity(),
+    knownModels: new Set(["deepseek-v4-flash", "gpt-5.6-luna"]),
+    mainModel: "deepseek-v4-flash",
+    visionModel: "gpt-5.6-luna",
+    nativeSlugs: new Set(),
+  };
+}
+
+function summaryResponse(text) {
+  return new Response(JSON.stringify({
+    id: "resp_summary",
+    object: "response",
+    model: "deepseek-v4-flash",
+    output: [{ type: "message", content: [{ type: "output_text", text }] }],
+    usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
+  }), { status: 200, headers: { "content-type": "application/json" } });
+}
+
+test("relayResponses intercepts a v2 compact request and synthesizes a compaction output item", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, headers: options.headers, body: JSON.parse(options.body) });
+    return summaryResponse("compact summary");
+  };
+  try {
+    const input = [
+      { type: "message", role: "user", content: [{ type: "input_text", text: "hello" }] },
+      { type: "compaction_trigger" },
+    ];
+    const result = await relayResponses(
+      { model: "deepseek-v4-flash", stream: false, input },
+      res,
+      { ...compactServices(), requestUrl: "/v1/responses" },
+    );
+    assert.equal(result.ok, true);
+    assert.equal(result.route.model, "deepseek-v4-flash");
+    assert.equal(calls.length, 1, "the compact request is synthesized, not forwarded raw");
+    const sent = calls[0];
+    assert.equal(sent.url, "https://opencode.ai/zen/go/v1/responses");
+    assert.equal(sent.headers.Authorization, "Bearer go-token");
+    assert.equal(sent.body.stream, false, "the summarize call is non-streaming");
+    assert.deepEqual(sent.body.tools, [], "no tools ride on the summarize call");
+    assert.equal(sent.body.tool_choice, "none");
+    assert.equal(sent.body.previous_response_id, undefined);
+    assert.ok(!sent.body.input.some((item) => item.type === "compaction_trigger"), "the trigger never reaches the upstream");
+    assert.equal(sent.body.input.at(-1).role, "user");
+    assert.match(sent.body.input.at(-1).content[0].text, /CONTEXT CHECKPOINT COMPACTION/);
+    const body = JSON.parse(Buffer.concat(sink.chunks).toString("utf8"));
+    assert.equal(body.object, "response");
+    assert.equal(body.output[0].type, "compaction");
+    assert.match(body.output[0].encrypted_content, /^kcr1:/);
+    assert.equal(decodeCompactionSummary(body.output[0].encrypted_content), "compact summary");
+    assert.equal(body.model, "deepseek-v4-flash");
+    assert.equal(body.usage.input_tokens, 10, "the summarize call's usage rides on the snapshot");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("relayCompaction streams a v2 compaction item over SSE when stream is not false", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => summaryResponse("stream summary");
+  try {
+    const result = await relayCompaction(
+      {
+        model: "deepseek-v4-flash",
+        stream: true,
+        input: [
+          { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
+          { type: "compaction_trigger" },
+        ],
+      },
+      res,
+      compactServices(),
+      {},
+      true,
+    );
+    assert.equal(result.ok, true);
+    const forwarded = Buffer.concat(sink.chunks).toString("utf8");
+    assert.match(forwarded, /event: response\.created/);
+    assert.match(forwarded, /event: response\.output_item\.done/);
+    assert.match(forwarded, /event: response\.completed/);
+    assert.match(forwarded, /"type":"compaction"/);
+    assert.match(forwarded, /kcr1:/);
+    assert.match(forwarded, /data: \[DONE\]/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("relayResponses synthesizes v1 replacement history on the compact path", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, body: JSON.parse(options.body) });
+    return summaryResponse("compact summary");
+  };
+  try {
+    const input = [
+      { type: "message", role: "user", content: [{ type: "input_text", text: "recent message" }] },
+    ];
+    const result = await relayResponses(
+      { model: "deepseek-v4-flash", input },
+      res,
+      { ...compactServices(), requestUrl: "/v1/responses/compact" },
+    );
+    assert.equal(result.ok, true);
+    assert.equal(calls.length, 1);
+    const body = JSON.parse(Buffer.concat(sink.chunks).toString("utf8"));
+    assert.ok(Array.isArray(body.output));
+    assert.equal(body.output.at(-1).role, "user");
+    assert.match(body.output.at(-1).content[0].text, /compact summary/);
+    assert.equal(body.output[0].content[0].text, "recent message", "recent user messages are kept in replacement history");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("relayResponses counts the request body bytes as transfer-in", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const transformOptions = [];
+  const metrics = {
+    begin: () => () => {},
+    recordResponseTransform: (_report, options) => transformOptions.push(options),
+    recordResponseUsage: () => {},
+  };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => summaryResponse("ok");
+  try {
+    const payload = {
+      model: "deepseek-v4-flash",
+      stream: true,
+      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hello" }] }],
+    };
+    const result = await relayResponses(payload, res, { ...compactServices(), metrics, requestUrl: "/v1/responses" });
+    assert.equal(result.ok, true);
+    assert.equal(transformOptions.length, 1);
+    assert.equal(transformOptions[0].bytesIn, Buffer.byteLength(JSON.stringify(payload)), "the request body size rides as transfer-in");
+    assert.equal(transformOptions[0].streaming, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("compactFailureReport names unpaired tool items and any server-side state keys", () => {
+  const report = compactFailureReport(
+    {
+      model: "deepseek-v4-flash",
+      conversation: "conv_123",
+      input: [
+        { type: "function_call", call_id: "call_paired", name: "shell_command", arguments: "{}" },
+        { type: "function_call_output", call_id: "call_paired", output: "secret output" },
+        { type: "function_call", call_id: "call_orphan", name: "shell_command", arguments: "{}" },
+        { type: "message", role: "user", content: [{ type: "input_text", text: "secret prompt" }] },
+      ],
+    },
+    { status: 400, upstreamError: "No tool output found for tool call call_orphan." },
+  );
+  assert.equal(report.inputItems, 4);
+  assert.deepEqual(report.unpairedToolItems, [{ id: "call_orphan", call: "function_call" }]);
+  assert.deepEqual(report.stateKeys, ["conversation"], "server-side continuation keys are the prime suspect");
+  assert.equal(report.itemTypes.function_call, 2);
+  const serialized = JSON.stringify(report);
+  assert.ok(!serialized.includes("secret output"), "tool output text must never be recorded");
+  assert.ok(!serialized.includes("secret prompt"), "prompt text must never be recorded");
 });
