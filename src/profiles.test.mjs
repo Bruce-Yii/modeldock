@@ -37,8 +37,7 @@ test("opencode-go profile keeps the Go-specific hardening flags", () => {
 });
 
 test("deepseek-official profile routes the main model on DeepSeek with harness on the Go camp", () => {
-  assert.equal(DEEPSEEK_OFFICIAL_PROFILE.blockedToolTypes.has("tool_search"), true);
-  assert.equal(DEEPSEEK_OFFICIAL_PROFILE.blockedToolTypes.has("web_search"), true);
+  assert.equal(DEEPSEEK_OFFICIAL_PROFILE.blockedToolTypes.size, 0, "official API accepts every Codex local tool as type function");
   assert.equal(DEEPSEEK_OFFICIAL_PROFILE.compactCompletedToolHistory, true);
   assert.equal(DEEPSEEK_OFFICIAL_PROFILE.stripSyntheticReasoningPlaceholder, true);
   assert.equal(DEEPSEEK_OFFICIAL_PROFILE.harnessToolNames.has("harness_web_search"), true);
@@ -55,10 +54,10 @@ test("model catalog is generated per profile with distinct comp hashes", () => {
   const instructions = "base";
   const goCatalog = OPENCODE_GO_PROFILE.modelCatalog({ mainModel: "deepseek-v4-flash", visionModel: "gpt-5.6-luna", baseInstructions: instructions });
   const officialCatalog = DEEPSEEK_OFFICIAL_PROFILE.modelCatalog({ mainModel: "deepseek-v4-flash", baseInstructions: instructions });
-  assert.equal(goCatalog.models.length, 1);
+  assert.ok(goCatalog.models.length >= 1, "catalog includes the main model plus every available model");
   assert.equal(goCatalog.models[0].slug, "deepseek-v4-flash");
   assert.equal(goCatalog.models[0].comp_hash, "modeldock-opencode-go-v1");
-  assert.equal(goCatalog.models[0].supports_search_tool, true);
+  assert.equal(goCatalog.models[0].supports_search_tool, false);
   assert.equal(goCatalog.models[0].default_reasoning_level, "high");
   assert.deepEqual(goCatalog.models[0].supported_reasoning_levels.map((level) => level.effort), ["low", "high", "xhigh"]);
   assert.equal(officialCatalog.models[0].comp_hash, "modeldock-deepseek-official-v1");
@@ -66,7 +65,7 @@ test("model catalog is generated per profile with distinct comp hashes", () => {
   assert.equal(officialCatalog.models[0].default_reasoning_level, "medium", "DeepSeek official defaults to medium thinking");
   assert.deepEqual(
     officialCatalog.models[0].supported_reasoning_levels.map((level) => level.effort),
-    ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+    ["none", "minimal", "low", "medium", "high", "xhigh"],
     "DeepSeek official accepts its full reasoning effort ladder",
   );
   assert.notEqual(goCatalog.models[0].comp_hash, officialCatalog.models[0].comp_hash);

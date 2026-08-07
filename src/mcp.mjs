@@ -65,6 +65,65 @@ export function createMcpNodeHandler({ upstreams, onError = () => {} }) {
         },
       );
 
+      server.registerTool(
+        "speak",
+        {
+          title: "Text To Speech",
+          description:
+            "Synthesize the given text into a local speech audio file (Microsoft Edge neural voice, no API key; works on Windows/macOS/Linux - the npm package calls Microsoft's endpoint). Returns the absolute file path of the generated audio (webm/opus) so it can be surfaced in the conversation or used by other tools.",
+          inputSchema: z.object({
+            text: z.string().min(1).describe("The text to speak aloud. Use short paragraphs for the best result."),
+            voice: z.string().optional().describe("Voice name, e.g. zh-CN-XiaoxiaoNeural (Chinese female), en-US-AriaNeural (English female), ja-JP-NanamiNeural (Japanese female). Defaults to zh-CN-XiaoxiaoNeural."),
+            output: z.string().optional().describe("Optional absolute file path for the generated audio. Defaults to a temp file."),
+          }),
+          annotations: { readOnlyHint: false, openWorldHint: false },
+        },
+        async (args) => {
+          try {
+            const { ttsSpeak } = await import("./tts.mjs");
+            const result = await ttsSpeak(args);
+            return textResult([
+              "TTS_SPEECH_GENERATED",
+              `file: ${result.file}`,
+              `bytes: ${result.bytes}`,
+              `voice: ${result.voice}`,
+              `text: ${result.text}`,
+            ].join("\n"));
+          } catch (error) {
+            return errorResult(error);
+          }
+        },
+      );
+
+      server.registerTool(
+        "hear",
+        {
+          title: "Speech To Text",
+          description:
+            "Transcribe a local audio file into text using the Windows built-in speech recognizer (System.Speech, offline, no API key; Windows only - requires the target language recognizer and ffmpeg for non-WAV input). Returns the recognized text and a confidence score.",
+          inputSchema: z.object({
+            file: z.string().min(1).describe("Absolute local file path of the audio file to transcribe (mp3, wav, webm/opus, m4a)."),
+            language: z.string().optional().describe("Optional language hint, e.g. zh-CN, en-US. Defaults to the installed Chinese recognizer."),
+            output: z.string().optional().describe("Optional absolute file path for the intermediate WAV."),
+          }),
+          annotations: { readOnlyHint: true, openWorldHint: false },
+        },
+        async (args) => {
+          try {
+            const { sttTranscribe } = await import("./stt.mjs");
+            const result = await sttTranscribe(args);
+            return textResult([
+              "STT_TRANSCRIPTION_COMPLETED",
+              `text: ${result.text}`,
+              `confidence: ${result.confidence.toFixed(3)}`,
+              `language: ${result.language}`,
+            ].join("\n"));
+          } catch (error) {
+            return errorResult(error);
+          }
+        },
+      );
+
       return server;
     },
     { legacy: "stateless", onerror: onError },

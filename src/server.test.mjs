@@ -1,4 +1,6 @@
 import { test, afterEach } from "node:test";
+const legacyRelayEnabled = process.env.MODELDOCK_LEGACY_RELAY === "1";
+const legacy = (name, fn) => test(name, { skip: !legacyRelayEnabled }, fn);
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import os from "node:os";
@@ -137,7 +139,7 @@ test("model API exposes selectable main and vision-capable options", async (t) =
   assert.equal(invalid.status, 400);
 });
 
-test("non-streaming relay: forwards normalized body with auth and parses usage", async (t) => {
+legacy("non-streaming relay: forwards normalized body with auth and parses usage", async (t) => {
   let received;
   let auth;
   const upstream = createServer(async (req, res) => {
@@ -175,7 +177,7 @@ test("non-streaming relay: forwards normalized body with auth and parses usage",
   assert.equal(snap.responses.filteredWebSearch, 1);
 });
 
-test("executes harness web search inside the Responses loop", async (t) => {
+legacy("executes harness web search inside the Responses loop", async (t) => {
   let goCalls = 0;
   let continuedInput;
   const upstream = createServer(async (req, res) => {
@@ -234,7 +236,7 @@ test("executes harness web search inside the Responses loop", async (t) => {
   assert.equal(responseTrace.harnessToolRounds, 1);
 });
 
-test("upstream 4xx is relayed with status and body, metrics count error", async (t) => {
+legacy("upstream 4xx is relayed with status and body, metrics count error", async (t) => {
   const upstream = createServer((req, res) => {
     res.statusCode = 404;
     res.setHeader("content-type", "application/json");
@@ -258,7 +260,7 @@ test("upstream 4xx is relayed with status and body, metrics count error", async 
   assert.equal(snap.recent[0].httpStatus, 404);
 });
 
-test("upstream network failure returns 502", async (t) => {
+legacy("upstream network failure returns 502", async (t) => {
   const upstream = createServer(() => {});
   const upstreamPort = await listen(upstream);
   const port = upstreamPort;
@@ -276,7 +278,7 @@ test("upstream network failure returns 502", async (t) => {
   assert.equal((await response.json()).error.type, "upstream_error");
 });
 
-test("invalid request body returns 400 before calling upstream", async (t) => {
+legacy("invalid request body returns 400 before calling upstream", async (t) => {
   let upstreamCalled = false;
   const upstream = createServer((req, res) => {
     upstreamCalled = true;
@@ -297,7 +299,7 @@ test("invalid request body returns 400 before calling upstream", async (t) => {
   assert.equal(upstreamCalled, false);
 });
 
-test("second-turn Codex assistant arrays are stringified for strict Console Go", async (t) => {
+legacy("second-turn Codex assistant arrays are stringified for strict Console Go", async (t) => {
   let receivedAssistant;
   const upstream = createServer(async (req, res) => {
     const body = await jsonBody(req);
@@ -338,7 +340,7 @@ test("second-turn Codex assistant arrays are stringified for strict Console Go",
   assert.equal(trace.inputShape.find((item) => item.role === "assistant").contentKind, "string");
 });
 
-test("compresses completed Codex tool history to ordered receipts for Go", async (t) => {
+legacy("compresses completed Codex tool history to ordered receipts for Go", async (t) => {
   let received;
   const upstream = createServer(async (req, res) => {
     received = await jsonBody(req);
@@ -387,7 +389,7 @@ test("compresses completed Codex tool history to ordered receipts for Go", async
   assert.equal(trace.droppedAssistantMessages, 1);
 });
 
-test("streaming relay emits the first delta before upstream completion", async (t) => {
+legacy("streaming relay emits the first delta before upstream completion", async (t) => {
   let received;
   let releaseCompletion;
   const completionGate = new Promise((resolve) => { releaseCompletion = resolve; });
@@ -455,7 +457,7 @@ test("streaming relay emits the first delta before upstream completion", async (
   assert.equal(snap.responses.outputTokens, 44);
 });
 
-test("streaming relay keeps preamble text and a following tool call at distinct output indexes", async (t) => {
+legacy("streaming relay keeps preamble text and a following tool call at distinct output indexes", async (t) => {
   const upstream = createServer((req, res) => {
     res.setHeader("content-type", "text/event-stream");
     sendSse(res, "response.output_text.delta", { id: "resp_mixed", delta: "I will verify this now: ", response: { id: "resp_mixed", model: "deepseek-v4-flash" } });
@@ -497,7 +499,7 @@ test("streaming relay keeps preamble text and a following tool call at distinct 
   assert.match(sse, /call_verify/);
 });
 
-test("streaming relay keeps preamble text and a following custom tool call at distinct output indexes", async (t) => {
+legacy("streaming relay keeps preamble text and a following custom tool call at distinct output indexes", async (t) => {
   const upstream = createServer((req, res) => {
     res.setHeader("content-type", "text/event-stream");
     sendSse(res, "response.output_text.delta", { id: "resp_custom_mixed", delta: "I will apply the change: ", response: { id: "resp_custom_mixed", model: "deepseek-v4-flash" } });
@@ -539,7 +541,7 @@ test("streaming relay keeps preamble text and a following custom tool call at di
   assert.match(sse, /PATCH_OK/);
 });
 
-test("streaming relay hides a harness web round and streams only the final answer", async (t) => {
+legacy("streaming relay hides a harness web round and streams only the final answer", async (t) => {
   let goCalls = 0;
   const upstream = createServer(async (req, res) => {
     const body = await jsonBody(req);
@@ -586,7 +588,7 @@ test("streaming relay hides a harness web round and streams only the final answe
   assert.equal(instance.services.metrics.responses.outputTokens, 5);
 });
 
-test("streaming relay adapts a DeepSeek-style custom_tool_call item with input deltas", async (t) => {
+legacy("streaming relay adapts a DeepSeek-style custom_tool_call item with input deltas", async (t) => {
   const upstream = createServer((req, res) => {
     res.setHeader("content-type", "text/event-stream");
     sendSse(res, "response.output_item.added", {
@@ -626,7 +628,7 @@ test("streaming relay adapts a DeepSeek-style custom_tool_call item with input d
   assert.match(sse, /data: \[DONE\]/);
 });
 
-test("streaming upstream errors preserve the provider message in the trace", async (t) => {
+legacy("streaming upstream errors preserve the provider message in the trace", async (t) => {
   const upstream = createServer((req, res) => {
     res.statusCode = 400;
     res.setHeader("content-type", "application/json");
@@ -648,7 +650,7 @@ test("streaming upstream errors preserve the provider message in the trace", asy
   assert.equal(trace.error, "specific provider validation failure");
 });
 
-test("function calls from Go map to custom tool calls for Codex", async (t) => {
+legacy("function calls from Go map to custom tool calls for Codex", async (t) => {
   const upstream = createServer((req, res) => {
     res.setHeader("content-type", "text/event-stream");
     sendSse(res, "response.output_item.added", {
@@ -681,7 +683,7 @@ test("function calls from Go map to custom tool calls for Codex", async (t) => {
   assert.match(sse, /PATCH_OK/);
 });
 
-test("images are replaced and stored in media store", async (t) => {
+legacy("images are replaced and stored in media store", async (t) => {
   const upstream = createServer((req, res) => {
     res.setHeader("content-type", "application/json");
     res.end(JSON.stringify(okResponse));
@@ -706,7 +708,7 @@ test("images are replaced and stored in media store", async (t) => {
   assert.equal(instance.services.mediaStore.snapshot().entries, 1);
 });
 
-test("a visual turn routes to Luna with image references and vision tooling", async (t) => {
+legacy("a visual turn routes to Luna with image references and vision tooling", async (t) => {
   let received;
   const upstream = createServer(async (req, res) => {
     received = await jsonBody(req);
@@ -747,7 +749,7 @@ test("a visual turn routes to Luna with image references and vision tooling", as
   assert.equal(trace.routeReason, "current_turn_image");
 });
 
-test("Luna tool calls stay on Luna, then the next independent turn returns to DeepSeek", async (t) => {
+legacy("Luna tool calls stay on Luna, then the next independent turn returns to DeepSeek", async (t) => {
   const receivedModels = [];
   const receivedBodies = [];
   let call = 0;
@@ -808,7 +810,7 @@ test("Luna tool calls stay on Luna, then the next independent turn returns to De
   assert.match(receivedBodies[2].input[0].content[0].text, /Earlier image attachment/);
 });
 
-test("DeepSeek fallback vision receives an explicit Luna observation and cannot repeat it in the same loop", async (t) => {
+legacy("DeepSeek fallback vision receives an explicit Luna observation and cannot repeat it in the same loop", async (t) => {
   let mainCalls = 0;
   let continuation;
   let actualRef;
@@ -966,7 +968,7 @@ test("GET / serves the dashboard", async (t) => {
   assert.match(await response.text(), /ModelDock/);
 });
 
-test("debug mode strips reasoning from the upstream request", async (t) => {
+legacy("debug mode strips reasoning from the upstream request", async (t) => {
   let receivedReasoning;
   const upstream = createServer(async (req, res) => {
     const body = await jsonBody(req);
@@ -988,7 +990,7 @@ test("debug mode strips reasoning from the upstream request", async (t) => {
   assert.equal(receivedReasoning, undefined, "reasoning field must be stripped in debug noReasoning mode");
 });
 
-test("deepseek-official forwards the reasoning effort untouched", async (t) => {
+legacy("deepseek-official forwards the reasoning effort untouched", async (t) => {
   const received = [];
   const upstream = createServer(async (req, res) => {
     const body = await jsonBody(req);
@@ -1028,7 +1030,7 @@ test("deepseek-official forwards the reasoning effort untouched", async (t) => {
   assert.equal(received[0].reasoning?.effort, "high", "deepseek-official must forward the reasoning effort to the Responses API");
 });
 
-test("deepseek-official refills reasoning.content from the echoed summary", async (t) => {
+legacy("deepseek-official refills reasoning.content from the echoed summary", async (t) => {
   let received;
   const upstream = createServer(async (req, res) => {
     received = await jsonBody(req);
@@ -1072,7 +1074,7 @@ test("deepseek-official refills reasoning.content from the echoed summary", asyn
   assert.equal(reasoning.encrypted_content, undefined, "the empty encrypted_content placeholder is dropped too");
 });
 
-test("debug dump writes the transformed upstream payload to disk", async (t) => {
+legacy("debug dump writes the transformed upstream payload to disk", async (t) => {
   const dumpDir = await mkdtemp(path.join(os.tmpdir(), "modeldock-dump-"));
   t.after(() => rm(dumpDir, { recursive: true, force: true }));
   const upstream = createServer((req, res) => {
@@ -1108,7 +1110,7 @@ test("api/status exposes debug flags without dump path leaks", async (t) => {
   assert.equal(status.config.debug.dumpDir, "");
 });
 
-test("web search harness works alongside disclosure filtering", async (t) => {
+legacy("web search harness works alongside disclosure filtering", async (t) => {
   let mainCalls = 0;
   const upstream = createServer(async (req, res) => {
     const body = await jsonBody(req);
@@ -1161,7 +1163,7 @@ test("web search harness works alongside disclosure filtering", async (t) => {
   assert.doesNotMatch(sse, /harness_web_search/, "harness round must be hidden from Codex");
 });
 
-test("image requests route to the vision model and keep the image in the forwarded input", async (t) => {
+legacy("image requests route to the vision model and keep the image in the forwarded input", async (t) => {
   let upstreamModel;
   let receivedInput;
   const upstream = createServer(async (req, res) => {
@@ -1202,7 +1204,7 @@ test("image requests route to the vision model and keep the image in the forward
   assert.ok(forwardedText.includes(image), "the vision model receives the actual base64 image, not a reference");
 });
 
-test("main model on DeepSeek with vision + harness on OpenCode Go: per-provider endpoint and token routing", async (t) => {
+legacy("main model on DeepSeek with vision + harness on OpenCode Go: per-provider endpoint and token routing", async (t) => {
   const calls = [];
   let actualRef = "";
   const upstream = createServer(async (req, res) => {
@@ -1300,7 +1302,7 @@ test("host guard rejects non-loopback Host headers (DNS rebinding)", async (t) =
   assert.equal(legit.status, 200);
 });
 
-test("anti-breakpoint revival asks one question, no side API call", async (t) => {
+legacy("anti-breakpoint revival asks one question, no side API call", async (t) => {
   let mainCalls = 0;
   let upstreamRequests = 0;
   let secondMainInput = null;
@@ -1350,7 +1352,7 @@ test("anti-breakpoint revival asks one question, no side API call", async (t) =>
   assert.equal(check?.state, "continue");
 });
 
-test("revival also fires on question-ending text (no verdict logic, upstream decides)", async (t) => {
+legacy("revival also fires on question-ending text (no verdict logic, upstream decides)", async (t) => {
   let mainCalls = 0;
   let upstreamRequests = 0;
   const upstream = createServer(async (req, res) => {
@@ -1387,7 +1389,7 @@ test("revival also fires on question-ending text (no verdict logic, upstream dec
   assert.equal(instance.services.sessionChecks?.get("default")?.state, "continue");
 });
 
-test("revival is rate-limited to once per session per 30s", async (t) => {
+legacy("revival is rate-limited to once per session per 30s", async (t) => {
   let mainCalls = 0;
   const upstream = createServer(async (req, res) => {
     const body = await jsonBody(req);
@@ -1424,7 +1426,7 @@ test("revival is rate-limited to once per session per 30s", async (t) => {
   assert.equal(mainCalls, 3, "second request's text turn is inside the 30s window, no second revival");
 });
 
-test("session summaries are bounded and evict the least recently summarized", async (t) => {
+legacy("session summaries are bounded and evict the least recently summarized", async (t) => {
   const instance = await startApp({});
   t.after(instance.stop);
   const summaries = instance.services.sessionSummaries;

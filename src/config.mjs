@@ -1,8 +1,9 @@
 import process from "node:process";
 import os from "node:os";
 import path from "node:path";
-import { readdirSync, readFileSync, statSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { readdirSync, readFileSync, statSync, existsSync, mkdirSync, writeFileSync, copyFileSync } from "node:fs";
 import { profileById } from "./profiles.mjs";
+import { encryptSecret, decryptSecret, isSecretKey } from "./secrets.mjs";
 
 // Resolve the user configuration (.env) file. Priority:
 //   1. MODELDOCK_ENV_FILE (explicit path)
@@ -44,18 +45,22 @@ export function serializeEnvFile(entries) {
 }
 
 // Load a .env file into process.env without overriding real environment variables.
+// Secret keys are decrypted on the way in, so callers always see the plaintext token;
+// plaintext values (an old unencrypted file) pass through unchanged.
 function applyEnvFile(file) {
   if (!existsSync(file)) return;
   const entries = parseEnvFile(readFileSync(file, "utf8"));
   for (const [key, value] of Object.entries(entries)) {
-    if (process.env[key] === undefined) process.env[key] = value;
+    if (process.env[key] === undefined) {
+      process.env[key] = isSecretKey(key) ? decryptSecret(value) : value;
+    }
   }
 }
 
 // Merge the given entries into the user .env file, preserving comments, blank lines and
 // unrelated keys (a line-preserving merge), creating the directory if needed.
-export function writeEnvFile(updates) {
-  const file = envFileFor();
+export function writeEnvFile(updates, file = envFileFor()) {
+  if (!file) file = envFileFor();
   const raw = existsSync(file) ? readFileSync(file, "utf8") : "";
   const lines = raw.split(/\r?\n/);
   const updated = new Set(Object.keys(updates));
@@ -63,19 +68,55 @@ export function writeEnvFile(updates) {
   for (const line of lines) {
     const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=/);
     if (match && updated.has(match[1])) {
-      next.push(`${match[1]}=${updates[match[1]]}`);
+      // Secrets are stored encrypted on disk; everything else stays as given.
+      const value = isSecretKey(match[1]) ? encryptSecret(updates[match[1]]) : updates[match[1]];
+      next.push(`${match[1]}=${value}`);
       updated.delete(match[1]);
     } else {
       next.push(line);
     }
   }
-  for (const key of updated) next.push(`${key}=${updates[key]}`);
+  for (const key of updated) {
+    const value = isSecretKey(key) ? encryptSecret(updates[key]) : updates[key];
+    next.push(`${key}=${value}`);
+  }
   mkdirSync(path.dirname(file), { recursive: true });
   writeFileSync(file, next.join("\n").replace(/\n+$/, "\n"), "utf8");
   for (const [key, value] of Object.entries(updates)) {
-    if (value) process.env[key] = value;
+    if (value) process.env[key] = isSecretKey(key) ? decryptSecret(encryptSecret(value)) : value;
   }
   return file;
+}
+
+// One-time migration of a plaintext .env to encrypted secrets. Backs up the original,
+// rewrites only the secret keys, then re-reads the file and verifies the round-trip;
+// on any failure the backup is restored and the file is left untouched. Non-Windows is
+// a no-op (values are kept plaintext there by design).
+export function migrateEnvSecrets(file = envFileFor()) {
+  if (!existsSync(file)) return { file, migrated: 0, reason: "missing" };
+  if (process.platform !== "win32") return { file, migrated: 0, reason: "non-windows" };
+  const raw = readFileSync(file, "utf8");
+  const entries = parseEnvFile(raw);
+  const plainSecrets = Object.entries(entries).filter(
+    ([key, value]) => isSecretKey(key) && value && !String(value).startsWith("dpapi:")
+  );
+  if (plainSecrets.length === 0) return { file, migrated: 0, reason: "none-plain" };
+
+  const backup = `${file}.plain.bak-${Date.now()}`;
+  copyFileSync(file, backup);
+  const updates = {};
+  for (const [key, value] of plainSecrets) updates[key] = value;
+  writeEnvFile(updates, file);
+
+  // Verify the file really decrypts back to what we started with; restore on failure.
+  const after = parseEnvFile(readFileSync(file, "utf8"));
+  for (const [key, original] of plainSecrets) {
+    if (decryptSecret(after[key]) !== original) {
+      copyFileSync(backup, file);
+      return { file, migrated: 0, reason: "verify-failed", backup };
+    }
+  }
+  return { file, migrated: plainSecrets.length, backup };
 }
 
 function integer(name, fallback, { min = 0, max = Number.MAX_SAFE_INTEGER } = {}) {

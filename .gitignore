@@ -15,6 +15,8 @@ test/dashboard*.png
 _*.py
 probe-*.png
 *.webm
+# Browser-automation (CDP) temp user-data profiles left in the repo root
+_cdp_*/
 
 # Local long-horizon task test area (rendered pages, screenshots, its own static server)
 voxel/
@@ -23,5 +25,4 @@ voxel/
 dist/
 
 # Internal docs: kept locally, not published
-ARCHITECTURE.md
 AGENTS.md

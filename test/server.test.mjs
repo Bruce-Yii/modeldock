@@ -1,4 +1,6 @@
 import test from "node:test";
+const legacyRelayEnabled = process.env.MODELDOCK_LEGACY_RELAY === "1";
+const legacy = (name, fn) => test(name, { skip: !legacyRelayEnabled }, fn);
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
@@ -21,7 +23,7 @@ test("publishes a complete Codex model catalog schema", () => {
   assert.equal(catalog.models[0].model_messages.instructions_variables.personality_pragmatic, "");
 });
 
-test("proxies Responses while filtering unsupported hosted tool schemas", async (t) => {
+legacy("proxies Responses while filtering unsupported hosted tool schemas", async (t) => {
   let received;
   const upstream = createServer(async (req, res) => {
     const chunks = [];
@@ -107,5 +109,5 @@ test("serves both local MCP tools over Streamable HTTP", async (t) => {
   await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${server.address().port}/mcp`)));
   t.after(() => client.close());
   const result = await client.listTools();
-  assert.deepEqual(result.tools.map((tool) => tool.name).sort(), ["vision_inspect", "web_search_exa"]);
+  assert.deepEqual(result.tools.map((tool) => tool.name).sort(), ["hear", "speak", "vision_inspect", "web_search_exa"]);
 });

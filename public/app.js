@@ -362,18 +362,16 @@ function renderModelOptions(data) {
   const selectedProvider = models.selectedProvider || "other";
   const visionProviders = models.visionProviders || providers;
   const selectedVisionProvider = models.selectedVisionProvider || selectedProvider;
-  const providerSelect = $("main-provider-select");
-  if (providerSelect && providers.length) {
-    providerSelect.replaceChildren();
-    for (const provider of providers) {
-      const option = document.createElement("option");
-      option.value = provider.id;
-      option.textContent = provider.label;
-      providerSelect.append(option);
-    }
-    providerSelect.value = selectedProvider;
-    providerSelect.disabled = modelBusy;
-  }
+  const providerLabel = providers.find((provider) => provider.id === selectedProvider)?.label || selectedProvider;
+  const mainModelLabel = models.options.find((model) => model.id === selected.mainModel)?.label || selected.mainModel;
+  const providerDisplay = $("main-provider-display");
+  const modelDisplay = $("main-model-display-name");
+  if (providerDisplay) providerDisplay.textContent = providerLabel;
+  if (modelDisplay) modelDisplay.textContent = mainModelLabel;
+  const mainModelStatic = document.querySelector(".model-static");
+  if (mainModelStatic) mainModelStatic.classList.toggle("busy", modelBusy);
+  if (modelDisplay) modelDisplay.classList.toggle("busy", modelBusy);
+  if (providerDisplay) providerDisplay.classList.toggle("busy", modelBusy);
   const visionProviderSelect = $("vision-provider-select");
   if (visionProviderSelect && visionProviders.length) {
     visionProviderSelect.replaceChildren();
@@ -386,9 +384,8 @@ function renderModelOptions(data) {
     visionProviderSelect.value = selectedVisionProvider;
     visionProviderSelect.disabled = modelBusy;
   }
-  const mainFilter = (model) => model.provider === selectedProvider;
   const visionFilter = (model) => model.supportsVision && model.provider === (visionProviderSelect?.value || selectedVisionProvider);
-  for (const [id, filter, value, sortBy] of [["main-model-select", mainFilter, selected.mainModel, null], ["vision-model-select", visionFilter, selected.visionModel, "balanceScore"]]) {
+  for (const [id, filter, value, sortBy] of [["vision-model-select", visionFilter, selected.visionModel, "balanceScore"]]) {
     const select = $(id);
     if (!select) continue;
     const previous = select.value;
@@ -414,12 +411,10 @@ let autostartEnabled = false;
 
 async function setModels() {
   modelBusy = true;
-  $("main-model-select").disabled = true;
-  $("main-provider-select").disabled = true;
   $("vision-model-select").disabled = true;
   $("vision-provider-select").disabled = true;
   try {
-    const response = await fetch("/api/models", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ mainModel: $("main-model-select").value, visionModel: $("vision-model-select").value, provider: $("main-provider-select").value }) });
+    const response = await fetch("/api/models", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ visionModel: $("vision-model-select").value }) });
     const body = await response.json();
     if (!response.ok) throw new Error(body.error?.message || `Model update ${response.status}`);
   } catch (error) {
@@ -619,15 +614,6 @@ $("autostart-toggle").addEventListener("change", (event) => {
   setAutostartEnabled(event.target.checked);
 });
 
-$("main-provider-select").addEventListener("change", async (event) => {
-  const provider = event.target.value;
-  const modelSelect = $("main-model-select");
-  const options = Array.from(modelSelect.options).filter((option) => option.dataset.provider === provider);
-  if (options.length) modelSelect.value = options[0].value;
-  await setModels();
-});
-
-$("main-model-select").addEventListener("change", setModels);
 $("vision-model-select").addEventListener("change", setModels);
 $("vision-provider-select").addEventListener("change", () => {
   const provider = $("vision-provider-select").value;

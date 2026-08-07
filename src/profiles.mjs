@@ -270,7 +270,7 @@ const OPENCODE_GO_PROFILE = {
       description: "OpenCode Go through the local ModelDock Responses gate.",
       compHash: "modeldock-opencode-go-v1",
       inputModalities: ["text", "image"],
-      supportsSearchTool: true,
+      supportsSearchTool: false,
       baseInstructions,
       // Publish the whole curated catalog so every model is selectable from Codex's
       // own picker, not just the one the dashboard has selected.
