@@ -41,13 +41,24 @@ export async function sttStatus() {
   };
 }
 
+// ffmpeg availability probe is cached (TTL 10s) the same way the SAPI probe
+// is, so the dashboard's per-SSE-event /api/speech call stops spawning
+// `where.exe` on every hit.
+const FFMPEG_TTL_MS = 10_000;
+let ffmpegCache = null;
+let ffmpegCheckedAt = 0;
+
 async function findFfmpeg() {
+  const now = Date.now();
+  if (ffmpegCache !== null && now - ffmpegCheckedAt < FFMPEG_TTL_MS) return ffmpegCache;
   try {
     await run(process.platform === "win32" ? "where.exe" : "which", ["ffmpeg"], { timeout: 10_000, windowsHide: true });
-    return true;
+    ffmpegCache = true;
   } catch {
-    return false;
+    ffmpegCache = false;
   }
+  ffmpegCheckedAt = now;
+  return ffmpegCache;
 }
 
 // Values that come from the model (culture, file paths) are passed as environment

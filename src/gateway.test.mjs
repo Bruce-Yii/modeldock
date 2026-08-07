@@ -8,6 +8,7 @@ import {
   createUsageTee,
   currentTurnStartForTesting,
   decodeCompactionSummary,
+  describeInputShape,
   dropUnpairedToolItems,
   encodeCompactionSummary,
   isCompactV1Request,
@@ -150,6 +151,35 @@ test("normalizeGatewayInput keeps paired tool history untouched", () => {
   ];
   const normalized = normalizeGatewayInput(input);
   assert.deepEqual(normalized, input);
+});
+
+test("describeInputShape reports item counts and reasoning shapes for the trace", () => {
+  const shape = describeInputShape([
+    { type: "message", role: "user" },
+    { type: "reasoning", id: "rs_1", status: "completed", content: [{ type: "reasoning_text", text: "think" }], summary: [] },
+    { type: "reasoning", id: "rs_2", status: "in_progress", content: [], summary: [] },
+    { type: "function_call", call_id: "call_1" },
+    { type: "function_call_output", call_id: "call_1" },
+  ]);
+  assert.equal(shape.itemTypes.message, 1);
+  assert.equal(shape.itemTypes.reasoning, 2);
+  assert.equal(shape.itemTypes.function_call, 1);
+  assert.equal(shape.reasoning.length, 2);
+  assert.deepEqual(shape.reasoning[0], {
+    index: 1,
+    status: "completed",
+    contentTypes: ["reasoning_text"],
+    hasReasoningText: true,
+    hasSummary: false,
+    hasId: true,
+  });
+  assert.equal(shape.reasoning[1].hasReasoningText, false);
+  assert.equal(shape.reasoning[1].status, "in_progress");
+});
+
+test("describeInputShape tolerates malformed input", () => {
+  assert.deepEqual(describeInputShape(null), { itemTypes: {}, reasoning: [] });
+  assert.deepEqual(describeInputShape([null, 42, { type: "reasoning" }]).reasoning[0].status, "missing");
 });
 
 test("dropUnpairedToolItems keeps paired calls and drops both orphan sides", () => {

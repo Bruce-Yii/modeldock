@@ -501,8 +501,8 @@ function render(data) {
   status.querySelector("strong").textContent = ready ? t("status.ready") : t("status.tokenMissing");
   renderModelOptions(data);
   set("uptime", `${t("status.uptime")} ${uptime(data.uptimeMs)}`);
-  set("main-model", data.config.mainModel);
-  if (data.config.mainProviderLabel) set("route-provider", data.config.mainProviderLabel);
+  set("main-model", data.config.routeModel || data.config.mainModel);
+  if (data.config.routeProviderLabel || data.config.mainProviderLabel) set("route-provider", data.config.routeProviderLabel || data.config.mainProviderLabel);
   if (data.config.mainWire) set("route-wire", data.config.mainWire === "chat" ? "chat/completions" : "responses");
 
   const responses = data.responses;
@@ -544,7 +544,13 @@ function render(data) {
   renderRecent(data.recent || []);
 }
 
+let lastSpeechCheckAt = 0;
+const SPEECH_CHECK_TTL_MS = 5_000;
+
 async function renderSpeech(data) {
+  const now = Date.now();
+  if (now - lastSpeechCheckAt < SPEECH_CHECK_TTL_MS) return;
+  lastSpeechCheckAt = now;
   const ttsStatus = $("speech-tts-status");
   const sttStatus = $("speech-stt-status");
   const installBtn = $("speech-tts-install");
@@ -572,9 +578,31 @@ async function renderSpeech(data) {
   }
 }
 
+let lastModelSignature = "";
+
+function modelSignature(models) {
+  const selected = models?.selected || {};
+  const options = models?.options || [];
+  const key = (model) => `${model.id}|${model.provider}|${model.tierLabel || ""}|${model.visionTier || ""}`;
+  return [
+    selected.mainModel,
+    selected.visionModel,
+    models?.selectedProvider,
+    models?.selectedVisionProvider,
+    options.map(key).join("|"),
+  ].join("\u0001");
+}
+
 function renderModelOptions(data) {
   const models = data.models;
   if (!models?.options) return;
+  const signature = modelSignature(models);
+  if (signature === lastModelSignature) {
+    // Models did not change since the last SSE event; keep the current DOM.
+    // The waveform and token cards still update from their own renderers.
+    return;
+  }
+  lastModelSignature = signature;
   const selected = models.selected || {};
   const providers = models.providers || [];
   const selectedProvider = models.selectedProvider || "other";
@@ -800,7 +828,17 @@ async function poll() {
 
 const events = new EventSource("/api/events");
 events.onopen = () => set("event-connection", t("event.connected"));
-events.onmessage = (event) => render(JSON.parse(event.data));
+let pendingSseData = null;
+let pendingSseTimer = null;
+events.onmessage = (event) => {
+  pendingSseData = JSON.parse(event.data);
+  if (pendingSseTimer) return;
+  pendingSseTimer = setTimeout(() => {
+    pendingSseTimer = null;
+    if (pendingSseData) render(pendingSseData);
+    pendingSseData = null;
+  }, 150);
+};
 events.onerror = () => {
   set("event-connection", t("event.reconnecting"));
   poll().catch(() => {});

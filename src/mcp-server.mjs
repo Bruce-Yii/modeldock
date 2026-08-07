@@ -24,6 +24,7 @@ export async function startMcpServer(config = loadConfig(), {
     ttlMs: config.mediaTtlMs,
     maxBytes: config.mediaMaxBytes,
     maxEntries: config.mediaMaxEntries,
+    stateDir: config.mediaDir,
   });
   const upstreams = injectedUpstreams || createUpstreams({
     config,

@@ -1,5 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { MediaStore } from "./media-store.mjs";
 
 function makeStore(overrides = {}) {
@@ -138,4 +141,46 @@ test("private-range urls are currently accepted (audit finding)", () => {
   const store = makeStore();
   const ref = store.put("https://192.168.1.5/x.png");
   assert.ok(ref.startsWith("img_"), "internal URLs are not rejected today");
+});
+
+test("persists data images so refs survive a store restart", () => {
+  const stateDir = mkdtempSync(path.join(os.tmpdir(), "modeldock-media-"));
+  try {
+    const first = makeStore({ stateDir });
+    const ref = first.put(DATA_URL);
+    assert.ok(readFileSync(path.join(stateDir, `${ref}.bin`)).length > 0);
+    const second = makeStore({ stateDir });
+    const item = second.get(ref);
+    assert.equal(item.imageUrl, DATA_URL);
+    assert.equal(item.mime, "image/png");
+    assert.equal(item.storage, "file");
+    assert.match(readFileSync(path.join(stateDir, "index.json"), "utf8"), new RegExp(ref));
+  } finally {
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("persists remote image URLs across a store restart", () => {
+  const stateDir = mkdtempSync(path.join(os.tmpdir(), "modeldock-media-"));
+  try {
+    const first = makeStore({ stateDir });
+    const ref = first.put("https://example.com/image.png");
+    const second = makeStore({ stateDir });
+    assert.equal(second.get(ref).imageUrl, "https://example.com/image.png");
+  } finally {
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("removes persisted files when entries expire", () => {
+  const stateDir = mkdtempSync(path.join(os.tmpdir(), "modeldock-media-"));
+  try {
+    const store = makeStore({ stateDir, ttlMs: 100 });
+    const ref = store.put(DATA_URL);
+    store.cleanup(Date.now() + 101);
+    assert.equal(store.get(ref), undefined);
+    assert.throws(() => readFileSync(path.join(stateDir, `${ref}.bin`)), /ENOENT/);
+  } finally {
+    rmSync(stateDir, { recursive: true, force: true });
+  }
 });

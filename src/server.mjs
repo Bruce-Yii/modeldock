@@ -189,6 +189,19 @@ function statusPayload({ config, metrics, mediaStore, routeAffinity, modelSelect
   const mainTokenReady = Boolean(tokenFor(config, selected.mainModel) || (config.tokens && Object.values(config.tokens).some(Boolean)));
   const mainProvider = providerForModel(config, selected.mainModel) || config.profileId;
   const providerLabel = providerOptions(config).find((p) => p.id === mainProvider)?.label || mainProvider;
+  // The route card shows the most recent actual request first, falling back to
+  // the dashboard selection. Native passthrough (reason "native_passthrough")
+  // never rewrites modelSelection, so without this the card would keep showing
+  // the last relayed model while native traffic runs.
+  const ROUTE_PROVIDER_LABELS = {
+    "openai": "ChatGPT (native)",
+    "opencode-go": "OpenCode Go",
+    "deepseek-official": "DeepSeek Official",
+  };
+  const lastRequest = metrics.recent.find((record) => record.kind === "responses" && record.model);
+  const routeModel = lastRequest?.model || selected.mainModel;
+  const routeProvider = lastRequest?.upstream || mainProvider;
+  const routeProviderLabel = ROUTE_PROVIDER_LABELS[routeProvider] || providerOptions(config).find((p) => p.id === routeProvider)?.label || routeProvider;
   return metrics.snapshot({
     ready: mainTokenReady,
     config: {
@@ -196,6 +209,8 @@ function statusPayload({ config, metrics, mediaStore, routeAffinity, modelSelect
       // Selection-aware routing facts for the route card and forwarding map: which
       // provider owns the selected main model, which base URL and wire style it hits.
       mainProvider,
+      routeModel,
+      routeProviderLabel,
       mainProviderLabel: providerLabel,
       mainUpstreamUrl: upstreamBaseForModel(config, selected.mainModel),
       mainWire: "responses",
@@ -565,6 +580,7 @@ export function createServices(config = loadConfig()) {
     ttlMs: mutableConfig.mediaTtlMs,
     maxBytes: mutableConfig.mediaMaxBytes,
     maxEntries: mutableConfig.mediaMaxEntries,
+    stateDir: mutableConfig.mediaDir,
   });
   const modelSelection = { mainModel: mutableConfig.mainModel, visionModel: mutableConfig.visionModel };
   const services = {};

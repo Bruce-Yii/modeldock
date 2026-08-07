@@ -33,8 +33,13 @@ export async function ttsInstall() {
   const { promisify } = await import("node:util");
   const { fileURLToPath } = await import("node:url");
   const run = promisify(execFile);
-  const npm = process.platform === "win32" ? "npm.cmd" : "npm";
-  await run(npm, ["install", "msedge-tts", "--no-save", "--no-audit", "--no-fund"], {
+  // On Windows, execFile cannot spawn a .cmd directly in every Node build
+  // ("spawn EINVAL"); route through cmd.exe /c so the install button works.
+  const args = ["install", "msedge-tts", "--no-save", "--no-audit", "--no-fund"];
+  const [cmd, cmdArgs] = process.platform === "win32"
+    ? ["cmd.exe", ["/c", "npm", ...args]]
+    : ["npm", args];
+  await run(cmd, cmdArgs, {
     timeout: INSTALL_TIMEOUT_MS,
     windowsHide: true,
     // fileURLToPath, not URL.pathname: on Windows the latter yields "/D:/..." and npm fails.

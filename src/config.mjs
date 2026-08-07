@@ -225,6 +225,7 @@ export function loadConfig() {
     enabled: process.env.MODELDOCK_DEBUG === "1" || process.env.MODELDOCK_DEBUG === "true",
     noReasoning: process.env.MODELDOCK_NO_REASONING === "1",
     dumpDir: process.env.MODELDOCK_DUMP_DIR || "",
+    dumpAll: process.env.MODELDOCK_DUMP_ALL === "1",
   };
   // How the managed [mcp_servers.modeldock] entry connects: "stdio" (default) spawns
   // src/mcp-standalone.mjs as a Codex-owned child that survives gateway restarts;
@@ -254,6 +255,9 @@ export function loadConfig() {
     mediaTtlMs: integer("MODELDOCK_MEDIA_TTL_MS", 3_600_000, { min: 60_000 }),
     mediaMaxBytes: integer("MODELDOCK_MEDIA_MAX_BYTES", 10 * 1024 * 1024, { min: 1_024 }),
     mediaMaxEntries: integer("MODELDOCK_MEDIA_MAX_ENTRIES", 64, { min: 1, max: 1_024 }),
+    mediaDir: process.env.MODELDOCK_MEDIA_DIR
+      ? path.resolve(process.env.MODELDOCK_MEDIA_DIR)
+      : path.join(os.homedir(), ".modeldock", "media"),
     exaMcpUrl: normalizedBaseUrl(process.env.EXA_MCP_URL || "https://mcp.exa.ai/mcp"),
     exaApiKey: process.env.EXA_API_KEY || "",
     recentLimit: integer("MODELDOCK_RECENT_LIMIT", 50, { min: 10, max: 500 }),
@@ -300,6 +304,7 @@ export function publicConfig(config) {
       enabled: Boolean(config.debug?.enabled),
       noReasoning: Boolean(config.debug?.noReasoning),
       dumpDir: config.debug?.dumpDir || "",
+      dumpAll: Boolean(config.debug?.dumpAll),
     },
     envFile: config.envFile || "",
   };

@@ -34,7 +34,9 @@ export { redactBearer };
 
 // MODELDOCK_DUMP_DIR diagnostics: write the exact upstream request body so a
 // stuck turn (tool-pairing rejections, quota edge cases) can be reproduced from
-// the file. A dump failure must never break the relay.
+// the file. By default only failing relays are dumped (one small, targeted
+// file); MODELDOCK_DUMP_ALL=1 opts into every request. A dump failure must
+// never break the relay.
 function dumpRequestBody(dir, body) {
   try {
     mkdirSync(dir, { recursive: true });
@@ -44,9 +46,34 @@ function dumpRequestBody(dir, body) {
   }
 }
 
+// Per-request skeleton for the trace card, so an upstream rejection (tool
+// pairing, thinking-mode reasoning) can be diagnosed from /api/status without
+// full-traffic dumps. Describes item types and the reasoning items Go is
+// strict about; never includes prompt text, tool arguments or outputs.
+export function describeInputShape(input) {
+  if (!Array.isArray(input)) return { itemTypes: {}, reasoning: [] };
+  const itemTypes = {};
+  const reasoning = [];
+  input.forEach((item, index) => {
+    const type = item?.type ?? "unknown";
+    itemTypes[type] = (itemTypes[type] || 0) + 1;
+    if (type !== "reasoning" || !item) return;
+    const content = Array.isArray(item.content) ? item.content : [];
+    reasoning.push({
+      index,
+      status: item.status ?? "missing",
+      contentTypes: content.map((part) => part?.type ?? "unknown"),
+      hasReasoningText: content.some((part) => part?.type === "reasoning_text" && typeof part.text === "string" && part.text.length > 0),
+      hasSummary: Array.isArray(item.summary) ? item.summary.length > 0 : false,
+      hasId: typeof item.id === "string" && item.id.length > 0,
+    });
+  });
+  return { itemTypes, reasoning };
+}
+
 // Compaction is the one request we rewrite wholesale and cannot replay from the
 // Codex session log, and it is rare enough that a per-failure record costs
-// nothing. Full-traffic dumping (MODELDOCK_DUMP_DIR) stays off: it produced
+// nothing. Full-traffic dumping (MODELDOCK_DUMP_ALL) stays off: it produced
 // gigabytes for the one payload anybody ever wanted to read. Only the tool-item
 // skeleton is kept - ids and types, never arguments, output text or prompts.
 export function compactFailureReport(body, { status, upstreamError } = {}) {
@@ -708,7 +735,18 @@ export async function relayNativeResponses(payload, res, services, { signal } = 
       res.flushHeaders();
     }
     const bytesOut = await pipeGatewayStream(upstream.body, res, tee);
-    finish?.({ ok: true, httpStatus: upstream.status, upstream: "openai", bytesOut });
+    finish?.({
+      ok: true,
+      httpStatus: upstream.status,
+      upstream: "openai",
+      bytesOut,
+      inputTokens: usage?.input_tokens || 0,
+      outputTokens: usage?.output_tokens || 0,
+      // Same fields as the relay path so the dashboard's token waveforms
+      // (context, cache rate, reasoning) also sample native passthrough calls.
+      cachedTokens: usage?.input_tokens_details?.cached_tokens || 0,
+      reasoningTokens: usage?.output_tokens_details?.reasoning_tokens || 0,
+    });
     metrics?.recordResponseUsage?.({ bytesOut, usage });
     metrics?.recordResponseTransform?.({
       blocked: { tool_search: 0, web_search: 0 },
@@ -966,7 +1004,9 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
       });
       return { ok: false, httpStatus: 503, route, error: body };
     }
-    if (config.debug?.dumpDir) dumpRequestBody(config.debug.dumpDir, { ...summarizeBody, model: upstreamModel });
+    if (config.debug?.dumpAll && config.debug?.dumpDir) {
+      dumpRequestBody(config.debug.dumpDir, { ...summarizeBody, model: upstreamModel });
+    }
     const upstream = await fetch(target.url, {
       method: "POST",
       headers: upstreamHeaders(target),
@@ -1007,7 +1047,13 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
         res.setHeader("Content-Type", "application/json");
         res.end(body);
       }
-      finish?.({ ok: false, httpStatus: upstream.status, upstream: target.provider, error: translated.body.error.message.slice(0, 400) });
+      finish?.({
+        ok: false,
+        httpStatus: upstream.status,
+        upstream: target.provider,
+        error: translated.body.error.message.slice(0, 400),
+        requestShape: describeInputShape(normalizedPayload.input),
+      });
       metrics?.recordResponseTransform?.({
         blocked: { tool_search: 0, web_search: 0 },
         toolChoiceRewritten: false,
@@ -1146,7 +1192,9 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   // stays in the response and affinity so provider resolution keeps working on
   // continuation requests.
   const upstreamModel = target.model;
-  if (config.debug?.dumpDir) dumpRequestBody(config.debug.dumpDir, { ...normalizedPayload, model: upstreamModel });
+  if (config.debug?.dumpAll && config.debug?.dumpDir) {
+    dumpRequestBody(config.debug.dumpDir, { ...normalizedPayload, model: upstreamModel });
+  }
   if (!target.token) {
     const error = {
       error: {
@@ -1197,6 +1245,9 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     });
     const upstreamBytes = Buffer.byteLength(JSON.stringify(normalizedPayload));
     if (!upstream.ok) {
+      if (config.debug?.dumpDir) {
+        dumpRequestBody(config.debug.dumpDir, { ...normalizedPayload, model: upstreamModel });
+      }
       const raw = await upstream.text();
       // Translate before forwarding: name the failing provider, surface the
       // innermost message, and classify quota exhaustion before the status
@@ -1208,7 +1259,13 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
         res.setHeader("Content-Type", "application/json");
         res.end(body);
       }
-      finish?.({ ok: false, httpStatus: upstream.status, upstream: target.provider, error: translated.body.error.message.slice(0, 400) });
+      finish?.({
+        ok: false,
+        httpStatus: upstream.status,
+        upstream: target.provider,
+        error: translated.body.error.message.slice(0, 400),
+        requestShape: describeInputShape(normalizedPayload.input),
+      });
       metrics?.recordResponseTransform?.({
         blocked: { tool_search: stripped.toolSearch, web_search: stripped.webSearch },
         toolChoiceRewritten: false,
