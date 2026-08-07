@@ -511,7 +511,7 @@ Resolved during the rewrite:
    needs for client-side plugin machinery; the gateway strips hosted tool
    *definitions* (`web_search`, `computer_use`, `browser_use`, `artifact`,
    `tool_search`) before they reach Go.
-3. TTS uses on-demand `msedge-tts` install (kept; avoids CI packaging issues).
+3. TTS bundles `msedge-tts` into the release bundle, so speak works out of the box.
 4. `vision-eval.mjs` survives as dev-only tooling (never runs at startup);
    vision fields in the catalog are hand-maintained constants.
 5. Direct image escalation: kept. Request-level routing to the vision model
