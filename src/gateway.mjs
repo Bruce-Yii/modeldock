@@ -112,12 +112,13 @@ export function normalizeLegacySlug(model, knownModels) {
 
 // A slug we do not serve is native GPT traffic. Empty models (provider defaults
 // with no id) stay on the routed path so the dashboard selection still applies.
-export function isNativeModel(requestedModel, knownModels) {
-  return (
-    typeof requestedModel === "string"
-    && requestedModel.length > 0
-    && !(knownModels && knownModels.has(requestedModel))
-  );
+// Native GPT models are published in the catalog (so the App picker shows
+// them), so the captured native slug set is checked first: a published native
+// slug must still reach ChatGPT rather than an external upstream.
+export function isNativeModel(requestedModel, knownModels, nativeSlugs) {
+  if (typeof requestedModel !== "string" || requestedModel.length === 0) return false;
+  if (nativeSlugs?.has?.(requestedModel)) return true;
+  return !(knownModels && knownModels.has(requestedModel));
 }
 
 function isOpaqueEncryptedContent(value) {
@@ -506,6 +507,8 @@ export async function relayNativeResponses(payload, res, services, { signal } = 
       inputTokens: usage?.input_tokens,
       outputTokens: usage?.output_tokens,
       totalTokens: usage?.total_tokens,
+      cachedTokens: usage?.input_tokens_details?.cached_tokens,
+      reasoningTokens: usage?.output_tokens_details?.reasoning_tokens,
     });
     return {
       ok: true,
@@ -584,7 +587,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   const { config, metrics, mediaStore, routeAffinity, knownModels } = services;
   const requestedModel = normalizeLegacySlug(typeof payload.model === "string" ? payload.model : "", knownModels);
   if (requestedModel !== payload.model && requestedModel) payload = { ...payload, model: requestedModel };
-  if (isNativeModel(requestedModel, knownModels)) {
+  if (isNativeModel(requestedModel, knownModels, services.nativeSlugs)) {
     return relayNativeResponses(payload, res, services, { signal });
   }
   const mainModel = services.mainModel || config.mainModel;
@@ -705,6 +708,11 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       bytesOut,
       inputTokens: usage?.input_tokens || 0,
       outputTokens: usage?.output_tokens || 0,
+      // Both upstreams report prompt-cache hits and reasoning spend in the
+      // standard details objects (verified live on go and deepseek-official);
+      // the dashboard's cache-rate wave reads these off the trace records.
+      cachedTokens: usage?.input_tokens_details?.cached_tokens || 0,
+      reasoningTokens: usage?.output_tokens_details?.reasoning_tokens || 0,
     });
     metrics?.recordResponseTransform?.({
       blocked: { tool_search: stripped.toolSearch, web_search: stripped.webSearch },

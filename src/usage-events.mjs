@@ -36,6 +36,8 @@ export function recordUsageEvent({
   inputTokens,
   outputTokens,
   totalTokens,
+  cachedTokens,
+  reasoningTokens,
   at = Date.now(),
   filePath = USAGE_EVENTS_PATH,
 } = {}) {
@@ -50,6 +52,8 @@ export function recordUsageEvent({
     ...(safeCount(inputTokens) !== undefined ? { inputTokens: safeCount(inputTokens) } : {}),
     ...(safeCount(outputTokens) !== undefined ? { outputTokens: safeCount(outputTokens) } : {}),
     ...(safeCount(totalTokens) !== undefined ? { totalTokens: safeCount(totalTokens) } : {}),
+    ...(safeCount(cachedTokens) !== undefined ? { cachedTokens: safeCount(cachedTokens) } : {}),
+    ...(safeCount(reasoningTokens) !== undefined ? { reasoningTokens: safeCount(reasoningTokens) } : {}),
   };
   try {
     mkdirSync(path.dirname(filePath), { recursive: true });

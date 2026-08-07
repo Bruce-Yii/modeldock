@@ -128,6 +128,79 @@ function renderContextWave(recent) {
   drawWave(canvas, waveHistory, peak, waveHover);
 }
 
+
+// Cache-rate waveform on the Requests card: per-call prompt-cache hit rate
+// (cachedTokens / inputTokens) from the same trace records as the context wave.
+// Fixed 0..100% scale - a rate, not a magnitude.
+const cacheHistory = [];
+
+function renderCacheWave(recent) {
+  const canvas = $("cache-wave");
+  if (!canvas) return;
+  const seen = new Set(cacheHistory.map((point) => point.id));
+  for (const item of recent) {
+    if (item.kind !== "responses" || item.status !== "ok" || seen.has(item.id)) continue;
+    const input = Number(item.inputTokens) || 0;
+    if (input <= 0) continue;
+    cacheHistory.push({ id: item.id, t: item.startedAt || 0, v: Math.min(1, (Number(item.cachedTokens) || 0) / input) });
+  }
+  cacheHistory.sort((a, b) => a.t - b.t);
+  if (cacheHistory.length > WAVE_MAX_POINTS) cacheHistory.splice(0, cacheHistory.length - WAVE_MAX_POINTS);
+  const last = cacheHistory.length ? cacheHistory[cacheHistory.length - 1].v : null;
+  const avg = cacheHistory.length ? cacheHistory.reduce((sum, point) => sum + point.v, 0) / cacheHistory.length : null;
+  set("cache-last", last === null ? "—" : `${Math.round(last * 100)}%`);
+  set("cache-avg", avg === null ? "—" : `${Math.round(avg * 100)}%`);
+  drawCacheWave(canvas, cacheHistory);
+}
+
+function drawCacheWave(canvas, history) {
+  const ctx = canvas.getContext("2d");
+  const dpr = window.devicePixelRatio || 1;
+  const width = canvas.clientWidth || canvas.width;
+  const height = canvas.clientHeight || canvas.height;
+  if (canvas.width !== Math.round(width * dpr) || canvas.height !== Math.round(height * dpr)) {
+    canvas.width = Math.round(width * dpr);
+    canvas.height = Math.round(height * dpr);
+  }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+  const pad = 4;
+  const plotW = width - pad * 2;
+  const plotH = height - pad * 2;
+  ctx.strokeStyle = "rgba(96,165,250,0.10)";
+  ctx.lineWidth = 1;
+  for (let i = 1; i <= 3; i += 1) {
+    const y = pad + (plotH / 3) * i;
+    ctx.beginPath();
+    ctx.moveTo(pad, y);
+    ctx.lineTo(width - pad, y);
+    ctx.stroke();
+  }
+  const n = history.length;
+  if (n === 0) return;
+  const gradient = ctx.createLinearGradient(0, pad, 0, pad + plotH);
+  gradient.addColorStop(0, "rgba(96,165,250,0.35)");
+  gradient.addColorStop(1, "rgba(96,165,250,0)");
+  ctx.beginPath();
+  ctx.moveTo(pad, pad + plotH);
+  const points = [];
+  history.forEach((point, index) => {
+    const x = pad + (n === 1 ? plotW / 2 : (plotW * index) / (n - 1));
+    const y = pad + plotH - point.v * plotH;
+    points.push([x, y]);
+    ctx.lineTo(x, y);
+  });
+  ctx.lineTo(pad + (n === 1 ? plotW / 2 : plotW), pad + plotH);
+  ctx.closePath();
+  ctx.fillStyle = gradient;
+  ctx.fill();
+  ctx.beginPath();
+  points.forEach(([x, y], index) => (index === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y)));
+  ctx.strokeStyle = "rgba(96,165,250,0.9)";
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+}
+
 function drawWave(canvas, history, peak, hoverIndex = -1) {
   const ctx = canvas.getContext("2d");
   const dpr = window.devicePixelRatio || 1;
@@ -292,7 +365,6 @@ function render(data) {
   set("requests-total", number(responses.total));
   set("requests-success", `${success}%`);
   set("requests-latency", duration(responses.averageLatencyMs));
-  $("requests-success-meter").style.width = `${success}%`;
 
   const inputTokens = responses.inputTokens || 0;
   const outputTokens = responses.outputTokens || 0;
@@ -303,6 +375,7 @@ function render(data) {
   $("token-meter-input").style.width = `${tokens ? Math.round((inputTokens / tokens) * 100) : 0}%`;
 
   renderContextWave(data.recent || []);
+  renderCacheWave(data.recent || []);
   set("bytes-total", bytes(responses.bytesIn + responses.bytesOut));
   set("bytes-in", bytes(responses.bytesIn));
   set("bytes-out", bytes(responses.bytesOut));
