@@ -88,6 +88,12 @@ else — it retries on the paid one before a single character has reached Codex.
 slightly slower first word instead of an error. It stays on the paid model for an hour,
 then tries free again on its own.
 
+**Restart Codex once** after enabling the bridge, so it picks up the model list. If the
+picker still shows "Custom" for everything, that is a known Codex bug — the app does not
+refresh a custom provider's model list ([openai/codex#32119](https://github.com/openai/codex/issues/32119)).
+ModelDock works around it by writing the same list to a file and pointing Codex at it,
+which the switch sets up for you.
+
 ## Speech
 
 The dashboard has a **TTS · STT** tile. Turn TTS on once and it installs a small speech
@@ -200,6 +206,8 @@ ModelDock 能连到的每个模型，都会出现在 **Codex 自己的模型选�
 
 选单里还有一项 **`Auto - DeepSeek Free first`**。选它之后，ModelDock 会先把活派给免费模型；一旦免费上游拒绝——额度用尽，或是别的任何原因——它会在**一个字都还没送到 Codex 之前**改用付费模型重试。你只会觉得第一个字慢了一点，而不会看到报错。之后一小时内保持付费，然后自动再试免费。
 
+开启桥接后**重启一次 Codex**，它才会读到模型列表。如果选单里全是 Custom，那是 Codex 自身的已知缺陷——它不会去刷新自定义 provider 的模型列表（[openai/codex#32119](https://github.com/openai/codex/issues/32119)）。ModelDock 会把同一份列表写成文件并让 Codex 指向它来绕开这个问题，开关会替你配好。
+
 ## 语音
 
 仪表盘上有一栏 **TTS · STT**。把 TTS 打开一次会自动装一个小的语音包，之后模型就能用 `speak` 把文字合成音频文件。`hear` 是反过来的——用 Windows 自带的识别引擎把音频转写回文字（仅 Windows，非 WAV 输入需要 ffmpeg）。不主动打开就一直是关闭状态。
@@ -294,6 +302,8 @@ https://github.com/architectds/modeldock
 ModelDock が到達できるモデルはすべて、**Codex 自身のモデル選択メニュー**（右下）に接続元付きで表示されます — `OpenCode Go - GLM 5.2`、`DeepSeek Official - DeepSeek V4 Flash` のように。選べば次のメッセージから有効になり、設定の編集も再起動も不要です。ダッシュボードもそれに追従し、実際に使われているモデルを常に表示します。
 
 メニューには **`Auto - DeepSeek Free first`** という項目もあります。これを選ぶと ModelDock はまず無料モデルに送り、その上流が拒否した瞬間 — 上限到達でも、それ以外の理由でも — **Codex に 1 文字も届く前に**有料モデルで再試行します。エラーではなく、最初の一語がわずかに遅れるだけです。その後 1 時間は有料のままで、自動的にまた無料を試します。
+
+ブリッジを有効にしたら **Codex を一度再起動**してください。モデル一覧はそのときに読み込まれます。選択メニューがすべて Custom のままなら、それは Codex 側の既知の不具合です（カスタムプロバイダーのモデル一覧を更新しない、[openai/codex#32119](https://github.com/openai/codex/issues/32119)）。ModelDock は同じ一覧をファイルに書き出して Codex をそこに向けることで回避します。設定はスイッチが行います。
 
 ## 音声
 
