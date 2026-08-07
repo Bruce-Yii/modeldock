@@ -141,14 +141,12 @@ test("upstreamTargetFor routes by owning provider", () => {
   assert.equal(go.provider, "opencode-go");
   assert.equal(go.url, "https://opencode.ai/zen/go/v1/responses");
   assert.equal(go.token, "go-token");
-  assert.equal(go.opencodeHeaders, true);
 
   const ds = upstreamTargetFor(config, "deepseek-v4-flash@deepseek-official");
   assert.equal(ds.provider, "deepseek-official");
   assert.equal(ds.model, "deepseek-v4-flash");
   assert.equal(ds.url, "https://api.deepseek.com/responses");
   assert.equal(ds.token, "ds-token");
-  assert.equal(ds.opencodeHeaders, false);
 });
 
 test("routeGatewayRequest escalates current-turn images to the vision model", () => {
@@ -295,6 +293,8 @@ test("relayResponses forwards a streamed response and records usage", async () =
     assert.equal(result.route.model, "gpt-5.6-luna");
     assert.equal(result.usage.input_tokens, 4);
     assert.match(calls[0].url, /opencode\.ai\/zen\/go\/v1\/responses/);
+    const sentHeaders = Object.keys(calls[0].headers || {});
+    assert.ok(!sentHeaders.some((name) => name.startsWith("x-opencode-")), "no opencode session spoofing headers are sent");
     assert.equal(affinity.snapshot().activeCallIds, 1);
     const forwarded = Buffer.concat(sink.chunks).toString("utf8");
     assert.match(forwarded, /response\.completed/);

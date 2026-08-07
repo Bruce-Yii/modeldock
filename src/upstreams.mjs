@@ -1,43 +1,6 @@
 import { providerForModel, tokenFor, profileById } from "./profiles.mjs";
-import { createHash } from "node:crypto";
-
 function upstreamUrl(baseUrl, path) {
   return `${baseUrl.replace(/\/$/, "")}/${path.replace(/^\//, "")}`;
-}
-
-const OPENCODE_USER_AGENT = "opencode/1.18.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14";
-const SESSION_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-
-// Replicate the official opencode ses_/msg_ id shape (12 hex + 14 base62) so the zen
-// dashboard groups vision calls under the same session as the main model.
-function opencodeIdentifier(seed, prefix) {
-  if (seed) {
-    const digest = createHash("sha256").update(seed).digest();
-    const time = Array.from({ length: 6 }, (_, index) => digest[index].toString(16).padStart(2, "0")).join("");
-    let tail = "";
-    for (let i = 0; i < 14; i += 1) tail += SESSION_ALPHABET[digest[6 + i] % SESSION_ALPHABET.length];
-    return `${prefix}_${time}${tail}`;
-  }
-  const timestamp = Date.now();
-  const current = BigInt(timestamp) * 0x1000n;
-  const time = Array.from({ length: 6 }, (_, index) =>
-    Number((current >> BigInt(40 - 8 * index)) & 0xffn).toString(16).padStart(2, "0"),
-  ).join("");
-  let tail = "";
-  for (let i = 0; i < 14; i += 1) tail += SESSION_ALPHABET[Math.floor(Math.random() * SESSION_ALPHABET.length)];
-  return `${prefix}_${time}${tail}`;
-}
-
-function opencodeHeadersFor(seed) {
-  const session = opencodeIdentifier(seed || null, "ses");
-  const request = opencodeIdentifier(seed ? `${seed}#v` : null, "msg");
-  return {
-    "x-opencode-session": session,
-    "x-opencode-request": request,
-    "x-opencode-client": "desktop",
-    "x-opencode-project": seed ? seed.slice(0, 32) : "local",
-    "User-Agent": OPENCODE_USER_AGENT,
-  };
 }
 
 function safeErrorBody(text) {
@@ -79,7 +42,7 @@ export function parseMcpTextResult(body) {
   return "";
 }
 
-export function createUpstreams({ config, metrics, mediaStore, getVisionModel = () => config.visionModel, getSessionSeed = () => null }) {
+export function createUpstreams({ config, metrics, mediaStore, getVisionModel = () => config.visionModel }) {
   async function searchWeb(args) {
     const finish = metrics.begin("web", { operation: "web_search_exa", query: args.query.slice(0, 160) });
     const endpoint = new URL(config.exaMcpUrl);
@@ -152,7 +115,6 @@ export function createUpstreams({ config, metrics, mediaStore, getVisionModel = 
       headers: {
         Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
-        ...opencodeHeadersFor(getSessionSeed()),
       },
       body: JSON.stringify(common),
       signal: AbortSignal.timeout(config.visionTimeoutMs),

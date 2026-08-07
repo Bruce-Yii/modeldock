@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { bareModelId, providerForModel } from "./profiles.mjs";
 import { RouteAffinity, routeResponsesRequest } from "./router.mjs";
 import { extractResponseUsage } from "./metrics.mjs";
@@ -100,7 +99,6 @@ export function upstreamTargetFor(config, model) {
       model: upstreamModel,
       url: `${(config.deepseekBaseUrl || "https://api.deepseek.com").replace(/\/+$/, "")}/responses`,
       token: config.tokens?.["deepseek-official"] || config.deepseekToken || "",
-      opencodeHeaders: false,
     };
   }
   return {
@@ -108,7 +106,6 @@ export function upstreamTargetFor(config, model) {
     model: upstreamModel,
     url: `${(config.opencodeBaseUrl || config.goBaseUrl || "https://opencode.ai/zen/go/v1").replace(/\/+$/, "")}/responses`,
     token: config.goToken || config.tokens?.["opencode-go"] || "",
-    opencodeHeaders: true,
   };
 }
 
@@ -212,7 +209,6 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     knownModels,
   });
 
-  const sessionSeed = payload?.client_metadata?.thread_id || payload?.client_metadata?.session_id || "modeldock";
   const normalizedPayload = {
     ...payload,
     input: normalizeGatewayInput(payload.input),
@@ -272,7 +268,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   try {
     const upstream = await fetch(target.url, {
       method: "POST",
-      headers: upstreamHeaders(target, normalizedPayload, sessionSeed),
+      headers: upstreamHeaders(target),
       body: JSON.stringify({ ...normalizedPayload, model: upstreamModel }),
       signal,
     });
@@ -344,37 +340,11 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   }
 }
 
-function upstreamHeaders(target, payload, sessionSeed = "modeldock") {
+function upstreamHeaders(target) {
   const headers = {
     Authorization: `Bearer ${target.token}`,
     "Content-Type": "application/json",
     "User-Agent": "modeldock-gateway/0.1",
   };
-  if (target.opencodeHeaders) {
-    const { opencodeHeadersFor } = upstreamIdentifier(sessionSeed);
-    Object.assign(headers, opencodeHeadersFor);
-  }
   return headers;
-}
-
-// Reuse the opencode session/request id shape so the zen dashboard groups relayed
-// calls under a stable session. Pure helper isolated here to keep gateway.mjs free
-// of side effects during unit tests.
-function upstreamIdentifier(seed) {
-  const alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-  const ident = (prefix, salt) => {
-    const digest = createHash("sha256").update(salt).digest();
-    const time = Array.from({ length: 6 }, (_, index) => digest[index].toString(16).padStart(2, "0")).join("");
-    let tail = "";
-    for (let index = 0; index < 14; index += 1) tail += alphabet[digest[6 + index] % alphabet.length];
-    return `${prefix}_${time}${tail}`;
-  };
-  return {
-    opencodeHeadersFor: {
-      "x-opencode-session": ident("ses", seed),
-      "x-opencode-request": ident("msg", `${seed}#v`),
-      "x-opencode-client": "desktop",
-      "x-opencode-project": seed.slice(0, 32),
-    },
-  };
 }
