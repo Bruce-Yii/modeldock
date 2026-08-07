@@ -86,22 +86,6 @@ function extractManagedBlock(source) {
 // App picker rewrites it on every model selection, and the whole catalog exists
 // so the picker can drive routing. Treating a picker change as foreign drift
 // made the dashboard scream and disable() refuse to restore after normal use.
-function managedSignature(source) {
-  return JSON.stringify({
-    block: extractManagedBlock(source),
-    legacy: {
-      modelProvider: topLevelString(source, "model_provider"),
-      webSearch: topLevelString(source, "web_search"),
-      modelCatalogJson: topLevelString(source, "model_catalog_json"),
-      provider: providerSection(source)
-        .slice(1)
-        .map((line) => line.trim())
-        .filter((line) => line && !line.startsWith("#"))
-        .sort(),
-    },
-  });
-}
-
 function topLevelLine(source, key) {
   const lines = source.replace(/\r\n/g, "\n").split("\n");
   const firstTable = lines.findIndex((line) => /^\s*\[/.test(line));
@@ -274,29 +258,9 @@ export class CodexConfigSwitcher {
     let current = "";
     if (configExists) current = await readFile(this.configPath, "utf8");
     const routeActive = hasManagedRoute(current);
-    // Whole-file hash is only the fast path: ANY unrelated edit to config.toml
-    // (an MCP server registration, a project trust entry, an App-written pref)
-    // changes it. Real drift means OUR managed fields differ from what enable
-    // would write today, so fall back to the managed signature before flagging.
-    const hashChanged = Boolean(state.enabled && routeActive && state.managedHash && currentHash !== state.managedHash);
-    let drifted = false;
-    if (hashChanged) {
-      const expected = buildManagedCodexConfig(current, {
-        baseUrl: this.baseUrl,
-        model: this.model,
-        catalogFile: this.catalogFile,
-        mcpUrl: this.mcpUrl,
-      });
-      drifted = managedSignature(current) !== managedSignature(expected);
-      // Our own pre-transparent modeldock_go shape is a format migration, not
-      // user drift - restore already treats it that way, and needsMigration
-      // below tells the UI what to actually do about it.
-      if (drifted && isLegacyManaged(current) && !isNewManaged(current)) drifted = false;
-    }
     return {
       enabled: Boolean(state.enabled && routeActive),
-      managed: Boolean(state.enabled && routeActive && !drifted),
-      drifted,
+      managed: Boolean(state.enabled && routeActive),
       externallyRestored: Boolean(state.enabled && !routeActive),
       restartRequired: Boolean(state.restartRequired),
       configExists,
@@ -330,7 +294,7 @@ export class CodexConfigSwitcher {
         // Re-write the config once when it still carries the pre-transparent
         // modeldock_go provider shape, so upgrades land on openai_base_url.
         if (status.needsMigration) {
-          await this.disable({ migrating: true });
+          await this.disable();
           return this.enable();
         }
         return status;
@@ -384,7 +348,7 @@ export class CodexConfigSwitcher {
     return this.status();
   }
 
-  async disable({ migrating = false } = {}) {
+  async disable() {
     const state = await this.#readState();
     if (!state.enabled) return this.status();
     let current = await this.#readCurrent();
@@ -397,19 +361,6 @@ export class CodexConfigSwitcher {
         throw Object.assign(new Error("ModelDock backup is missing while its route is still active; restore requires manual review."), {
           code: "STATE_INVALID",
           cause: error,
-        });
-      }
-      const expected = buildManagedCodexConfig(backup, {
-        baseUrl: this.baseUrl,
-        model: this.model,
-        catalogFile: this.catalogFile,
-        mcpUrl: this.mcpUrl,
-      });
-      // `migrating` is only ever set by enable() when the on-disk config is our
-      // own pre-transparent modeldock_go shape; that is not user drift.
-      if (!migrating && sha256(current) !== state.managedHash && managedSignature(current) !== managedSignature(expected)) {
-        throw Object.assign(new Error("ModelDock-managed route fields changed outside ModelDock; refusing an ambiguous restore."), {
-          code: "CONFIG_DRIFTED",
         });
       }
     }

@@ -17,7 +17,7 @@ import { createUpdater } from "./update.mjs";
 import { clearOwnerFile, describeOwnerConflict, writeOwnerFile } from "./instance-owner.mjs";
 import { CALLER_PATH_PREFIX, callerBasePath, callerKeyEqual, loadOrCreateCallerKey } from "./caller-key.mjs";
 import { RouteAffinity } from "./router.mjs";
-import { profileOptions, profileById, providerForModel, tokenFor } from "./profiles.mjs";
+import { profileOptions, profileById, providerForModel, publishedSlugFor, tokenFor } from "./profiles.mjs";
 import staticFiles from "./static-inline.mjs";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -115,19 +115,25 @@ function modelOptions(config, profileId) {
   for (const entry of enabledProviders(config)) {
     const profile = profileById(entry.id);
     for (const model of profile?.availableModels || []) {
-      if (
-        model.status !== "unavailable"
-        && model.endpoint !== "chat"
-        && !all.some((existing) => existing.id === model.id && existing.provider === entry.id)
-      ) {
-        all.push({ ...withTierLabel(model), provider: entry.id });
-      }
+      if (model.status === "unavailable" || model.endpoint === "chat") continue;
+      const id = publishedSlugFor(entry.id, model);
+      if (all.some((existing) => existing.id === id)) continue;
+      all.push({ ...withTierLabel(model), id, provider: entry.id });
     }
   }
+  // Config ids may be the published slug or a bare legacy id (pre-qualification .env).
+  // Resolve both to the same published form so a bare gpt-5.6-luna never duplicates
+  // the gpt-5.6-luna@opencode-go entry the profile loop already published.
   for (const id of [config.mainModel, config.visionModel, config.visionFallbackModel]) {
-    if (id && !all.some((existing) => existing.id === id)) {
-      all.push({ id, label: id, provider: config.profileId, supportsVision: id === config.visionModel || id === config.visionFallbackModel });
-    }
+    if (!id) continue;
+    const resolved = publishedSlugFor(config.profileId, id);
+    if (all.some((existing) => existing.id === resolved)) continue;
+    all.push({
+      id: resolved,
+      label: id,
+      provider: config.profileId,
+      supportsVision: id === config.visionModel || id === config.visionFallbackModel || resolved === config.visionModel || resolved === config.visionFallbackModel,
+    });
   }
   return all;
 }
@@ -723,7 +729,7 @@ export function createApp(services = createServices()) {
       return res.json(result);
     } catch (error) {
       recordConfigAction(metrics, `config_${operation}`, { ok: false, error: error.message });
-      const conflict = error.code === "CONFIG_DRIFTED" || error.code === "STATE_INVALID";
+      const conflict = error.code === "STATE_INVALID";
       return res.status(conflict ? 409 : 500).json({ error: { type: error.code || "config_switch_error", message: error.message } });
     }
   };
