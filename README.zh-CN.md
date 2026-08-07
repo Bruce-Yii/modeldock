@@ -1,4 +1,4 @@
-# ModelDock
+# Model Dock For Codex
 
 给 DeepSeek 装上眼睛、耳朵和嘴——让长会话稳定跑完。
 

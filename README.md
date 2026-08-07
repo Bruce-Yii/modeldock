@@ -1,4 +1,4 @@
-# ModelDock
+# Model Dock For Codex
 
 Give DeepSeek eyes, ears, a voice, and a web connection - through a thin
 Responses bridge for OpenCode Go and DeepSeek official.

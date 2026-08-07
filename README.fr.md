@@ -1,4 +1,4 @@
-# ModelDock
+# Model Dock For Codex
 
 Donnez a DeepSeek des yeux, des oreilles et une voix -- et gardez vos longues sessions jusqu'au bout.
 

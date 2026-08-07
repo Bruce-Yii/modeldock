@@ -1,4 +1,4 @@
-# ModelDock
+# Model Dock For Codex
 
 DeepSeek に目、耳、そして声を — 長いセッションも最後まで安定して続ける。
 
