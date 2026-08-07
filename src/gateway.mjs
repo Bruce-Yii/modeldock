@@ -101,9 +101,9 @@ export function rewriteHistoricalImages(input, mediaStore) {
 // text models see plain functions, and strip hosted schemas plus tools the model
 // cannot use. Returns the filtered list and a report of what was removed.
 export function applyToolPolicy(tools, { hiddenToolNames = TEXT_MODEL_HIDDEN_TOOLS } = {}) {
-  if (!Array.isArray(tools)) return { tools, stripped: { hosted: 0, hidden: 0, namespaceChildren: 0 } };
+  if (!Array.isArray(tools)) return { tools, stripped: { toolSearch: 0, webSearch: 0, otherHosted: 0, hidden: 0, namespaceChildren: 0 } };
   const hidden = new Set(hiddenToolNames || []);
-  const stripped = { hosted: 0, hidden: 0, namespaceChildren: 0 };
+  const stripped = { toolSearch: 0, webSearch: 0, otherHosted: 0, hidden: 0, namespaceChildren: 0 };
   const out = [];
   for (const tool of tools) {
     if (!tool || typeof tool !== "object") continue;
@@ -125,7 +125,9 @@ export function applyToolPolicy(tools, { hiddenToolNames = TEXT_MODEL_HIDDEN_TOO
       continue;
     }
     if (HOSTED_TOOL_TYPES.has(tool.type)) {
-      stripped.hosted += 1;
+      if (tool.type === "tool_search") stripped.toolSearch += 1;
+      else if (tool.type === "web_search") stripped.webSearch += 1;
+      else stripped.otherHosted += 1;
       continue;
     }
     if (typeof tool.name === "string" && hidden.has(tool.name)) {
@@ -289,7 +291,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify(error));
     metrics?.recordResponseTransform?.({
-      blocked: { tool_search: stripped.hosted, web_search: 0 },
+      blocked: { tool_search: stripped.toolSearch, web_search: stripped.webSearch },
       toolChoiceRewritten: false,
       imageRefs: [],
       directVision: route.directVision,
@@ -337,7 +339,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       }
       finish?.({ ok: false, httpStatus: upstream.status, upstream: target.provider, error: body.slice(0, 400) });
       metrics?.recordResponseTransform?.({
-        blocked: { tool_search: stripped.hosted, web_search: 0 },
+        blocked: { tool_search: stripped.toolSearch, web_search: stripped.webSearch },
         toolChoiceRewritten: false,
         imageRefs: [],
         directVision: route.directVision,
@@ -361,7 +363,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     }
     finish?.({ ok: true, httpStatus: upstream.status, upstream: target.provider, bytesOut });
     metrics?.recordResponseTransform?.({
-      blocked: { tool_search: stripped.hosted, web_search: 0 },
+      blocked: { tool_search: stripped.toolSearch, web_search: stripped.webSearch },
       toolChoiceRewritten: false,
       imageRefs: [],
       directVision: route.directVision,

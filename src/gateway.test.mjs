@@ -141,7 +141,10 @@ test("applyToolPolicy strips hosted tool schemas", () => {
   const { tools: kept, stripped } = applyToolPolicy(tools);
   assert.equal(kept.length, 1);
   assert.equal(kept[0].name, "shell_command");
-  assert.equal(stripped.hosted, 3);
+  assert.equal(stripped.toolSearch, 1);
+  assert.equal(stripped.webSearch, 1);
+  assert.equal(stripped.otherHosted, 1);
+  assert.equal(stripped.toolSearch + stripped.webSearch + stripped.otherHosted, 3);
 });
 
 test("applyToolPolicy hides view_image for text-only models", () => {
@@ -302,9 +305,10 @@ test("redactBearer masks upstream tokens in error bodies", () => {
 test("relayResponses forwards a streamed response and records usage", async () => {
   const sink = collectStream();
   const res = responseStub(sink);
+  const blockedReports = [];
   const metrics = {
     begin: () => () => {},
-    recordResponseTransform: () => {},
+    recordResponseTransform: (report) => blockedReports.push(report.blocked),
     recordResponseUsage: () => {},
   };
   const affinity = new RouteAffinity();
@@ -348,6 +352,8 @@ test("relayResponses forwards a streamed response and records usage", async () =
     assert.equal(affinity.snapshot().activeCallIds, 1);
     const forwarded = Buffer.concat(sink.chunks).toString("utf8");
     assert.match(forwarded, /response\.completed/);
+    const blocked = blockedReports[blockedReports.length - 1];
+    assert.deepEqual(blocked, { tool_search: 0, web_search: 1 }, "web_search is counted separately from tool_search");
   } finally {
     globalThis.fetch = originalFetch;
   }
