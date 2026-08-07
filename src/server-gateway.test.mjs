@@ -8,7 +8,7 @@ import { mkdtemp } from "node:fs/promises";
 import { createApp, createServices } from "./server.mjs";
 import { OPENCODE_GO_PROFILE } from "./profiles.mjs";
 
-const TEST_PROFILE = { ...OPENCODE_GO_PROFILE, chatCampOverride: "responses" };
+const TEST_PROFILE = { ...OPENCODE_GO_PROFILE };
 
 function baseConfig() {
   return {

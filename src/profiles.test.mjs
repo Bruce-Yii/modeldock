@@ -5,8 +5,6 @@ import {
   DEEPSEEK_OFFICIAL_PROFILE,
   profileById,
   profileOptions,
-  HARNESS_WEB_SEARCH_TOOL,
-  HARNESS_VISION_TOOL,
   CONTEXT_WINDOW,
   AUTO_COMPACT_PERCENT,
   AUTO_COMPACT_TOKEN_LIMIT,
@@ -27,22 +25,16 @@ test("lists all profiles as selectable options", () => {
 test("opencode-go profile keeps the Go-specific hardening flags", () => {
   assert.equal(OPENCODE_GO_PROFILE.blockedToolTypes.has("tool_search"), true);
   assert.equal(OPENCODE_GO_PROFILE.blockedToolTypes.has("web_search"), true);
-  assert.equal(OPENCODE_GO_PROFILE.harnessToolNames.has("harness_web_search"), true);
-  assert.equal(OPENCODE_GO_PROFILE.harnessToolNames.has("vision_inspect"), true);
-  assert.ok(OPENCODE_GO_PROFILE.harnessTools.webSearch, "web search harness tool defined");
-  assert.ok(OPENCODE_GO_PROFILE.harnessTools.vision, "vision harness tool defined");
   assert.equal(OPENCODE_GO_PROFILE.compactCompletedToolHistory, undefined, "legacy transform flags are gone");
   assert.equal(OPENCODE_GO_PROFILE.toolSearchAsFunction, undefined, "legacy transform flags are gone");
+  assert.equal(OPENCODE_GO_PROFILE.harnessTools, undefined, "harness tool fields are gone");
 });
 
 test("deepseek-official profile routes the main model on DeepSeek with harness on the Go camp", () => {
   assert.equal(DEEPSEEK_OFFICIAL_PROFILE.blockedToolTypes.size, 0, "official API accepts every Codex local tool as type function");
-  assert.equal(DEEPSEEK_OFFICIAL_PROFILE.harnessToolNames.has("harness_web_search"), true);
-  assert.equal(DEEPSEEK_OFFICIAL_PROFILE.harnessToolNames.has("vision_inspect"), true);
-  assert.ok(DEEPSEEK_OFFICIAL_PROFILE.harnessTools.webSearch, "web search harness tool defined");
-  assert.ok(DEEPSEEK_OFFICIAL_PROFILE.harnessTools.vision, "vision harness tool defined");
   assert.equal(DEEPSEEK_OFFICIAL_PROFILE.compactCompletedToolHistory, undefined, "legacy transform flags are gone");
   assert.equal(DEEPSEEK_OFFICIAL_PROFILE.stripSyntheticReasoningPlaceholder, undefined, "legacy transform flags are gone");
+  assert.equal(DEEPSEEK_OFFICIAL_PROFILE.harnessTools, undefined, "harness tool fields are gone");
   assert.equal(DEEPSEEK_OFFICIAL_PROFILE.baseUrl, "https://api.deepseek.com");
   assert.equal(DEEPSEEK_OFFICIAL_PROFILE.tokenEnvName, "DEEPSEEK_API_KEY");
   assert.deepEqual(DEEPSEEK_OFFICIAL_PROFILE.availableModels.map((model) => model.id), ["deepseek-v4-flash", "deepseek-v4-pro"]);
@@ -82,11 +74,3 @@ test("every profile compacts at 80% of the model context window", () => {
   }
 });
 
-test("harness tool schemas stay immutable between profiles", () => {
-  const before = OPENCODE_GO_PROFILE.harnessTools.webSearch.name;
-  const cloned = structuredClone(HARNESS_WEB_SEARCH_TOOL);
-  cloned.name = "mutated";
-  assert.equal(OPENCODE_GO_PROFILE.harnessTools.webSearch.name, before, "profile schema unaffected by clone mutation");
-  assert.equal(HARNESS_WEB_SEARCH_TOOL.name, "harness_web_search");
-  assert.equal(HARNESS_VISION_TOOL.name, "vision_inspect");
-});

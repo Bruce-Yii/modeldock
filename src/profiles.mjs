@@ -1,64 +1,3 @@
-const HARNESS_WEB_SEARCH_TOOL = {
-  type: "function",
-  name: "harness_web_search",
-  description: "Search the public web through the local harness and return cited source results.",
-  parameters: {
-    type: "object",
-    properties: {
-      queries: { type: "array", items: { type: "string" }, minItems: 1 },
-      domains: { type: "array", items: { type: "string" } },
-      recency_days: { type: "integer", minimum: 1 },
-    },
-    required: ["queries"],
-  },
-};
-
-const HARNESS_VISION_TOOL = {
-  type: "function",
-  name: "vision_inspect",
-  description: "Inspect an image using a vision model. Pass EITHER a local absolute file path (path) of a screenshot you just took, OR an image_ref previously attached to the conversation. Provide the question you want answered about the image.",
-  parameters: {
-    type: "object",
-    properties: {
-      image_ref: { type: "string" },
-      compare_image_ref: { type: "string" },
-      path: { type: "string", description: "Absolute local file path of an image to inspect (e.g. D:/path/shot.png). Use this for screenshots you took yourself." },
-      question: { type: "string" },
-      mode: { type: "string", enum: ["general", "ocr", "ui", "chart", "compare"] },
-    },
-    required: ["question"],
-  },
-};
-
-const HARNESS_TTS_TOOL = {
-  type: "function",
-  name: "speak",
-  description: "Synthesize the given text into a local speech audio file (Microsoft Edge neural voice, no API key; works on Windows/macOS/Linux — the npm package calls Microsoft's endpoint). Returns the absolute file path of the generated audio (webm/opus) so it can be surfaced in the conversation or used by other tools.",
-  parameters: {
-    type: "object",
-    properties: {
-      text: { type: "string", description: "The text to speak aloud. Use short paragraphs for the best result." },
-      voice: { type: "string", description: "Voice name, e.g. zh-CN-XiaoxiaoNeural (Chinese female), en-US-AriaNeural (English female), ja-JP-NanamiNeural (Japanese female). Defaults to zh-CN-XiaoxiaoNeural." },
-      output: { type: "string", description: "Optional absolute file path for the generated audio. Defaults to a temp file." },
-    },
-    required: ["text"],
-  },
-};
-
-const HARNESS_STT_TOOL = {
-  type: "function",
-  name: "hear",
-  description: "Transcribe a local audio file into text using the Windows built-in speech recognizer (System.Speech, offline, no API key; Windows only — requires the target language recognizer and ffmpeg for non-WAV input). Returns the recognized text and a confidence score.",
-  parameters: {
-    type: "object",
-    properties: {
-      file: { type: "string", description: "Absolute local file path of the audio file to transcribe (mp3, wav, webm/opus, m4a)." },
-      language: { type: "string", description: "Optional language hint, e.g. zh-CN, en-US. Defaults to the installed Chinese recognizer." },
-      output: { type: "string", description: "Optional absolute file path for the intermediate WAV." },
-    },
-    required: ["file"],
-  },
-};
 
 // What we tell Codex each relayed model can hold. This is a working figure for the
 // upstreams we relay, not the headline number a vendor advertises for its own API:
@@ -206,13 +145,6 @@ const OPENCODE_GO_PROFILE = {
   tokenEnvName: "OPENCODE_GO_TOKEN",
 
   blockedToolTypes: new Set(["tool_search", "web_search"]),
-  harnessTools: {
-    webSearch: HARNESS_WEB_SEARCH_TOOL,
-    vision: HARNESS_VISION_TOOL,
-    tts: HARNESS_TTS_TOOL,
-    stt: HARNESS_STT_TOOL,
-  },
-  harnessToolNames: new Set(["harness_web_search", "vision_inspect", "speak", "hear"]),
   availableModels: [
     { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash", endpoint: "responses", supportsVision: false, contextWindow: 300_000, status: "available" },
     // Zen free tier: same OpenCode token, but the upstream is zen/v1 not zen/go/v1.
@@ -282,13 +214,6 @@ const DEEPSEEK_OFFICIAL_PROFILE = {
   // helper) is hidden because the model cannot interpret images — vision_inspect is the
   // gateway's text-model path for visuals. Native web_search stays (provider supports it).
   hiddenToolNames: new Set(["view_image"]),
-  harnessTools: {
-    webSearch: HARNESS_WEB_SEARCH_TOOL,
-    vision: HARNESS_VISION_TOOL,
-    tts: HARNESS_TTS_TOOL,
-    stt: HARNESS_STT_TOOL,
-  },
-  harnessToolNames: new Set(["harness_web_search", "vision_inspect", "speak", "hear"]),
   // Verified live (2026-08-04) against the real Codex tool set: the official Responses
   // API accepts every Codex local tool as long as it is declared type "function"
   // (shell_command, update_plan, mcp resources, request_user_input, view_image) and
@@ -392,4 +317,4 @@ export function tokenFor(config, model) {
   return config?.tokens?.[provider] || config?.goToken || "";
 }
 
-export { OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE, HARNESS_WEB_SEARCH_TOOL, HARNESS_VISION_TOOL };
+export { OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE };

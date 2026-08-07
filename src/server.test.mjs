@@ -7,7 +7,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createApp, createServices, codexModelCatalog } from "./server.mjs";
 import { OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE } from "./profiles.mjs";
 
-const TEST_PROFILE = { ...OPENCODE_GO_PROFILE, chatCampOverride: "responses" };
+const TEST_PROFILE = { ...OPENCODE_GO_PROFILE };
 
 function baseConfig() {
   return {
