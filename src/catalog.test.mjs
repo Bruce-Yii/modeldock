@@ -45,3 +45,11 @@ test("baseInstructionsFor includes the vision and restart guidance", () => {
   assert.match(instructions, /call vision_inspect/);
   assert.match(instructions, /restart\.ps1/);
 });
+
+test("baseInstructionsFor includes the design-first workflow", () => {
+  const instructions = baseInstructionsFor(configStub());
+  assert.match(instructions, /Design-first workflow \(MANDATORY before any frontend\/UI work\)/);
+  assert.match(instructions, /call image_gen first/);
+  assert.match(instructions, /call vision_inspect with that path/);
+  assert.match(instructions, /translate the vision_inspect observation into HTML\/CSS/);
+});
