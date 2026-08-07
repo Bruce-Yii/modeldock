@@ -77,9 +77,9 @@ test("every profile compacts at 80% of the model context window", () => {
   for (const profile of [OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE]) {
     const catalog = profile.modelCatalog({ mainModel: "deepseek-v4-flash", baseInstructions: "base" });
     const model = catalog.models[0];
-    assert.equal(model.context_window, CONTEXT_WINDOW);
-    assert.equal(model.max_context_window, CONTEXT_WINDOW);
-    assert.equal(model.auto_compact_token_limit, expected, `${profile.id} must auto-compact at 80% of context`);
+    assert.equal(model.context_window, 300_000, `${profile.id} declares deepseek-v4-flash at 300k`);
+    assert.equal(model.max_context_window, 300_000);
+    assert.equal(model.auto_compact_token_limit, Math.floor(300_000 * AUTO_COMPACT_PERCENT), `${profile.id} must auto-compact at 80% of the 300k window`);
   }
 });
 

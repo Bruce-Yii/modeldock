@@ -94,7 +94,8 @@ export const EXPERIMENTAL_SUPPORTED_TOOLS = ["artifact", "tool_call_mcp_elicitat
 // One catalog entry. Codex's model picker lists whatever the active provider returns
 // from /v1/models, so emitting an entry per available model is what makes them all
 // selectable at runtime - no config rewrite, no restart.
-function catalogEntry({ slug, displayName, description, compHash, inputModalities, supportsSearchTool, baseInstructions, defaultReasoningLevel, supportedReasoningLevels, priority }) {
+function catalogEntry({ slug, displayName, description, compHash, inputModalities, supportsSearchTool, baseInstructions, defaultReasoningLevel, supportedReasoningLevels, priority, contextWindow = CONTEXT_WINDOW }) {
+  const autoCompactTokenLimit = Math.floor(contextWindow * AUTO_COMPACT_PERCENT);
   return {
         slug,
         display_name: displayName,
@@ -113,10 +114,10 @@ function catalogEntry({ slug, displayName, description, compHash, inputModalitie
         use_responses_lite: false,
         include_skills_usage_instructions: false,
         auto_review_model_override: null,
-        context_window: CONTEXT_WINDOW,
-        max_context_window: CONTEXT_WINDOW,
+        context_window: contextWindow,
+        max_context_window: contextWindow,
         effective_context_window_percent: 95,
-        auto_compact_token_limit: AUTO_COMPACT_TOKEN_LIMIT,
+        auto_compact_token_limit: autoCompactTokenLimit,
         comp_hash: compHash,
         reasoning_summary_format: "experimental",
         default_reasoning_summary: "none",
@@ -147,6 +148,7 @@ function catalogEntry({ slug, displayName, description, compHash, inputModalitie
 
 function modelCatalogDefaults({ mainModel, displayName, description, compHash, inputModalities, supportsSearchTool, baseInstructions, defaultReasoningLevel = "high", supportedReasoningLevels = [ { effort: "low", description: "Fast responses with lighter reasoning" }, { effort: "high", description: "Deeper reasoning for complex work" }, { effort: "xhigh", description: "Extra-deep reasoning for hard problems" } ], availableModels = [], autoRouteEntry = null }) {
   const base = { compHash, supportsSearchTool, baseInstructions, defaultReasoningLevel, supportedReasoningLevels };
+  const contextWindowFor = (id) => availableModels.find((model) => model.id === id)?.contextWindow || CONTEXT_WINDOW;
   // Every provider's models in one list, each labelled with its source, so the picker
   // can switch upstream as well as model. The bare id stays with the default profile so
   // existing Codex configs keep resolving; another provider's copy of the same id is
@@ -165,12 +167,13 @@ function modelCatalogDefaults({ mainModel, displayName, description, compHash, i
         displayName: `${entry.label} - ${model.label || model.id}`,
         supportsVision: Boolean(model.supportsVision),
         providerLabel: entry.label,
+        contextWindow: model.contextWindow || CONTEXT_WINDOW,
       });
     }
   }
   return {
     models: [
-      catalogEntry({ ...base, slug: mainModel, displayName, description, inputModalities, priority: 1 }),
+      catalogEntry({ ...base, slug: mainModel, displayName, description, inputModalities, priority: 1, contextWindow: contextWindowFor(mainModel) }),
       // Synthetic entry: not a real upstream model, it is the gate's free-first routing
       // mode. Only Codex sees it - the dashboard keeps showing whichever model is
       // actually serving.
@@ -190,6 +193,7 @@ function modelCatalogDefaults({ mainModel, displayName, description, compHash, i
         // Codex sends images only to models that declare the modality; the gate still
         // reroutes visual turns to the vision model for the text-only ones.
         inputModalities: model.supportsVision ? ["text", "image"] : ["text"],
+        contextWindow: model.contextWindow,
         // 1 is the selected main model and 2 is the auto-route entry.
         priority: index + (autoRouteEntry ? 3 : 2),
       })),
@@ -234,7 +238,7 @@ const OPENCODE_GO_PROFILE = {
   },
   harnessToolNames: new Set(["harness_web_search", "vision_inspect", "speak", "hear"]),
   availableModels: [
-    { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash", endpoint: "responses", supportsVision: false, status: "available" },
+    { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash", endpoint: "responses", supportsVision: false, contextWindow: 300_000, status: "available" },
     { id: "deepseek-v4-flash-free", label: "DeepSeek V4 Flash Free", endpoint: "responses", free: true, supportsVision: false, quota5h: 100000, status: "available" },
     { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro", endpoint: "responses", supportsVision: false, status: "available" },
     { id: "glm-5", label: "GLM 5", endpoint: "responses", supportsVision: false, status: "available" },
@@ -310,7 +314,7 @@ const DEEPSEEK_OFFICIAL_PROFILE = {
   // Hosted web_search is native too (echoed in the response tools list); tool_search is
   // silently ignored. So the same allowlist as opencode-go works, and nothing is blocked.
   availableModels: [
-    { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash", endpoint: "responses", supportsVision: false, status: "available" },
+    { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash", endpoint: "responses", supportsVision: false, contextWindow: 300_000, status: "available" },
     { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro", endpoint: "responses", supportsVision: false, status: "available" },
   ],
 
@@ -327,6 +331,7 @@ const DEEPSEEK_OFFICIAL_PROFILE = {
       // (effort null). The Go camp's low/high/max triple does not fit it.
       defaultReasoningLevel: "medium",
       supportedReasoningLevels: DEEPSEEK_REASONING_LEVELS,
+      availableModels: DEEPSEEK_OFFICIAL_PROFILE.availableModels,
       baseInstructions,
     });
   },
