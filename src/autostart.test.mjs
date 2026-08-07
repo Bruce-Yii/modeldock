@@ -15,3 +15,13 @@ test("macOS plist launches the shell wrapper with a launchd-safe node environmen
   assert.match(xml, /<key>MODELDOCK_NODE_PATH<\/key><string>\/usr\/local\/Cellar\/node\/25\.4\.0\/bin\/node<\/string>/);
   assert.match(xml, /\/opt\/homebrew\/bin:\/usr\/local\/bin:\/usr\/bin:\/bin:\/usr\/sbin:\/sbin/);
 });
+
+test("macOS plist keeps an Apple Silicon Homebrew node on the launchd PATH", () => {
+  const xml = plistXml("/Users/me/.modeldock/scripts/start-hidden.sh", "/Users/me/.modeldock", {
+    nodePath: "/opt/homebrew/Cellar/node/25.4.0/bin/node",
+    tmpDir: "/tmp",
+  });
+
+  assert.match(xml, /<key>MODELDOCK_NODE_PATH<\/key><string>\/opt\/homebrew\/Cellar\/node\/25\.4\.0\/bin\/node<\/string>/);
+  assert.match(xml, /\/opt\/homebrew\/Cellar\/node\/25\.4\.0\/bin:\/opt\/homebrew\/bin:/);
+});
