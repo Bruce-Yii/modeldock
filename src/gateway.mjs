@@ -1,4 +1,7 @@
+import { Readable } from "node:stream";
 import { bareModelId, modelEntryFor, providerForModel } from "./profiles.mjs";
+import { recordUsageEvent } from "./usage-events.mjs";
+import { translateUpstreamError } from "./error-translation.mjs";
 import { RouteAffinity, routeResponsesRequest } from "./router.mjs";
 import { extractResponseUsage } from "./metrics.mjs";
 
@@ -332,13 +335,17 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     const upstreamBytes = Buffer.byteLength(JSON.stringify(normalizedPayload));
     if (!upstream.ok) {
       const raw = await upstream.text();
-      const body = redactBearer(raw);
+      // Translate before forwarding: name the failing provider, surface the
+      // innermost message, and classify quota exhaustion before the status
+      // mapping so a quota 429 does not read as "retry shortly".
+      const translated = translateUpstreamError({ provider: target.provider, status: upstream.status, bodyText: redactBearer(raw) });
+      const body = JSON.stringify(translated.body);
       if (!res.headersSent) {
         res.statusCode = upstream.status;
         res.setHeader("Content-Type", "application/json");
         res.end(body);
       }
-      finish?.({ ok: false, httpStatus: upstream.status, upstream: target.provider, error: body.slice(0, 400) });
+      finish?.({ ok: false, httpStatus: upstream.status, upstream: target.provider, error: translated.body.error.message.slice(0, 400) });
       metrics?.recordResponseTransform?.({
         blocked: { tool_search: stripped.toolSearch, web_search: stripped.webSearch },
         toolChoiceRewritten: false,
@@ -349,7 +356,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
         nativeToolOutputs: 0,
         fallbackToolResults: 0,
       }, { streaming: false, routeReason: route.reason });
-      return { ok: false, httpStatus: upstream.status, route, error: body.slice(0, 400), upstreamBytes };
+      return { ok: false, httpStatus: upstream.status, route, error: translated.body.error.message.slice(0, 400), upstreamBytes };
     }
 
     if (!res.headersSent) {
@@ -374,6 +381,17 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       fallbackToolResults: 0,
     }, { streaming: true, routeReason: route.reason });
     metrics?.recordResponseUsage?.({ bytesOut, usage });
+    // Injectable so unit tests do not append to the real ~/.modeldock file.
+    (services.recordUsage || recordUsageEvent)({
+      model: normalizedPayload.model,
+      provider: target.provider,
+      route: route.reason,
+      status: upstream.status,
+      durationMs: Date.now() - startedAt,
+      inputTokens: usage?.input_tokens,
+      outputTokens: usage?.output_tokens,
+      totalTokens: usage?.total_tokens,
+    });
     return {
       ok: true,
       httpStatus: upstream.status,

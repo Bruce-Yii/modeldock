@@ -28,6 +28,27 @@ if (Test-Path $envFile) {
 $listener = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($listener) {
   $oldPid = $listener.OwningProcess
+  # Ownership guard: the gateway records {pid, root} per port in
+  # ~/.modeldock/owner-<port>.json. If the recorded owner is a *different*
+  # checkout, killing it would swap live traffic onto this checkout's code -
+  # exactly the lookalike-instance mixup we have hit before. Refuse unless -Force.
+  $ownerFile = Join-Path $env:USERPROFILE ".modeldock\owner-$port.json"
+  if ((Test-Path $ownerFile) -and (-not $args.Contains("-Force"))) {
+    try {
+      $owner = Get-Content $ownerFile -Raw | ConvertFrom-Json
+      if ($owner.root -and $owner.pid -eq $oldPid) {
+        $ownerRoot = [System.IO.Path]::GetFullPath($owner.root)
+        $thisRoot = [System.IO.Path]::GetFullPath($root)
+        if ($ownerRoot -ne $thisRoot) {
+          Write-Output "ERROR: port $port is owned by a gateway from '$ownerRoot' (PID $oldPid); this script runs from '$thisRoot'."
+          Write-Output "Re-run with -Force to take the port over deliberately."
+          exit 1
+        }
+      }
+    } catch {
+      # Unreadable owner file: fall through and behave as before.
+    }
+  }
   Write-Output "restart.ps1: stopping gateway (PID $oldPid, port $port)"
   Stop-Process -Id $oldPid -Force
   for ($i = 0; $i -lt 20; $i += 1) {

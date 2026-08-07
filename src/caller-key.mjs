@@ -1,0 +1,50 @@
+import { randomBytes, timingSafeEqual } from "node:crypto";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+// Loopback binding does not stop a malicious web page in a local browser from
+// POSTing to http://127.0.0.1:<port>/v1/responses (fetch with mode:"no-cors"
+// fires even though the response is unreadable), which burns the upstream
+// tokens this process holds. Putting a capability key in the base URL closes
+// that: Codex reads base_url from config.toml, so the key rides along with zero
+// protocol changes, while a hostile page cannot learn it.
+
+export const CALLER_PATH_PREFIX = "/c";
+const KEY_FILE = path.join(os.homedir(), ".modeldock", "caller-key");
+const KEY_PATTERN = /^[A-Za-z0-9_-]{32,}$/;
+
+export function validCallerKey(value) {
+  return typeof value === "string" && KEY_PATTERN.test(value);
+}
+
+export function callerKeyEqual(actual, expected) {
+  if (typeof actual !== "string" || typeof expected !== "string") return false;
+  const a = Buffer.from(actual, "utf8");
+  const b = Buffer.from(expected, "utf8");
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+// Load the persisted key, minting one on first use. The key is generated
+// locally and is not a provider credential; losing it just means re-enabling
+// the Codex switch to write the new URL.
+export function loadOrCreateCallerKey(filePath = KEY_FILE) {
+  try {
+    const existing = readFileSync(filePath, "utf8").trim();
+    if (validCallerKey(existing)) return existing;
+  } catch {
+    // Missing or unreadable: mint below.
+  }
+  const key = randomBytes(32).toString("base64url");
+  try {
+    mkdirSync(path.dirname(filePath), { recursive: true });
+    writeFileSync(filePath, `${key}\n`, "utf8");
+  } catch {
+    // Unwritable state dir: the key still works for this process lifetime.
+  }
+  return key;
+}
+
+export function callerBasePath(key) {
+  return `${CALLER_PATH_PREFIX}/${key}/v1`;
+}

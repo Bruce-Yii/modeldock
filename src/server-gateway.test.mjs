@@ -32,6 +32,7 @@ function baseConfig() {
     exaApiKey: "",
     recentLimit: 50,
     debug: { noSessionCheck: true },
+    callerKey: "test-caller-key-0123456789abcdefghij",
   };
 }
 
@@ -285,4 +286,32 @@ test("gateway: historical images are replaced with refs, current images stay for
   assert.equal(seen[1].input[2].content[0].type, "input_text");
   const hasImageAnywhere = seen[1].input.some((item) => item.content?.some((part) => part.type === "input_image"));
   assert.equal(hasImageAnywhere, false, "the main model request carries no input_image at all");
+});
+
+test("caller-key routes: correct key relays, wrong key and enforced bare path 401", async (t) => {
+  const upstream = createServer((req, res) => {
+    res.setHeader("content-type", "text/event-stream");
+    res.end('data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1}}}\n\ndata: [DONE]\n\n');
+  });
+  const port = await listen(upstream);
+  t.after(() => upstream.close());
+  const instance = await startApp({ goBaseUrl: `http://127.0.0.1:${port}`, opencodeBaseUrl: `http://127.0.0.1:${port}` });
+  t.after(instance.stop);
+  const body = JSON.stringify({ model: "deepseek-v4-flash", stream: true, input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }] });
+  const headers = { "content-type": "application/json" };
+
+  const keyed = await fetch(`${instance.base}/c/test-caller-key-0123456789abcdefghij/v1/responses`, { method: "POST", headers, body });
+  assert.equal(keyed.status, 200, "the keyed path relays");
+  await keyed.text();
+
+  const wrong = await fetch(`${instance.base}/c/wrong-key-00000000000000000000000/v1/responses`, { method: "POST", headers, body });
+  assert.equal(wrong.status, 401, "a wrong key is rejected");
+
+  const models = await fetch(`${instance.base}/c/test-caller-key-0123456789abcdefghij/v1/models`);
+  assert.equal(models.status, 200, "the keyed models path serves the catalog");
+
+  process.env.MODELDOCK_REQUIRE_CALLER_KEY = "1";
+  t.after(() => { delete process.env.MODELDOCK_REQUIRE_CALLER_KEY; });
+  const bare = await fetch(`${instance.base}/v1/responses`, { method: "POST", headers, body });
+  assert.equal(bare.status, 401, "bare path is refused once enforcement is on");
 });

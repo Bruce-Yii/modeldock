@@ -87,8 +87,6 @@ const DEEPSEEK_REASONING_LEVELS = [
 // `tool_call_mcp_elicitation` = let the model request MCP tool schemas it does not have,
 // `workspace_dependencies` = codex_app.load_workspace_dependencies,
 // `computer_use` = desktop screen control, `browser_use` = Chrome control.
-import { NODE_REPL_MCP_TOOLS } from "./node-repl-tools.mjs";
-import { AUTO_FREE_MODEL_ID, AUTO_FREE_LABEL } from "./auto-route.mjs";
 export const EXPERIMENTAL_SUPPORTED_TOOLS = ["artifact", "tool_call_mcp_elicitation", "workspace_dependencies", "computer_use", "browser_use"];
 
 // One catalog entry. Codex's model picker lists whatever the active provider returns
@@ -194,7 +192,7 @@ function modelCatalogDefaults({ mainModel, displayName, description, compHash, i
         // reroutes visual turns to the vision model for the text-only ones.
         inputModalities: model.supportsVision ? ["text", "image"] : ["text"],
         contextWindow: model.contextWindow,
-        // 1 is the selected main model and 2 is the auto-route entry.
+        // 1 is the selected main model; the rest follow in provider order.
         priority: index + (autoRouteEntry ? 3 : 2),
       })),
     ],
@@ -208,28 +206,6 @@ const OPENCODE_GO_PROFILE = {
   tokenEnvName: "OPENCODE_GO_TOKEN",
 
   blockedToolTypes: new Set(["tool_search", "web_search"]),
-  // tool_search is Codex's client-side MCP-tool elicitation tool: the hosted schema 400s
-  // on the Go camp, so the transform bridges it to a function tool with the same name.
-  toolSearchAsFunction: true,
-  // When the session's tool list is missing the lazy-loaded MCP tools (Codex drops them
-  // when the node_repl server restarts, and re-elicitation via tool_search is not
-  // guaranteed), always inject the node_repl JavaScript tools so the model keeps a
-  // working Computer Use / browser automation entry point (`js` session + @oai/sky).
-  guaranteedMcpTools: NODE_REPL_MCP_TOOLS,
-  // Forward every Codex tool except view_image: it hands the model base64 it cannot
-  // interpret (text-only main model) and caused pixel-decode loops. vision_inspect is
-  // the single visual path — it analyzes AND surfaces the image into the conversation.
-  // Native web_search/tool_search are blocked above and replaced by harness_web_search.
-  hiddenToolNames: new Set(["view_image"]),
-  // Role of flattened tool receipts in history. "user" is the battle-tested default
-  // (TOOL_EXECUTION_COMPLETED as a user message, accepted by Go in every tested shape).
-  // "assistant" frames the same text as the agent's own statement ("I executed a tool
-  // call...") which may reduce the model pausing to "await instructions" after tool
-  // results; verified by Go probing to be equally accepted (end=tool and end=user).
-  receiptRole: "assistant",
-  compactCompletedToolHistory: true,
-  canonicalizeCallIds: true,
-  stripSyntheticReasoningPlaceholder: true,
   harnessTools: {
     webSearch: HARNESS_WEB_SEARCH_TOOL,
     vision: HARNESS_VISION_TOOL,
@@ -290,7 +266,6 @@ const OPENCODE_GO_PROFILE = {
       // Publish the whole curated catalog so every model is selectable from Codex's
       // own picker, not just the one the dashboard has selected.
       availableModels: OPENCODE_GO_PROFILE.availableModels,
-      autoRouteEntry: { id: AUTO_FREE_MODEL_ID, label: AUTO_FREE_LABEL },
     });
   },
 };
@@ -307,9 +282,6 @@ const DEEPSEEK_OFFICIAL_PROFILE = {
   // helper) is hidden because the model cannot interpret images — vision_inspect is the
   // gateway's text-model path for visuals. Native web_search stays (provider supports it).
   hiddenToolNames: new Set(["view_image"]),
-  compactCompletedToolHistory: true,
-  canonicalizeCallIds: true,
-  stripSyntheticReasoningPlaceholder: true,
   harnessTools: {
     webSearch: HARNESS_WEB_SEARCH_TOOL,
     vision: HARNESS_VISION_TOOL,

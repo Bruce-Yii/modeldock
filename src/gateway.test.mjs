@@ -27,8 +27,11 @@ function configStub() {
   };
 }
 
+// Decorate the underlying Writable with ServerResponse-shaped helpers instead of
+// wrapping it in a plain object: pipeGatewayStream uses stream .pipe(), which
+// needs a real Writable target (event emitter, backpressure) on the res side.
 function responseStub(res) {
-  return {
+  return Object.assign(res, {
     statusCode: 200,
     headersSent: false,
     headers: {},
@@ -38,19 +41,7 @@ function responseStub(res) {
     flushHeaders() {
       this.headersSent = true;
     },
-    write(chunk) {
-      res.write(chunk);
-    },
-    end(chunk) {
-      res.end(chunk);
-    },
-    destroy() {
-      res.destroy?.();
-    },
-    get bytesWritten() {
-      return res.bytesWritten;
-    },
-  };
+  });
 }
 
 function collectStream() {
@@ -295,6 +286,30 @@ test("pipeGatewayStream forwards bytes verbatim and feeds the tee", async () => 
   assert.equal(Buffer.concat(teeChunks).toString("utf8"), forwarded);
 });
 
+test("pipeGatewayStream settles when the client disconnects mid-stream", async () => {
+  // A client disconnect emits "close" without "finish". The pipe must settle
+  // (not hang forever) and must destroy the upstream reader so the fetch body
+  // stops being consumed.
+  let upstreamCancelled = false;
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(Buffer.from("data: first\n\n"));
+      // Never closes: simulates an upstream still streaming.
+    },
+    cancel() {
+      upstreamCancelled = true;
+    },
+  });
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const piping = pipeGatewayStream(body, res, null);
+  // Give the first chunk a tick to flow, then drop the client.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  res.emit("close");
+  await piping;
+  assert.equal(upstreamCancelled, true, "upstream body must be cancelled on client disconnect");
+});
+
 test("redactBearer masks upstream tokens in error bodies", () => {
   const text = "Authorization: Bearer sk-abcdef123456, url https://x";
   const redacted = redactBearer(text);
@@ -335,6 +350,7 @@ test("relayResponses forwards a streamed response and records usage", async () =
       },
       res,
       {
+        recordUsage: () => {},
         config: configStub(),
         metrics,
         routeAffinity: affinity,
@@ -372,6 +388,7 @@ test("relayResponses redacts upstream errors and never forwards the token", asyn
       { model: "deepseek-v4-flash", input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }] },
       res,
       {
+        recordUsage: () => {},
         config: configStub(),
         routeAffinity: new RouteAffinity(),
         knownModels: new Set(["deepseek-v4-flash"]),
@@ -399,6 +416,7 @@ test("relayResponses rejects requests without a configured upstream token", asyn
     { model: "deepseek-v4-flash", input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }] },
     res,
     {
+      recordUsage: () => {},
       config,
       routeAffinity: new RouteAffinity(),
       knownModels: new Set(["deepseek-v4-flash"]),

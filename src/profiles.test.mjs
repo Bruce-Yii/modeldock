@@ -27,23 +27,22 @@ test("lists all profiles as selectable options", () => {
 test("opencode-go profile keeps the Go-specific hardening flags", () => {
   assert.equal(OPENCODE_GO_PROFILE.blockedToolTypes.has("tool_search"), true);
   assert.equal(OPENCODE_GO_PROFILE.blockedToolTypes.has("web_search"), true);
-  assert.equal(OPENCODE_GO_PROFILE.compactCompletedToolHistory, true);
-  assert.equal(OPENCODE_GO_PROFILE.canonicalizeCallIds, true);
-  assert.equal(OPENCODE_GO_PROFILE.stripSyntheticReasoningPlaceholder, true);
   assert.equal(OPENCODE_GO_PROFILE.harnessToolNames.has("harness_web_search"), true);
   assert.equal(OPENCODE_GO_PROFILE.harnessToolNames.has("vision_inspect"), true);
   assert.ok(OPENCODE_GO_PROFILE.harnessTools.webSearch, "web search harness tool defined");
   assert.ok(OPENCODE_GO_PROFILE.harnessTools.vision, "vision harness tool defined");
+  assert.equal(OPENCODE_GO_PROFILE.compactCompletedToolHistory, undefined, "legacy transform flags are gone");
+  assert.equal(OPENCODE_GO_PROFILE.toolSearchAsFunction, undefined, "legacy transform flags are gone");
 });
 
 test("deepseek-official profile routes the main model on DeepSeek with harness on the Go camp", () => {
   assert.equal(DEEPSEEK_OFFICIAL_PROFILE.blockedToolTypes.size, 0, "official API accepts every Codex local tool as type function");
-  assert.equal(DEEPSEEK_OFFICIAL_PROFILE.compactCompletedToolHistory, true);
-  assert.equal(DEEPSEEK_OFFICIAL_PROFILE.stripSyntheticReasoningPlaceholder, true);
   assert.equal(DEEPSEEK_OFFICIAL_PROFILE.harnessToolNames.has("harness_web_search"), true);
   assert.equal(DEEPSEEK_OFFICIAL_PROFILE.harnessToolNames.has("vision_inspect"), true);
   assert.ok(DEEPSEEK_OFFICIAL_PROFILE.harnessTools.webSearch, "web search harness tool defined");
   assert.ok(DEEPSEEK_OFFICIAL_PROFILE.harnessTools.vision, "vision harness tool defined");
+  assert.equal(DEEPSEEK_OFFICIAL_PROFILE.compactCompletedToolHistory, undefined, "legacy transform flags are gone");
+  assert.equal(DEEPSEEK_OFFICIAL_PROFILE.stripSyntheticReasoningPlaceholder, undefined, "legacy transform flags are gone");
   assert.equal(DEEPSEEK_OFFICIAL_PROFILE.baseUrl, "https://api.deepseek.com");
   assert.equal(DEEPSEEK_OFFICIAL_PROFILE.tokenEnvName, "DEEPSEEK_API_KEY");
   assert.deepEqual(DEEPSEEK_OFFICIAL_PROFILE.availableModels.map((model) => model.id), ["deepseek-v4-flash", "deepseek-v4-pro"]);
