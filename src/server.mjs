@@ -1,6 +1,6 @@
 import path from "node:path";
 import os from "node:os";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { access, mkdir, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import express from "express";
@@ -991,7 +991,7 @@ export async function startServer(config = loadConfig()) {
   };
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {
   // One-time: encrypt any plaintext secrets in .env (backs up first, non-destructive).
   const migration = migrateEnvSecrets();
   if (migration.migrated > 0) {
