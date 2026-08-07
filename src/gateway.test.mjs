@@ -5,10 +5,12 @@ import {
   RouteAffinity,
   applyToolPolicy,
   createUsageTee,
+  currentTurnStartForTesting,
   normalizeGatewayInput,
   pipeGatewayStream,
   redactBearer,
   relayResponses,
+  rewriteHistoricalImages,
   routeGatewayRequest,
   upstreamTargetFor,
 } from "./gateway.mjs";
@@ -90,6 +92,43 @@ test("normalizeGatewayInput keeps non-compaction items untouched", () => {
   const item = { type: "function_call", call_id: "call_00_x", name: "ls", arguments: "{}" };
   const normalized = normalizeGatewayInput([item]);
   assert.deepEqual(normalized, [item]);
+});
+
+test("currentTurnStart is the item after the last assistant turn", () => {
+  const input = [
+    { type: "message", role: "user", content: [] },
+    { type: "message", role: "assistant", content: [] },
+    { type: "message", role: "user", content: [] },
+  ];
+  assert.equal(currentTurnStartForTesting(input), 2);
+  assert.equal(currentTurnStartForTesting([{ type: "message", role: "user", content: [] }]), 0);
+});
+
+test("rewriteHistoricalImages replaces only non-current images with refs", () => {
+  const mediaStore = {
+    put: (url) => `img_${url.length}`,
+  };
+  const input = [
+    { type: "message", role: "user", content: [{ type: "input_text", text: "before" }, { type: "input_image", image_url: "data:image/png;base64,AAAA" }] },
+    { type: "message", role: "assistant", content: [{ type: "output_text", text: "handled" }] },
+    { type: "message", role: "user", content: [{ type: "input_text", text: "current" }, { type: "input_image", image_url: "data:image/png;base64,BBBB" }] },
+  ];
+  const rewritten = rewriteHistoricalImages(input, mediaStore);
+  assert.match(rewritten[0].content[1].text, /\[Image attachment img_\d+\./);
+  assert.equal(rewritten[0].content[1].type, "input_text");
+  assert.equal(rewritten[2].content[1].type, "input_image", "current-turn image stays untouched");
+  assert.equal(rewritten[1], input[1], "assistant history is untouched");
+});
+
+test("rewriteHistoricalImages degrades to a plain placeholder without a media store", () => {
+  const input = [
+    { type: "message", role: "user", content: [{ type: "input_image", image_url: "https://example.com/x.png" }] },
+    { type: "message", role: "assistant", content: [] },
+    { type: "message", role: "user", content: [{ type: "input_text", text: "next" }] },
+  ];
+  const rewritten = rewriteHistoricalImages(input, null);
+  assert.equal(rewritten[0].content[0].type, "input_text");
+  assert.match(rewritten[0].content[0].text, /handled in a prior turn/);
 });
 
 test("applyToolPolicy strips hosted tool schemas", () => {

@@ -233,3 +233,56 @@ test("gateway: hosted tool schemas are stripped before reaching the upstream", a
   const names = (received.tools || []).map((tool) => tool.name);
   assert.deepEqual(names, ["shell_command"]);
 });
+
+test("gateway: historical images are replaced with refs, current images stay for the vision model", async (t) => {
+  const seen = [];
+  const upstream = createServer(async (req, res) => {
+    const body = await jsonBody(req);
+    seen.push({ model: body.model, input: body.input });
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({
+      id: `resp_${seen.length}`,
+      output: [{ id: "msg", type: "message", role: "assistant", content: [{ type: "output_text", text: "ok" }] }],
+      usage: {},
+    }));
+  });
+  const port = await listen(upstream);
+  t.after(() => upstream.close());
+  const instance = await startApp({ goBaseUrl: `http://127.0.0.1:${port}`, opencodeBaseUrl: `http://127.0.0.1:${port}` });
+  t.after(instance.stop);
+
+  // Turn 1: image in the current turn -> escalated to the vision model, image bytes kept.
+  const imageUrl = "data:image/png;base64,AAAA";
+  await fetch(`${instance.base}/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "deepseek-v4-flash",
+      input: [{ type: "message", role: "user", content: [{ type: "input_image", image_url: imageUrl }] }],
+    }),
+  });
+  assert.equal(seen[0].model, "gpt-5.6-luna");
+  assert.equal(seen[0].input[0].content[0].type, "input_image", "current-turn image reaches the vision model");
+
+  // Turn 2: the same image now lives in history plus a text question.
+  // The main model must not receive the image bytes again.
+  await fetch(`${instance.base}/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "deepseek-v4-flash",
+      input: [
+        { type: "message", role: "user", content: [{ type: "input_image", image_url: imageUrl }] },
+        { type: "message", role: "assistant", content: [{ type: "output_text", text: "The image shows a chart." }] },
+        { type: "message", role: "user", content: [{ type: "input_text", text: "What was the y-axis?" }] },
+      ],
+    }),
+  });
+  assert.equal(seen[1].model, "deepseek-v4-flash", "text-only follow-up returns to the main model");
+  const historyPart = seen[1].input[0].content[0];
+  assert.equal(historyPart.type, "input_text", "historical image is not re-sent as bytes");
+  assert.match(historyPart.text, /\[Image attachment img_[a-f0-9]+/);
+  assert.equal(seen[1].input[2].content[0].type, "input_text");
+  const hasImageAnywhere = seen[1].input.some((item) => item.content?.some((part) => part.type === "input_image"));
+  assert.equal(hasImageAnywhere, false, "the main model request carries no input_image at all");
+});

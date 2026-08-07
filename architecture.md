@@ -147,6 +147,14 @@ Allowed `input` transformations (the complete list):
   summary messages.
 - Return a friendly 400 if an `input_image` part reaches a text-only model,
   instead of forwarding a payload Go will reject.
+- Replace `input_image` parts in non-current turns with a lightweight
+  `image_ref` placeholder text; the media store keeps the image so
+  `vision_inspect` can re-read it. Current-turn images stay untouched (they are
+  either escalated to the vision model or read by a vision-capable main model).
+  Without this, a pasted screenshot would be re-sent to the text-only main model
+  on every later turn (hundreds of KB per request) and silently ignored
+  (DeepSeek official returns `NO_IMAGE_RECEIVED`; Go rejects it), with no way to
+  recover the pixels except `vision_inspect`.
 
 Direct image escalation (pasted images and tool screenshots):
 

@@ -47,6 +47,56 @@ export function normalizeGatewayInput(input) {
     });
 }
 
+// A message is "current" when it follows the last assistant turn. Only those
+// images may reach the upstream: the request is either escalated to the vision
+// model or the main model itself can see images. Images in earlier turns were
+// already handled (often by the vision model) and re-sending their bytes on every
+// turn burns tokens the text-only main model cannot use.
+function currentTurnStart(input) {
+  if (!Array.isArray(input)) return 0;
+  let start = 0;
+  for (let index = 0; index < input.length; index += 1) {
+    if (input[index]?.role === "assistant") start = index + 1;
+  }
+  return start;
+}
+
+export function currentTurnStartForTesting(input) {
+  return currentTurnStart(input);
+}
+
+// Replace input_image parts in non-current turns with a lightweight image_ref
+// placeholder. The media store keeps the image so vision_inspect can re-read it.
+// Current-turn images stay untouched (they are either escalated or read by a
+// vision-capable main model). Without a media store the rewrite is a no-op, so a
+// partial services stub stays safe.
+export function rewriteHistoricalImages(input, mediaStore) {
+  if (!Array.isArray(input)) return input;
+  const turnStart = currentTurnStart(input);
+  return input.map((item, index) => {
+    if (!item || typeof item !== "object" || !Array.isArray(item.content) || index >= turnStart) return item;
+    let changed = false;
+    const content = item.content.map((part) => {
+      if (!part || typeof part !== "object" || part.type !== "input_image" || typeof part.image_url !== "string") return part;
+      changed = true;
+      if (!mediaStore) {
+        return { type: "input_text", text: "[An image was attached earlier in this conversation. Its visual contents were handled in a prior turn; do not re-inspect unless the user asks a new visual question.]" };
+      }
+      let ref;
+      try {
+        ref = mediaStore.put(part.image_url);
+      } catch {
+        return { type: "input_text", text: "[An image was attached earlier in this conversation. Its visual contents were handled in a prior turn; do not re-inspect unless the user asks a new visual question.]" };
+      }
+      return {
+        type: "input_text",
+        text: `[Image attachment ${ref}. Its visual contents were handled in a prior turn. Use vision_inspect with image_ref "${ref}" if a new visual question arises.]`,
+      };
+    });
+    return changed ? { ...item, content } : item;
+  });
+}
+
 // Tool policy: keep standard function/custom tools, flatten MCP namespaces so
 // text models see plain functions, and strip hosted schemas plus tools the model
 // cannot use. Returns the filtered list and a report of what was removed.
@@ -203,7 +253,7 @@ export async function pipeGatewayStream(upstreamBody, res, tee) {
 // `services` carries { config, metrics, mediaStore, routeAffinity, modelSelection,
 // knownModels, visionModelOf } so the caller decides wiring.
 export async function relayResponses(payload, res, services, { signal } = {}) {
-  const { config, metrics, routeAffinity, knownModels } = services;
+  const { config, metrics, mediaStore, routeAffinity, knownModels } = services;
   const mainModel = services.mainModel || config.mainModel;
   const visionModel = services.visionModel || config.visionModel;
   const route = routeGatewayRequest(payload, {
@@ -215,7 +265,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
 
   const normalizedPayload = {
     ...payload,
-    input: normalizeGatewayInput(payload.input),
+    input: rewriteHistoricalImages(normalizeGatewayInput(payload.input), mediaStore),
     model: route.model,
   };
   delete normalizedPayload.client_metadata;
