@@ -5,12 +5,13 @@
 // - macOS: a per-user LaunchAgent (~/Library/LaunchAgents/com.modeldock.gateway.plist)
 //   that launchd loads at login and keeps running. No sudo needed.
 //
-// The autostart entry points at the built bundle (dist/modeldock.mjs) when present and
-// falls back to src/server.mjs in a git checkout, so the same module serves dev and
-// installed layouts.
+// The autostart entry points at scripts/start-hidden.*. On macOS launchd starts
+// with a sparse PATH and first-run autostart can race the installer-started
+// gateway, so keep that logic in the launcher instead of hardcoding a Node binary
+// and server entry in the plist.
 
 import { execFile } from "node:child_process";
-import { access, mkdir, unlink, writeFile } from "node:fs/promises";
+import { mkdir, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -28,14 +29,6 @@ function runFile(platform) {
     : path.join(dirname, "..", "scripts", "start-hidden.sh");
 }
 
-function serverEntryPath(root) {
-  const bundle = path.join(root, "dist", "modeldock.mjs");
-  const source = path.join(root, "src", "server.mjs");
-  return access(bundle)
-    .then(() => bundle)
-    .catch(() => source);
-}
-
 function exec(cmd, args) {
   return new Promise((resolve, reject) => {
     execFile(cmd, args, { windowsHide: true }, (error, stdout, stderr) => {
@@ -45,24 +38,48 @@ function exec(cmd, args) {
   });
 }
 
-function plistXml(entryPath, rootDir) {
-  // launchd starts agents with a bare PATH (/usr/bin:/bin:...) that does not include
-  // Homebrew or nvm, so "env node" would fail on most Macs. This process IS node, so
-  // process.execPath is an absolute node path that is known to work.
+function xmlEscape(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&apos;");
+}
+
+export function plistXml(launcherPath, rootDir, {
+  nodePath = process.execPath,
+  tmpDir = os.tmpdir(),
+} = {}) {
+  const pathDirs = [
+    path.dirname(nodePath),
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "/usr/bin",
+    "/bin",
+    "/usr/sbin",
+    "/sbin",
+  ];
+  const launchPath = [...new Set(pathDirs.filter(Boolean))].join(":");
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
   <key>Label</key><string>${PLIST_LABEL}</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>${xmlEscape(launchPath)}</string>
+    <key>MODELDOCK_NODE_PATH</key><string>${xmlEscape(nodePath)}</string>
+  </dict>
   <key>ProgramArguments</key>
   <array>
-    <string>${process.execPath}</string>
-    <string>${entryPath}</string>
+    <string>/bin/sh</string>
+    <string>${xmlEscape(launcherPath)}</string>
   </array>
   <key>RunAtLoad</key><true/>
-  <key>WorkingDirectory</key><string>${rootDir}</string>
-  <key>StandardOutPath</key><string>${path.join(os.tmpdir(), "modeldock.log")}</string>
-  <key>StandardErrorPath</key><string>${path.join(os.tmpdir(), "modeldock.log")}</string>
+  <key>WorkingDirectory</key><string>${xmlEscape(rootDir)}</string>
+  <key>StandardOutPath</key><string>${xmlEscape(path.join(tmpDir, "modeldock.log"))}</string>
+  <key>StandardErrorPath</key><string>${xmlEscape(path.join(tmpDir, "modeldock.log"))}</string>
 </dict>
 </plist>`;
 }
@@ -109,9 +126,8 @@ export function createAutostart({
     const plistPath = path.join(home, "Library", "LaunchAgents", PLIST_NAME);
     if (enabled) {
       const rootDir = path.resolve(dirname, "..");
-      const entryPath = await serverEntryPath(rootDir);
       await mkdir(path.dirname(plistPath), { recursive: true });
-      await writeFile(plistPath, plistXml(entryPath, rootDir), "utf8");
+      await writeFile(plistPath, plistXml(launcherPath, rootDir), "utf8");
       await exec("launchctl", ["unload", plistPath]).catch(() => {});
       await exec("launchctl", ["load", "-w", plistPath]);
     } else {
