@@ -56,4 +56,21 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
-      - run: node --test test/install-mock.test.mjs
+      # tee the test output and surface the tail in the run summary on failure:
+      # summaries are readable without signing in, job logs are not, and this
+      # job has never been green - the summary is the only anonymous diagnostic.
+      - name: Mock install test
+        shell: bash
+        run: |
+          set -o pipefail
+          node --test test/install-mock.test.mjs 2>&1 | tee mock-install.log
+      - name: Surface failure output in the run summary
+        if: failure()
+        shell: bash
+        run: |
+          {
+            echo "### install-macos mock test output (tail)"
+            echo '```'
+            tail -120 mock-install.log 2>/dev/null || echo "(no log captured)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
