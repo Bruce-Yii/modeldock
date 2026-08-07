@@ -59,7 +59,6 @@ test("disabled md_memory leaves the payload untouched and revives nothing", asyn
   assert.equal(asked, 0, "no summarizer call when the line is off");
   assert.equal(JSON.stringify(payload), before, "the client's history is forwarded verbatim");
   assert.equal(memory.sessionSummaries.size, 0);
-  assert.equal(memory.checkSessionCompletion("ses_off", payload, "done"), null, "no anti-breakpoint revival either");
   assert.equal(memory.state().enabled, false);
 });
 
@@ -75,15 +74,6 @@ test("reasoning cache stays available when the line is off (protocol, not compre
   assert.equal("summary" in filled.input[0], false, "the summary is moved, not copied (it would bill twice)");
 });
 
-test("anti-breakpoint revival is rate limited per session", () => {
-  const memory = createMdMemory({ summariesFile: tmpSummaries() });
-  const payload = { input: [{ role: "assistant", content: [{ type: "output_text", text: "all done" }] }], tools: [{ name: "shell_command" }] };
-  const first = memory.checkSessionCompletion("ses_r", payload, "all done");
-  assert.ok(first, "the first plain-text turn is revived");
-  assert.match(JSON.stringify(first), /session continuation/);
-  assert.match(JSON.stringify(first), /shell_command/, "the revival lists the tools still available");
-  assert.equal(memory.checkSessionCompletion("ses_r", payload, "all done"), null, "a second revival inside 30s is refused");
-});
 
 test("each stage refuses on its own when disabled, not just via run()", async () => {
   // The stages are exported, so a future call site could reach one directly; the

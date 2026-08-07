@@ -8,7 +8,12 @@ import path from "node:path";
 // call for side-tasks (callModelText) already respects the active profile, and the
 // payload surgery below is wire-format agnostic.
 //
-// The line is made of three cooperating pieces:
+// Session revival is NOT part of this line: it lives in src/session-checker.mjs and
+// runs whether md_memory is on or off. It compacts nothing - it only decides whether a
+// session that ended on plain text should keep going - so switching the memory line off
+// to evaluate the client's own context management must not take continuity with it.
+//
+// The line is made of two cooperating pieces:
 //   1. Rolling session summaries  - when a session's assistant history grows past
 //      a threshold, the oldest portion is summarized by the main model into a
 //      compact structured block that stays pinned in context. The summary rolls
@@ -22,16 +27,11 @@ import path from "node:path";
 //      reasoning history itself is clipped newest-first (RECENT_REASONING items
 //      and REASONING_BUDGET_BYTES total) because old thinking text is dead
 //      weight - reasoning is the single largest source of per-call variance.
-//   3. Anti-breakpoint revival    - a plain-text turn (no tool call) means the
-//      model is about to end the session; splice the rolling summary + this
-//      turn's text + tool names back as a user message and let the upstream
-//      decide. Rate-limited to once per session per 30s.
 
 const SUMMARY_TRIGGER_BYTES = 200_000; // assistant text beyond this triggers compaction
 const SUMMARY_WINDOW_ITEMS = 200; // sliding window: assistant messages kept verbatim
 const SUMMARY_INPUT_LIMIT = 100_000; // summarizer input cap (head+tail), chars
 const SUMMARY_DEBOUNCE_MS = 5 * 60_000; // one fresh summary per session per 5min
-const SESSION_CHECK_INTERVAL_MS = 30_000; // anti-breakpoint rate limit
 const MAX_SESSION_SUMMARIES = 200; // per-session summaries bounded like reasoning/media
 const MAX_REASONING_ENTRIES = 256; // reasoning id -> text LRU
 const RECENT_REASONING = 6; // keep the newest N reasoning items
@@ -91,9 +91,6 @@ export function createMdMemory(deps = {}) {
 
   // --- Rolling per-session summaries (session_id -> { text, at }) -------------
   const sessionSummaries = new Map();
-  // Session completion checker state: session_id -> { at, answer }. Fire-and-forget
-  // model calls asked at most once per session per 30s.
-  const sessionChecks = new Map();
   let summariesSaveTimer = null;
   const saveSummaries = () => {
     if (!summariesFile) return;
@@ -264,51 +261,6 @@ export function createMdMemory(deps = {}) {
     }
   };
 
-  // Anti-breakpoint revival, purely local - no side API call, no verdict logic.
-  // A plain-text turn (no tool calls) means the model is about to end the
-  // session; splice the rolling summary + this turn's own last text + the
-  // available tool names back into the conversation as a user message and let
-  // the upstream decide whether to continue on the same stream. Rate-limited to
-  // once per session per 30s so a stuck model can never loop faster than that.
-  const checkSessionCompletion = (key, payload, currentTurnText = "") => {
-    if (!enabled) return null;
-    const now = Date.now();
-    const last = sessionChecks.get(key);
-    if (last && now - last.at < SESSION_CHECK_INTERVAL_MS) return null;
-    const input = Array.isArray(payload.input) ? payload.input : [];
-    const lastText = currentTurnText.trim() || (() => {
-      for (let i = input.length - 1; i >= 0; i--) {
-        const item = input[i];
-        if (item?.role !== "assistant") continue;
-        const text = Array.isArray(item.content) ? item.content.map((p) => p.text || "").join(" ") : item.content || "";
-        if (text.trim()) return text.trim().slice(0, 1_000);
-      }
-      return "";
-    })();
-    const toolNames = (Array.isArray(payload.tools) ? payload.tools : [])
-      .map((tool) => tool?.name || tool?.function?.name)
-      .filter(Boolean)
-      .slice(0, 40)
-      .join(", ");
-    sessionChecks.set(key, { at: now, answer: lastText.slice(0, 200) || "(no text)", state: "continue" });
-    debugLog(`session check (${key}): revive ${lastText.slice(0, 120)}`);
-    // The payload already carries the summary block (applySummaryToPayload ran
-    // before this turn was relayed); embedding a second copy in the continuation
-    // message is redundant and was observed to precede upstream stalls.
-    return {
-      role: "user",
-      content: [{
-        type: "input_text",
-        text: [
-          "[session continuation - continue working on the task]",
-          `YOUR LAST TEXT:\n${lastText}`,
-          `AVAILABLE TOOLS: ${toolNames || "(none)"}`,
-          "[end session continuation]",
-        ].filter(Boolean).join("\n\n"),
-      }],
-    };
-  };
-
   // Entry point for the relay: run the rolling-summary stage for one request.
   // Debounced so a long generation burst only re-summarizes every 5 minutes;
   // between generations the stored summary is applied locally (sliding window).
@@ -339,11 +291,9 @@ export function createMdMemory(deps = {}) {
     SUMMARY_TRIGGER_BYTES,
     SUMMARY_WINDOW_ITEMS,
     SUMMARY_DEBOUNCE_MS,
-    SESSION_CHECK_INTERVAL_MS,
     MAX_SESSION_SUMMARIES,
     // state
     sessionSummaries,
-    sessionChecks,
     reasoningCache,
     // reasoning helpers
     rememberReasoning,
@@ -356,6 +306,5 @@ export function createMdMemory(deps = {}) {
     summarizeHistory,
     run,
     // anti-breakpoint
-    checkSessionCompletion,
   };
 }

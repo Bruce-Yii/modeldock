@@ -10,6 +10,7 @@ import { MediaStore } from "./media-store.mjs";
 import { Metrics, extractResponseUsage, extractUsageFromSse } from "./metrics.mjs";
 import { transformResponsesRequest } from "./transform.mjs";
 import { createMdMemory } from "./md-memory.mjs";
+import { createSessionChecker } from "./session-checker.mjs";
 import { createUpstreams } from "./upstreams.mjs";
 import { createMcpNodeHandler } from "./mcp.mjs";
 import { LiveResponsesWriter, parseSse } from "./live-responses.mjs";
@@ -670,9 +671,9 @@ async function relayLiveResponses(payload, res, services, signal, { autoRoute = 
       // the same SSE stream. Rate-limited to once per session per 30s, so a model
       // stuck in a loop can only be revived every 30s at most. Applies to every
       // profile (the md_memory line); disable with debug.noSessionCheck.
-      if (mode === "text" && services.memory && !services.config.debug?.noSessionCheck) {
+      if (mode === "text" && services.checker && !services.config.debug?.noSessionCheck) {
         const key = payload?.client_metadata?.session_id || payload?.client_metadata?.thread_id || "default";
-        const revive = services.memory.checkSessionCompletion(key, payload, writer.message?.text || "");
+        const revive = services.checker.check(key, payload, writer.message?.text || "");
         if (revive) {
           currentPayload = { ...currentPayload, input: [...(currentPayload.input || []), revive], stream: true };
           mode = null;
@@ -1331,6 +1332,8 @@ export function createServices(config = loadConfig()) {
   // object (debugLog reads config.debug, the summarizer side-call needs the transport).
   // Filled in by the Object.assign at the end of this function.
   const services = {};
+  // Session continuity, independent of the memory line: see session-checker.mjs.
+  const checker = createSessionChecker({ debugLog: (message) => debugLog(services, message) });
   const memory = createMdMemory({
     enabled: mutableConfig.mdMemory !== false,
     // Path is configurable so tests can point it at a temp dir instead of the real
@@ -1406,10 +1409,13 @@ export function createServices(config = loadConfig()) {
     config: mutableConfig, runtime, metrics, mediaStore, upstreams, configSwitcher,
     autostart, updater, autoRoute, routeAffinity, modelSelection,
     memory,
-    // The md_memory state is reached through `memory`; these aliases keep the
-    // dashboard and tests reading one obvious place.
+    // Session continuity is its own tool, not part of the memory line: it survives
+    // MODELDOCK_MD_MEMORY=0 and has its own escape hatch (debug.noSessionCheck).
+    checker,
+    // State is reached through `memory` / `checker`; these aliases keep the dashboard
+    // and tests reading one obvious place.
     sessionSummaries: memory.sessionSummaries,
-    sessionChecks: memory.sessionChecks,
+    sessionChecks: checker.sessionChecks,
     refreshModelCatalog, modelRefreshTimer,
     setActiveSessionSeed: (seed) => { activeSessionSeed = seed; },
   });
