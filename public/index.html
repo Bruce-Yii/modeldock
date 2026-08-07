@@ -90,12 +90,10 @@
       </section>
 
       <section class="metric-grid">
-        <article class="metric-card accent-blue wave-card">
-          <div class="metric-head"><span data-i18n="metric.requests">Requests</span><b><span id="active-requests">0 active</span> · <span id="requests-total">0</span> <span data-i18n="metric.total">total</span></b></div>
-          <div class="wave-stats"><span><b id="cache-last">—</b> <span data-i18n="metric.cacheLast">cache last</span></span><span><b id="cache-avg">—</b> <span data-i18n="metric.cacheAvg">avg</span></span></div>
-          <div class="wave-wrap">
-            <canvas id="cache-wave" width="340" height="92"></canvas>
-          </div>
+        <article class="metric-card accent-blue">
+          <div class="metric-head"><span data-i18n="metric.requests">Requests</span><b id="active-requests">0 active</b></div>
+          <strong class="metric-value" id="requests-total">0</strong>
+          <div class="meter"><i id="requests-success-meter"></i></div>
           <p><span id="requests-success">0%</span> <span data-i18n="metric.successful">successful</span> · <span id="requests-latency">0 ms</span> <span data-i18n="metric.avg">avg</span></p>
         </article>
         <article class="metric-card accent-violet">
