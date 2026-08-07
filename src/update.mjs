@@ -77,6 +77,14 @@ function updateRepo() {
   return process.env.MODELDOCK_UPDATE_REPO || DEFAULT_REPO;
 }
 
+// Optional token for the GitHub API check. Anonymous requests share the caller's
+// public IP rate budget (60/hour), which shared/NAT egress can exhaust; a token
+// (MODELDOCK_GITHUB_TOKEN or GITHUB_TOKEN) raises that and keeps the Update
+// button reliable. Without a token the check still runs anonymously.
+function updateToken() {
+  return process.env.MODELDOCK_GITHUB_TOKEN || process.env.GITHUB_TOKEN || "";
+}
+
 function isGitCheckout() {
   return existsSync(path.join(root, ".git"));
 }
@@ -164,9 +172,15 @@ export function createUpdater({ fetchImpl = fetch } = {}) {
 
   async function check() {
     try {
+      const headers = {
+        accept: "application/vnd.github+json",
+        "user-agent": "modeldock-updater",
+      };
+      const token = updateToken();
+      if (token) headers.authorization = `Bearer ${token}`;
       const response = await fetchImpl(`https://api.github.com/repos/${updateRepo()}/releases/latest`, {
         signal: AbortSignal.timeout(CHECK_TIMEOUT_MS),
-        headers: { accept: "application/vnd.github+json", "user-agent": "modeldock-updater" },
+        headers,
       });
       if (!response.ok) throw new Error(`Release check: HTTP ${response.status}`);
       const parsed = parseLatestRelease(await response.json(), state.currentVersion);

@@ -65,6 +65,26 @@ test("createUpdater.check populates state from the release endpoint", async () =
   assert.ok(state.checkedAt > 0);
 });
 
+test("createUpdater.check sends a bearer token when configured", async () => {
+  process.env.MODELDOCK_GITHUB_TOKEN = "test-token";
+  try {
+    let seenHeaders = null;
+    const fetchImpl = async (_url, options) => {
+      seenHeaders = options.headers;
+      return {
+        ok: true,
+        json: async () => ({ tag_name: "v0.2.0", html_url: "", assets: [] }),
+      };
+    };
+    const updater = createUpdater({ fetchImpl });
+    await updater.check();
+    assert.equal(seenHeaders.authorization, "Bearer test-token");
+    assert.equal(seenHeaders.accept, "application/vnd.github+json");
+  } finally {
+    delete process.env.MODELDOCK_GITHUB_TOKEN;
+  }
+});
+
 test("createUpdater.check records errors without throwing", async () => {
   const fetchImpl = async () => ({ ok: false, status: 503 });
   const updater = createUpdater({ fetchImpl });
