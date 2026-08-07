@@ -18,8 +18,9 @@ Responses bridge for OpenCode Go and DeepSeek official.
 ## Why Model Dock For Codex
 
 DeepSeek V4 Flash is fast and cheap, but it cannot see, speak, or listen, and
-its Responses endpoint has no hosted search. Model Dock For Codex adds all four
-as tools, without rewriting the conversation history:
+the OpenCode Go Responses endpoint it runs through has no hosted search (the
+DeepSeek official endpoint does). Model Dock For Codex adds all four as tools,
+without rewriting the conversation history:
 
 - **See** - paste an image into Codex and the request is routed to the vision
   model you chose in Settings, or let the model call `vision_inspect` on a
@@ -131,8 +132,9 @@ menu does not remove ModelDock or delete the backup.
 Responses 桥接层连接 OpenCode Go 与 DeepSeek 官方 API。
 
 DeepSeek V4 Flash 又快又便宜，但它看不见、听不到、不会说话，Responses
-端点也没有内置搜索。Model Dock For Codex 以工具的形式补全这四项能力，且不
-改写对话历史：
+端点也没有内置搜索——确切地说，它所经过的 OpenCode Go Responses 端点没有
+内置搜索（DeepSeek 官方端点有）。Model Dock For Codex 以工具的形式补全这
+四项能力，且不改写对话历史：
 
 - **看图** - 把图片粘贴进 Codex，请求会自动路由到你在设置中选择的视觉模型；
   也可以让模型对截图或文件调用 `vision_inspect`。
@@ -226,8 +228,9 @@ DeepSeek に目、耳、声、そしてウェブ検索を - 薄い Responses ブ
 OpenCode Go と DeepSeek 公式 API をつなぎます。
 
 DeepSeek V4 Flash は速くて安い一方、画像を見られず、話せず、聞けず、
-Responses エンドポイントには検索機能もありません。Model Dock For Codex は
-これら 4 つをツールとして追加し、会話履歴は書き換えません：
+それが経由する OpenCode Go の Responses エンドポイントには検索機能も
+ありません（DeepSeek 公式エンドポイントにはあります）。Model Dock For
+Codex はこれら 4 つをツールとして追加し、会話履歴は書き換えません：
 
 - **見る** - 画像を Codex に貼り付けると、リクエストは設定で選択した
   ビジョンモデルにルーティングされます。スクリーンショットや
@@ -333,9 +336,10 @@ Donnez à DeepSeek des yeux, des oreilles, une voix et un accès au web - via un
 mince pont Responses vers OpenCode Go et l'API officielle DeepSeek.
 
 DeepSeek V4 Flash est rapide et économique, mais il ne voit pas, ne parle pas,
-n'écoute pas, et son endpoint Responses n'a pas de recherche intégrée. Model
-Dock For Codex ajoute ces quatre capacités comme outils, sans réécrire
-l'historique de conversation :
+n'écoute pas, et l'endpoint Responses d'OpenCode Go par lequel il passe n'a pas
+de recherche intégrée (l'endpoint officiel DeepSeek en a une). Model Dock For
+Codex ajoute ces quatre capacités comme outils, sans réécrire l'historique de
+conversation :
 
 - **Voir** - collez une image dans Codex et la requête est routée vers le modèle
   de vision choisi dans les réglages, ou laissez le modèle appeler
@@ -443,8 +447,9 @@ sauvegardes.
 Dale a DeepSeek ojos, oídos, voz y acceso a la web - mediante un puente fino de
 Responses hacia OpenCode Go y la API oficial de DeepSeek.
 
-DeepSeek V4 Flash es rápido y barato, pero no ve, no habla, no escucha y su
-endpoint Responses no tiene búsqueda integrada. Model Dock For Codex añade estas
+DeepSeek V4 Flash es rápido y barato, pero no ve, no habla, no escucha y el
+endpoint Responses de OpenCode Go por el que pasa no tiene búsqueda integrada
+(el endpoint oficial de DeepSeek sí la tiene). Model Dock For Codex añade estas
 cuatro capacidades como herramientas, sin reescribir el historial de la
 conversación:
 
