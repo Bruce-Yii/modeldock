@@ -149,6 +149,17 @@ test("upstreamTargetFor routes by owning provider", () => {
   assert.equal(ds.token, "ds-token");
 });
 
+test("upstreamTargetFor routes zen free models to the zen/v1 responses endpoint", () => {
+  const config = configStub();
+  const free = upstreamTargetFor(config, "deepseek-v4-flash-free");
+  assert.equal(free.provider, "opencode-go");
+  assert.equal(free.url, "https://opencode.ai/zen/v1/responses");
+  assert.equal(free.token, "go-token");
+
+  const mimo = upstreamTargetFor(config, "mimo-v2.5-free");
+  assert.equal(mimo.url, "https://opencode.ai/zen/v1/responses");
+});
+
 test("routeGatewayRequest escalates current-turn images to the vision model", () => {
   const source = {
     model: "deepseek-v4-flash",

@@ -1,4 +1,4 @@
-import { bareModelId, providerForModel } from "./profiles.mjs";
+import { bareModelId, modelEntryFor, providerForModel } from "./profiles.mjs";
 import { RouteAffinity, routeResponsesRequest } from "./router.mjs";
 import { extractResponseUsage } from "./metrics.mjs";
 
@@ -101,10 +101,14 @@ export function upstreamTargetFor(config, model) {
       token: config.tokens?.["deepseek-official"] || config.deepseekToken || "",
     };
   }
+  const entry = modelEntryFor(config, upstreamModel);
+  const baseUrl = entry?.zen
+    ? (config.zenBaseUrl || "https://opencode.ai/zen/v1")
+    : (config.opencodeBaseUrl || config.goBaseUrl || "https://opencode.ai/zen/go/v1");
   return {
     provider: "opencode-go",
     model: upstreamModel,
-    url: `${(config.opencodeBaseUrl || config.goBaseUrl || "https://opencode.ai/zen/go/v1").replace(/\/+$/, "")}/responses`,
+    url: `${baseUrl.replace(/\/+$/, "")}/responses`,
     token: config.goToken || config.tokens?.["opencode-go"] || "",
   };
 }

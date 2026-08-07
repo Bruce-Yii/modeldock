@@ -239,7 +239,13 @@ const OPENCODE_GO_PROFILE = {
   harnessToolNames: new Set(["harness_web_search", "vision_inspect", "speak", "hear"]),
   availableModels: [
     { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash", endpoint: "responses", supportsVision: false, contextWindow: 300_000, status: "available" },
-    { id: "deepseek-v4-flash-free", label: "DeepSeek V4 Flash Free", endpoint: "responses", free: true, supportsVision: false, quota5h: 100000, status: "available" },
+    // Zen free tier: same OpenCode token, but the upstream is zen/v1 not zen/go/v1.
+    // deepseek-v4-flash-free is available but frequently returns 503 when the free
+    // quota is exhausted; the upstream surfaces it per request.
+    { id: "deepseek-v4-flash-free", label: "DeepSeek V4 Flash Free", endpoint: "responses", zen: true, free: true, supportsVision: false, quota5h: 100000, status: "available" },
+    { id: "nemotron-3-ultra-free", label: "Nemotron 3 Ultra Free", endpoint: "responses", zen: true, free: true, supportsVision: false, status: "available" },
+    { id: "laguna-s-2.1-free", label: "Laguna S 2.1 Free", endpoint: "responses", zen: true, free: true, supportsVision: false, status: "available" },
+    { id: "longcat-2.0-free", label: "Longcat 2.0 Free", endpoint: "responses", zen: true, free: true, supportsVision: false, status: "available" },
     { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro", endpoint: "responses", supportsVision: false, status: "available" },
     { id: "glm-5", label: "GLM 5", endpoint: "responses", supportsVision: false, status: "available" },
     { id: "glm-5.1", label: "GLM 5.1", endpoint: "responses", supportsVision: false, status: "available" },
@@ -253,7 +259,7 @@ const OPENCODE_GO_PROFILE = {
     { id: "kimi-k2.7-code", label: "Kimi K2.7 Code", endpoint: "responses", supportsVision: true, visionScore: 9, visionMaxScore: 9, visionTier: "strong", quota5h: 1350, speedTier: "fast", status: "available" },
     { id: "kimi-k3", label: "Kimi K3", endpoint: "responses", supportsVision: false, status: "available" },
     { id: "mimo-v2.5", label: "MiniMax M2.5", endpoint: "responses", supportsVision: true, visionScore: 6, visionMaxScore: 9, visionTier: "medium", quota5h: 30100, speedTier: "medium", status: "available" },
-    { id: "mimo-v2.5-free", label: "MiMo V2.5 Free", endpoint: "responses", supportsVision: true, visionScore: 6, visionMaxScore: 9, visionTier: "medium", quota5h: 100000, speedTier: "fast", free: true, status: "available" },
+    { id: "mimo-v2.5-free", label: "MiMo V2.5 Free", endpoint: "responses", zen: true, supportsVision: true, visionScore: 6, visionMaxScore: 9, visionTier: "medium", quota5h: 100000, speedTier: "fast", free: true, status: "available" },
     { id: "mimo-v2.5-pro", label: "MiniMax M2.5 Pro", endpoint: "responses", supportsVision: false, status: "available" },
     { id: "mimo-v2-omni", label: "MiniMax M2 Omni", endpoint: "responses", supportsVision: false, status: "unavailable" },
     { id: "mimo-v2-pro", label: "MiniMax M2 Pro", endpoint: "responses", supportsVision: false, status: "unavailable" },
@@ -389,6 +395,19 @@ export function providerForModel(config, model) {
     if (candidate.availableModels?.some((modelEntry) => modelEntry.id === model)) return candidate.id;
   }
   return config?.profileId || "opencode-go";
+}
+
+// Resolve the curated model entry (label, endpoint, zen flag, vision metadata) for a
+// bare model id. Used by the gateway to pick the upstream base URL per model.
+export function modelEntryFor(config, model) {
+  const provider = providerForModel(config, model);
+  const passed = config?.profile;
+  const current = passed?.availableModels
+    ? passed
+    : profileById(passed?.id || config?.profileId || "") || passed || null;
+  const found = current?.availableModels?.find((entry) => entry.id === model)
+    || profileById(provider).availableModels?.find((entry) => entry.id === model);
+  return found || null;
 }
 
 export function tokenFor(config, model) {
