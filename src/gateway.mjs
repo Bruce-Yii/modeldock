@@ -94,6 +94,22 @@ export function nativeTarget(pathname, search) {
   return `${NATIVE_BASE}${withoutPrefix}${search || ""}`;
 }
 
+// Threads created under codex-router (or our own pre-rewrite config) persist
+// merged-catalog ids of the form "<provider>/<model>". Left alone they would
+// look like native GPT slugs and get shipped to the ChatGPT backend, which
+// rejects them ("model is not supported when using Codex with a ChatGPT
+// account"). Map them onto the slug we actually publish before routing.
+export function normalizeLegacySlug(model, knownModels) {
+  if (typeof model !== "string") return model;
+  const match = model.match(/^([a-z0-9][a-z0-9-]*)\/(.+)$/);
+  if (!match || !knownModels) return model;
+  const [, provider, id] = match;
+  const qualified = `${id}@${provider}`;
+  if (knownModels.has(qualified)) return qualified;
+  if (knownModels.has(id)) return id;
+  return model;
+}
+
 // A slug we do not serve is native GPT traffic. Empty models (provider defaults
 // with no id) stay on the routed path so the dashboard selection still applies.
 export function isNativeModel(requestedModel, knownModels) {
@@ -544,7 +560,8 @@ export async function relayNativeImage(payload, res, services, { signal } = {}) 
 // knownModels, visionModelOf } so the caller decides wiring.
 export async function relayResponses(payload, res, services, { signal } = {}) {
   const { config, metrics, mediaStore, routeAffinity, knownModels } = services;
-  const requestedModel = typeof payload.model === "string" ? payload.model : "";
+  const requestedModel = normalizeLegacySlug(typeof payload.model === "string" ? payload.model : "", knownModels);
+  if (requestedModel !== payload.model && requestedModel) payload = { ...payload, model: requestedModel };
   if (isNativeModel(requestedModel, knownModels)) {
     return relayNativeResponses(payload, res, services, { signal });
   }

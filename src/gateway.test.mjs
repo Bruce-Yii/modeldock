@@ -649,3 +649,16 @@ test("relayNativeImage forwards image generation to the native backend", async (
     globalThis.fetch = originalFetch;
   }
 });
+
+test("legacy provider/model slugs route to us instead of the native backend", async () => {
+  const { normalizeLegacySlug } = await import("./gateway.mjs");
+  const known = new Set(["deepseek-v4-flash", "gpt-5.6-luna@opencode-go", "deepseek-v4-flash@deepseek-official"]);
+  // codex-router era merged-catalog ids persisted in old threads:
+  assert.equal(normalizeLegacySlug("opencode-go/deepseek-v4-flash", known), "deepseek-v4-flash");
+  assert.equal(normalizeLegacySlug("opencode-go/gpt-5.6-luna", known), "gpt-5.6-luna@opencode-go");
+  assert.equal(normalizeLegacySlug("deepseek-official/deepseek-v4-flash", known), "deepseek-v4-flash@deepseek-official");
+  // Unknown stays untouched (genuinely native or garbage - upstream decides):
+  assert.equal(normalizeLegacySlug("gpt-5.6-sol", known), "gpt-5.6-sol");
+  assert.equal(normalizeLegacySlug("weird/unknown-model", known), "weird/unknown-model");
+  assert.equal(isNativeModel(normalizeLegacySlug("opencode-go/deepseek-v4-flash", known), known), false, "legacy slug must not be treated as native");
+});
