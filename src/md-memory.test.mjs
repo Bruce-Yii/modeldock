@@ -84,3 +84,19 @@ test("anti-breakpoint revival is rate limited per session", () => {
   assert.match(JSON.stringify(first), /shell_command/, "the revival lists the tools still available");
   assert.equal(memory.checkSessionCompletion("ses_r", payload, "all done"), null, "a second revival inside 30s is refused");
 });
+
+test("each stage refuses on its own when disabled, not just via run()", async () => {
+  // The stages are exported, so a future call site could reach one directly; the
+  // switch has to hold at the stage, not only at the entry point.
+  const memory = createMdMemory({
+    enabled: false,
+    summariesFile: tmpSummaries(),
+    callModelText: async () => { throw new Error("must not be called"); },
+  });
+  const payload = longHistory(260);
+  const before = JSON.stringify(payload);
+
+  assert.equal(memory.applySummaryToPayload(payload, "a summary"), false, "applying a summary is refused");
+  assert.equal(await memory.summarizeHistory("ses_direct", payload, null), null, "generating one is refused");
+  assert.equal(JSON.stringify(payload), before, "and the payload is untouched by either");
+});

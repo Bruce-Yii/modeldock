@@ -519,9 +519,13 @@ export function transformResponsesRequest(source, { mediaStore, defaultModel, ta
     currentInput = clipped.input;
     reasoningDropped = clipped.dropped;
   }
-  // L1: keep the session goal pinned near the top (after reasoning compaction, so the
-  // insertion is not clobbered). Find the earliest real user instruction (not the plugin
-  // list / app-context boilerplate) and surface it as the first user message.
+  // Goal pinning: keep the session goal near the top (after reasoning compaction, so
+  // the insertion is not clobbered). Find the earliest real user instruction (not the
+  // plugin list / app-context boilerplate) and surface it as the first user message.
+  //
+  // Deliberately NOT behind MODELDOCK_MD_MEMORY: it drops nothing and compacts nothing,
+  // it re-surfaces one message the client already sent. That is prompt shaping, not
+  // memory compression, so it stays on while the memory line is being evaluated.
   if (Array.isArray(currentInput) && currentInput.length > 8) {
     const users = [];
     for (let i = 0; i < currentInput.length; i += 1) {

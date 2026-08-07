@@ -194,6 +194,10 @@ export function createMdMemory(deps = {}) {
   // burst outgrows it. No API call - runs synchronously on every request so the
   // upstream always sees a bounded payload.
   const applySummaryToPayload = (payload, summaryText) => {
+    // Each stage checks the switch itself rather than trusting run() to be the only
+    // door: these are exported, and a future call site that reaches for one directly
+    // would otherwise silently keep compacting with md_memory turned off.
+    if (!enabled) return false;
     const input = Array.isArray(payload.input) ? payload.input : [];
     const assistants = [];
     for (const item of input) {
@@ -224,6 +228,7 @@ export function createMdMemory(deps = {}) {
   };
 
   const summarizeHistory = async (key, payload, existingSummary) => {
+    if (!enabled) return null;
     try {
       const input = Array.isArray(payload.input) ? payload.input : [];
       const assistants = [];
