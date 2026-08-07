@@ -211,13 +211,13 @@ const DEEPSEEK_OFFICIAL_PROFILE = {
   blockedToolTypes: new Set([]),
   // The official DeepSeek API accepts every Codex local tool as type "function", so
   // forward all except tools useless to a text-only model: view_image (native "vision"
-  // helper) is hidden because the model cannot interpret images — vision_inspect is the
+  // helper) is hidden because the model cannot interpret images - vision_inspect is the
   // gateway's text-model path for visuals. Native web_search stays (provider supports it).
   hiddenToolNames: new Set(["view_image"]),
   // Verified live (2026-08-04) against the real Codex tool set: the official Responses
   // API accepts every Codex local tool as long as it is declared type "function"
   // (shell_command, update_plan, mcp resources, request_user_input, view_image) and
-  // namespaces natively — only the "custom" tool type is restricted to apply_patch
+  // namespaces natively - only the "custom" tool type is restricted to apply_patch
   // ("Unsupported custom tool: 'shell_command'. Only 'apply_patch' is supported.").
   // Hosted web_search is native too (echoed in the response tools list); tool_search is
   // silently ignored. So the same allowlist as opencode-go works, and nothing is blocked.
