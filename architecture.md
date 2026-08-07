@@ -109,13 +109,14 @@ process and listen on the same loopback port.
 4. All model capability declarations must be consistent: if the catalog says a
    model cannot do X, the gateway must not silently try to make X work.
 5. Configuration switching is explicit, reversible, and ModelDock is the sole
-   manager of the `modeldock_go` provider section in the Codex config.
+   manager of its managed `openai_base_url` block in the Codex config.
 
 ## 6. Components
 
 ### 6.1 Thin gateway (`src/gateway.mjs`)
 
-Handles `POST /v1/responses` and `GET /v1/models`. Request handling:
+Handles `POST /v1/responses`, `GET /v1/models`, and the native image endpoints.
+Request handling:
 
 1. Read the JSON body.
 2. Map the requested model name to the upstream model name (identity by default,
@@ -140,6 +141,17 @@ Handles `POST /v1/responses` and `GET /v1/models`. Request handling:
    token display. The tee never delays, drops, or modifies the bytes forwarded
    to Codex. This is how "byte passthrough" and "token display" coexist.
 7. On upstream error, forward status and body with the token redacted.
+8. Native GPT passthrough (the parallel leg): a model id the catalog does not
+   publish is native GPT traffic. The request is forwarded verbatim to
+   `https://chatgpt.com/backend-api/codex` with the client's signed-in headers
+   (authorization, chatgpt-account-id, x-oai-attestation, x-codex-*, session
+   and thread ids). No tool policy, no historical-image rewrite, no image
+   escalation: the native backend owns hosted tools, history images, and its own
+   vision. Non-opaque `reasoning` blobs and compaction summaries are normalized
+   for replay, and `previous_response_id` is dropped. Image generation and edits
+   (`/v1/images/generations`, `/v1/images/edits`) pass through the same way so
+   the built-in `image_gen` tool works on the ChatGPT subscription without a
+   Platform API key.
 
 Allowed `input` transformations (the complete list):
 
@@ -252,18 +264,24 @@ No automated probe runs at startup.
 
 The switch writes `~/.codex/config.toml`. Behavior:
 
-- Single target: the `modeldock_go` provider section pointing at
-  `http://127.0.0.1:4097/v1`, plus the top-level `model` / `model_provider`
-  keys. ModelDock is the only manager of that provider section.
+- Single target: a `# BEGIN modeldock-managed` block that keeps the built-in
+  openai provider and only redirects `openai_base_url` to the gate
+  (`http://127.0.0.1:4097/c/<key>/v1`), plus `model_catalog_json` and the
+  realtime endpoint overrides; the top-level `model` key selects the active
+  slug. ModelDock is the only manager of that block. This is the codex-router
+  transparent shape: `uses_codex_backend()` stays true, the App keeps listing
+  native GPT models beside ours, and the ChatGPT subscription stays intact.
 - On enable: back up the current config, apply the change, ask the user to
   restart Codex, and wait for the restart acknowledgment (existing flow).
 - On disable: restore the backup. If the config changed outside ModelDock after
   enable, refuse to restore and explain (existing drift lock; keep it).
 
 The switch also records which upstream the enabled configuration uses, so the
-dashboard can show it without guessing. The provider section always points at
+dashboard can show it without guessing. The `openai_base_url` always points at
 the ModelDock loopback; the upstream selection lives in ModelDock's own
-settings (`.env`), not in the Codex config.
+settings (`.env`), not in the Codex config. A config still carrying the legacy
+`model_provider = "modeldock_go"` shape is migrated in place on re-enable, and
+enable() refuses when codex-router already manages `openai_base_url`.
 
 ### 6.6 Supporting modules
 
