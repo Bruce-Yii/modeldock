@@ -1,4 +1,5 @@
 import { bareModelId } from "./profiles.mjs";
+import { clipReasoningHistory } from "./md-memory.mjs";
 const DEFAULT_BLOCKED_TOOL_TYPES = new Set(["tool_search", "web_search"]);
 
 // Bridge schema for Codex's client-side tool_search (MCP-tool elicitation): the hosted
@@ -456,7 +457,7 @@ function rewriteImages(input, mediaStore, imageRefs, currentImageRefs, { keepCur
   });
 }
 
-export function transformResponsesRequest(source, { mediaStore, defaultModel, targetModel, directVision = false, profile = null }) {
+export function transformResponsesRequest(source, { mediaStore, defaultModel, targetModel, directVision = false, profile = null, mdMemory = true }) {
   if (!source || typeof source !== "object" || Array.isArray(source)) {
     throw new Error("Responses request body must be a JSON object");
   }
@@ -508,38 +509,15 @@ export function transformResponsesRequest(source, { mediaStore, defaultModel, ta
   if (hiddenToolNames && hiddenToolNames.size > 0) {
     payload.tools = selectForwardedTools(payload.tools, { hiddenToolNames: effectiveHidden });
   }
-  // Reasoning history balloons fast (244+ items observed in long sessions) and the
-  // model only needs the latest reasoning; old thinking text is dead weight. Two limits
-  // apply, newest-first:
-  //   - RECENT_REASONING items, and
-  //   - REASONING_BUDGET_BYTES in total.
-  // The count alone is not enough: measured across real upstream payloads, six items
-  // ranged from 7KB to 76KB, making reasoning the single largest source of per-call
-  // context variance. The byte budget clips that tail - a typical turn stays well
-  // under it, an unusually long thinking burst gets its oldest items dropped.
-  const RECENT_REASONING = 6;
-  const REASONING_BUDGET_BYTES = 50 * 1024;
+  // Reasoning clipping belongs to the md_memory line (see md-memory.mjs for why the
+  // item count alone is not enough). It is skipped wholesale when md_memory is off,
+  // so a run with the line disabled shows the client's history untouched.
   let currentInput = Array.isArray(payload.input) ? payload.input : rawInput;
   let reasoningDropped = 0;
-  if (Array.isArray(rawInput)) {
-    const reasoningIndices = [];
-    for (let i = 0; i < currentInput.length; i += 1) {
-      if (currentInput[i]?.type === "reasoning") reasoningIndices.push(i);
-    }
-    const drop = new Set(reasoningIndices.slice(0, Math.max(0, reasoningIndices.length - RECENT_REASONING)));
-    // Walk the survivors newest-first and keep only what fits the budget.
-    let budget = REASONING_BUDGET_BYTES;
-    for (let i = reasoningIndices.length - 1; i >= 0; i -= 1) {
-      const index = reasoningIndices[i];
-      if (drop.has(index)) continue;
-      const size = JSON.stringify(currentInput[index] ?? "").length;
-      if (size <= budget) budget -= size;
-      else drop.add(index);
-    }
-    if (drop.size) {
-      reasoningDropped = drop.size;
-      currentInput = currentInput.filter((_, index) => !drop.has(index));
-    }
+  if (Array.isArray(rawInput) && mdMemory !== false) {
+    const clipped = clipReasoningHistory(currentInput);
+    currentInput = clipped.input;
+    reasoningDropped = clipped.dropped;
   }
   // L1: keep the session goal pinned near the top (after reasoning compaction, so the
   // insertion is not clobbered). Find the earliest real user instruction (not the plugin

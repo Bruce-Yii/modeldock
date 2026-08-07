@@ -42,6 +42,13 @@ async function listen(server) {
 async function startApp(configOverrides = {}) {
   const config = { ...baseConfig(), ...configOverrides };
   if (configOverrides.goToken === null) delete config.goToken;
+  // Isolate the persisted-summaries file: tests must never read or write the real
+  // ~/.modeldock/summaries.json (a run of npm test was polluting the live gate's
+  // file with 260 fake ses_ entries).
+  if (!config.summariesFile) {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-summaries-"));
+    config.summariesFile = path.join(dir, "summaries.json");
+  }
   const services = createServices(config);
   const { app } = createApp(services);
   const server = app.listen(0, "127.0.0.1");

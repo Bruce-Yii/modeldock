@@ -200,6 +200,11 @@ export function loadConfig() {
     exaApiKey: process.env.EXA_API_KEY || "",
     recentLimit: integer("MODELDOCK_RECENT_LIMIT", 50, { min: 10, max: 500 }),
     modelRefreshHours: Number(process.env.MODELDOCK_MODEL_REFRESH_HOURS || 24),
+    // md_memory: the whole memory-compression line (rolling summaries, the assistant
+    // sliding window, reasoning clipping, anti-breakpoint revival) behind one switch.
+    // Set MODELDOCK_MD_MEMORY=0 to hand context management back to the client and
+    // compare the two - the code stays in place either way.
+    mdMemory: !["0", "false", "off"].includes(String(process.env.MODELDOCK_MD_MEMORY || "").toLowerCase()),
     // Model catalog refresh. Off by default: the shipped curated catalog in profiles.mjs
     // is the primary source and is published with the release. When enabled it only does a
     // light GET /models merge (new ids appended, vision metadata untouched). The heavier

@@ -8,6 +8,7 @@ import { loadConfig, publicConfig, writeEnvFile, envFileFor } from "./config.mjs
 import { MediaStore } from "./media-store.mjs";
 import { Metrics, extractResponseUsage, extractUsageFromSse } from "./metrics.mjs";
 import { transformResponsesRequest } from "./transform.mjs";
+import { createMdMemory } from "./md-memory.mjs";
 import { createUpstreams } from "./upstreams.mjs";
 import { createMcpNodeHandler } from "./mcp.mjs";
 import { LiveResponsesWriter, parseSse } from "./live-responses.mjs";
@@ -160,12 +161,12 @@ function modelProviderOf(options, modelId) {
   return options.find((entry) => entry.id === modelId)?.provider || "other";
 }
 
-function statusPayload({ config, metrics, mediaStore, routeAffinity, modelSelection, autostart, updater, autoRoute, sessionChecks }) {
+function statusPayload({ config, metrics, mediaStore, routeAffinity, modelSelection, autostart, updater, autoRoute, memory }) {
   const selected = modelSelection || { mainModel: config.mainModel, visionModel: config.visionModel };
   const options = modelOptions(config);
   const visionOptions = options.filter((entry) => entry.supportsVision);
   const mainTokenReady = Boolean(tokenFor(config, selected.mainModel) || (config.tokens && Object.values(config.tokens).some(Boolean)));
-  const checks = sessionChecks ? Array.from(sessionChecks.entries()).map(([session, entry]) => ({ session, at: entry.at, answer: entry.answer })) : [];
+  const checks = memory?.sessionChecks ? Array.from(memory.sessionChecks.entries()).map(([session, entry]) => ({ session, at: entry.at, answer: entry.answer })) : [];
   const mainProvider = providerForModel(config, selected.mainModel) || config.profileId;
   const providerLabel = providerOptions(config).find((p) => p.id === mainProvider)?.label || mainProvider;
   return metrics.snapshot({
@@ -197,6 +198,7 @@ function statusPayload({ config, metrics, mediaStore, routeAffinity, modelSelect
     },
     update: updater?.state?.() || null,
     autoRoute: autoRoute?.state?.() || null,
+    mdMemory: memory?.state?.() || null,
   });
 }
 
@@ -444,51 +446,6 @@ function debugLog(services, message) {
   if (services?.config?.debug?.enabled) console.log(`[gate] ${message}`);
 }
 
-// DeepSeek's Responses API rejects any follow-up turn whose reasoning items carry no
-// `content` ("The `reasoning_text` in the thinking mode must be passed back to the API"),
-// and dropping the item does not help either — verified live 2026-08-04 by replaying the
-// exact failing payload. We stream DeepSeek's reasoning_text to Codex as a *summary*
-// (LiveResponsesWriter has no content channel), and Codex echoes that summary back with
-// `content: null`, so the text survives in the wrong field. Record it here keyed by the
-// reasoning id we minted, so the outbound side can refill `content` even if a future
-// client stops echoing the summary.
-function rememberReasoningItems(services, response) {
-  if (!services?.rememberReasoning) return;
-  for (const item of response?.output || []) {
-    if (item?.type !== "reasoning" || !item.id) continue;
-    const text = (item.summary || []).map((part) => part?.text || "").join("\n").trim();
-    if (text) services.rememberReasoning(item.id, text);
-  }
-}
-
-// Move `reasoning.summary` into `reasoning.content` before the payload leaves for a
-// provider that demands it. DeepSeek never emits a summary at all (verified live: it
-// streams only `response.reasoning_text.delta`), so the text our writer filed under
-// `summary` is the verbatim reasoning — moving it is lossless. It is a *move*, not a
-// copy: `content` alone is accepted (verified live), and echoing the same text in both
-// fields would bill the whole reasoning history twice on every turn.
-function fillReasoningContent(payload, services) {
-  if (!Array.isArray(payload.input)) return payload;
-  let filled = 0;
-  const input = payload.input.map((item) => {
-    if (item?.type !== "reasoning") return item;
-    if (Array.isArray(item.content) && item.content.length > 0) {
-      // Already carries the text; drop a redundant summary if the client sent one.
-      if (!item.summary?.length) return item;
-      const { summary: _summary, ...rest } = item;
-      return rest;
-    }
-    const summaryText = (item.summary || []).map((part) => part?.text || "").join("\n").trim();
-    const text = summaryText || (item.id && services?.reasoningFor ? services.reasoningFor(item.id) : null);
-    if (!text) return item;
-    filled += 1;
-    const { summary: _summary, encrypted_content: _encrypted, ...rest } = item;
-    return { ...rest, content: [{ type: "reasoning_text", text }] };
-  });
-  if (!filled) return payload;
-  debugLog(services, `moved reasoning summary -> content on ${filled} item(s)`);
-  return { ...payload, input };
-}
 
 // OpenCode official clients (desktop/CLI) identify sessions via the x-opencode-*
 // header family: x-opencode-session (ses_ + 12 hex timestamp + 14 base62),
@@ -541,7 +498,7 @@ async function fetchGoResponses(payload, services, signal, accept = "application
   debugLog(services, `go request model=${requestModel} style=${endpoint.style} max_output_tokens=${payload.max_output_tokens ?? "unset"} inputItems=${Array.isArray(payload.input) ? payload.input.length : typeof payload.input} reasoning=${JSON.stringify(payload.reasoning ?? null)}`);
   if (endpoint.style === "chat") {
     const chatBody = responsesToChatRequest({ ...payload, model: requestModel }, {
-      reasoningLookup: services.reasoningFor ? (callId) => services.reasoningFor(callId) : null,
+      reasoningLookup: services.memory?.reasoningFor ? (callId) => services.memory.reasoningFor(callId) : null,
     });
     const chatPayload = { ...chatBody };
     return fetch(endpoint.url, {
@@ -562,7 +519,7 @@ async function fetchGoResponses(payload, services, signal, accept = "application
   // { none, minimal, low, medium, high, xhigh, max }).
   const isDeepseekOfficial = services.config.profile?.id === "deepseek-official";
   const isOpencodeGo = services.config.profile?.id === "opencode-go";
-  const forwarded = { ...(isDeepseekOfficial ? fillReasoningContent(payload, services) : payload) };
+  const forwarded = { ...(isDeepseekOfficial && services.memory ? services.memory.fillReasoningContent(payload) : payload) };
   if (isOpencodeGo) delete forwarded.reasoning;
   return fetch(`${upstreamBaseForModel(services.config, requestModel)}/responses`, {
     method: "POST",
@@ -674,8 +631,8 @@ async function relayLiveResponses(payload, res, services, signal, { autoRoute = 
           argumentsText = typeof call.arguments === "string" ? call.arguments : typeof call.input === "string" ? call.input : "";
           // Record the reasoning the model produced before this tool call so the chat
           // bridge can replay it on the next turn (Go demands reasoning_content back).
-          if (call.call_id && services.rememberReasoning && writer.reasoning?.text) {
-            services.rememberReasoning(call.call_id, writer.reasoning.text);
+          if (call.call_id && services.memory?.rememberReasoning && writer.reasoning?.text) {
+            services.memory.rememberReasoning(call.call_id, writer.reasoning.text);
           }
           const harnessNames = harnessToolNamesFor(services.config.profile);
           // DeepSeek emits custom tools (apply_patch) directly as custom_tool_call items;
@@ -710,10 +667,11 @@ async function relayLiveResponses(payload, res, services, signal, { autoRoute = 
       // the session. Revive it locally (no side API call): splice the rolling summary
       // + this turn's text + tool names back as a user message and keep generating on
       // the same SSE stream. Rate-limited to once per session per 30s, so a model
-      // stuck in a loop can only be revived every 30s at most. OpenCode Go camp only.
-      if (mode === "text" && services.config.profile?.id === "opencode-go" && !services.config.debug?.noSessionCheck) {
+      // stuck in a loop can only be revived every 30s at most. Applies to every
+      // profile (the md_memory line); disable with debug.noSessionCheck.
+      if (mode === "text" && services.memory && !services.config.debug?.noSessionCheck) {
         const key = payload?.client_metadata?.session_id || payload?.client_metadata?.thread_id || "default";
-        const revive = checkSessionCompletion(services, key, payload, writer.message?.text || "");
+        const revive = services.memory.checkSessionCompletion(key, payload, writer.message?.text || "");
         if (revive) {
           currentPayload = { ...currentPayload, input: [...(currentPayload.input || []), revive], stream: true };
           mode = null;
@@ -723,7 +681,7 @@ async function relayLiveResponses(payload, res, services, signal, { autoRoute = 
         }
       }
       const response = writer.finish(usage);
-      rememberReasoningItems(services, response);
+      if (services.memory) services.memory.rememberReasoningItems(response);
       return { ok: true, httpStatus: 200, bytesOut: writer.bytes, usage, rounds, response };
     }
 
@@ -816,30 +774,19 @@ async function relayResponses(req, res, services) {
       targetModel: route.model,
       directVision: route.directVision,
       profile: config.profile,
+      // Reasoning clipping is part of the md_memory line, so it follows the flag.
+      mdMemory: services.memory?.enabled !== false,
     });
     if (config.debug?.noReasoning) {
       delete transformed.payload.reasoning;
     }
-    // L2 rolling summary: compact old assistant history into a pinned summary block.
-    // Memory machinery (compaction + completion checker) is for the OpenCode Go camp
-    // only; the DeepSeek official profile is a direct relay and needs none of it.
-    if (config.profile?.id === "opencode-go") {
+    // md_memory rolling summary: compact old assistant history into a pinned summary
+    // block. Applies to every profile we relay (opencode-go, deepseek-official, ...):
+    // the summarizer side-call follows the active profile's rules and the payload
+    // surgery is wire-format agnostic.
+    if (services.memory) {
       const summaryKey = source?.client_metadata?.session_id || source?.client_metadata?.thread_id || "default";
-      const existing = services.sessionSummaries?.get(summaryKey) || null;
-      const existingSummary = existing?.text || null;
-      // Debounce: one fresh summary per session per 5 minutes keeps us from calling the
-      // model to re-summarize on every request while a long turn is still generating.
-      const SUMMARY_DEBOUNCE_MS = 5 * 60_000;
-      // Generate FIRST from the untouched payload (it holds the full history this turn
-      // brought in); applying the stored summary before generation would feed the
-      // summarizer a truncated window and produce garbage summaries.
-      if (!existing || Date.now() - existing.at > SUMMARY_DEBOUNCE_MS) {
-        const newSummary = await summarizeHistory(services, summaryKey, transformed.payload, existingSummary);
-        if (newSummary) services.sessionSummaries?.set(summaryKey, { text: newSummary, at: Date.now() });
-      } else if (existingSummary) {
-        // Between generations: apply the stored summary locally (sliding window).
-        applySummaryToPayload(transformed.payload, existingSummary);
-      }
+      await services.memory.run(summaryKey, transformed.payload);
     }
   } catch (error) {
     finish({ ok: false, error: error.message });
@@ -1313,23 +1260,6 @@ async function refreshProfileModels(profile, config) {
   }
 }
 
-// L2 rolling summary: when a session's assistant history grows past a threshold, the
-// oldest portion is summarized by the main model into a compact structured block that
-// stays pinned in context. The summary rolls forward: each compaction feeds the prior
-// summary plus the new delta, keeping the block bounded while preserving task state
-// (goal, done, decisions, status, todo) — the antidote to local-optimum loops.
-const SUMMARY_TRIGGER_BYTES = 200_000; // assistant text beyond this triggers compaction
-const SUMMARY_WINDOW_ITEMS = 200; // sliding window: assistant messages kept verbatim
-const SUMMARY_PROMPT = [
-  "You are the memory keeper of a long-running coding session. Your ONLY job is to summarize the provided conversation history.",
-  "Produce a compact structured summary in this exact format:",
-  "GOAL: <the user's original task, one line>",
-  "DONE: <what has been completed, bullet list>",
-  "DECISIONS: <key decisions and constraints that must NOT be forgotten, bullet list>",
-  "STATUS: <current state, one line>",
-  "TODO: <what remains, bullet list>",
-  "Rules: output ONLY the summary block above — no code, no explanations, no continued work. Keep it under 200 words. Preserve technical details, file paths, and any constraint the model decided earlier — the model must not re-derive them.",
-].join("\n");
 
 // Call the main model for a side task (summary, completion check). Follows the same
 // profile rules as normal traffic: opencode-go sends with session-affinity headers
@@ -1381,125 +1311,7 @@ async function callMainModelText(services, key, messages, { maxOutputTokens = 50
     .join("") || null;
 }
 
-// Lightweight anti-breakpoint revival, purely local — no side API call, no verdict
-// logic. A plain-text turn (no tool calls) means the model is about to end the
-// session; splice the rolling summary + this turn's own last text + the available
-// tool names back into the conversation as a user message and let the upstream
-// decide whether to continue on the same stream. Rate-limited to once per session
-// per 30s so a stuck model can never loop faster than that.
-const SESSION_CHECK_INTERVAL_MS = 30_000;
 
-function checkSessionCompletion(services, key, payload, currentTurnText = "") {
-  const now = Date.now();
-  const last = services.sessionChecks?.get(key);
-  if (last && now - last.at < SESSION_CHECK_INTERVAL_MS) return null;
-  const input = Array.isArray(payload.input) ? payload.input : [];
-  const lastText = currentTurnText.trim() || (() => {
-    for (let i = input.length - 1; i >= 0; i--) {
-      const item = input[i];
-      if (item?.role !== "assistant") continue;
-      const text = Array.isArray(item.content) ? item.content.map((p) => p.text || "").join(" ") : item.content || "";
-      if (text.trim()) return text.trim().slice(0, 1_000);
-    }
-    return "";
-  })();
-  const toolNames = (Array.isArray(payload.tools) ? payload.tools : [])
-    .map((tool) => tool?.name || tool?.function?.name)
-    .filter(Boolean)
-    .slice(0, 40)
-    .join(", ");
-  services.sessionChecks?.set(key, { at: now, answer: lastText.slice(0, 200) || "(no text)", state: "continue" });
-  debugLog(services, `session check (${key}): revive ${lastText.slice(0, 120)}`);
-  // The payload already carries the summary block (applySummaryToPayload ran before
-  // this turn was relayed); embedding a second copy in the continuation message is
-  // redundant and was observed to precede upstream stalls. Keep the revive lean.
-  return {
-    role: "user",
-    content: [{
-      type: "input_text",
-      text: [
-        "[session continuation — continue working on the task]",
-        `YOUR LAST TEXT:\n${lastText}`,
-        `AVAILABLE TOOLS: ${toolNames || "(none)"}`,
-        "[end session continuation]",
-      ].filter(Boolean).join("\n\n"),
-    }],
-  };
-}
-
-// Local-only: sliding window over assistant history. Whenever the payload carries more
-// than FLAT_WINDOW_ITEMS assistant messages, drop the oldest ones (they are already
-// covered by the stored summary). New work is never touched: it lives at the tail and
-// only exceeds the window when a 5-minute generation burst outgrows it. No API call —
-// runs synchronously on every request so the upstream always sees a bounded payload.
-function applySummaryToPayload(payload, summaryText) {
-  const input = Array.isArray(payload.input) ? payload.input : [];
-  const assistants = [];
-  for (const item of input) {
-    if (item?.role !== "assistant") continue;
-    const text = Array.isArray(item.content) ? item.content.map((p) => p.text || "").join(" ") : item.content || "";
-    if (text) assistants.push(text);
-  }
-  const total = assistants.reduce((acc, t) => acc + t.length, 0);
-  if (total <= SUMMARY_TRIGGER_BYTES) return false;
-  const FLAT_WINDOW_ITEMS = SUMMARY_WINDOW_ITEMS;
-  if (assistants.length <= FLAT_WINDOW_ITEMS) return false;
-  const oldCount = assistants.length - FLAT_WINDOW_ITEMS;
-  let removed = 0;
-  const newInput = input.filter((item) => {
-    if (item?.role !== "assistant") return true;
-    const text = Array.isArray(item.content) ? item.content.map((p) => p.text || "").join(" ") : item.content || "";
-    if (text && removed < oldCount) { removed += 1; return false; }
-    return true;
-  });
-  const insertIdx = newInput.findIndex((item) => item?.role === "user");
-  const summaryItem = {
-    role: "user",
-    content: [{ type: "input_text", text: `[SESSION SUMMARY — earlier work, keep in mind]\n${summaryText}\n[end summary]` }],
-  };
-  payload.input = insertIdx >= 0
-    ? [...newInput.slice(0, insertIdx), summaryItem, ...newInput.slice(insertIdx)]
-    : [summaryItem, ...newInput];
-  return true;
-}
-
-async function summarizeHistory(services, key, payload, existingSummary) {
-  try {
-    const input = Array.isArray(payload.input) ? payload.input : [];
-    const assistants = [];
-    for (const item of input) {
-      if (item?.role !== "assistant") continue;
-      const text = Array.isArray(item.content) ? item.content.map((p) => p.text || "").join(" ") : item.content || "";
-      if (text) assistants.push(text);
-    }
-    const total = assistants.reduce((acc, t) => acc + t.length, 0);
-    if (total <= SUMMARY_TRIGGER_BYTES) return null;
-    const FLAT_WINDOW_ITEMS = SUMMARY_WINDOW_ITEMS;
-    if (assistants.length <= FLAT_WINDOW_ITEMS) return null;
-    const oldCount = assistants.length - FLAT_WINDOW_ITEMS;
-    let oldText = assistants.slice(0, oldCount).join("\n\n");
-    // Bound the summarizer input; the summary only needs the gist of old work, not
-    // every byte (a 300KB+ history would make the summary call itself slow/timeout).
-    const SUMMARY_INPUT_LIMIT = 100_000;
-    if (oldText.length > SUMMARY_INPUT_LIMIT) {
-      oldText = `${oldText.slice(0, SUMMARY_INPUT_LIMIT * 0.6)}\n...[truncated ${oldText.length} chars]...\n${oldText.slice(-SUMMARY_INPUT_LIMIT * 0.4)}`;
-    }
-    const summarizeTarget = existingSummary
-      ? `PREVIOUS SUMMARY:\n${existingSummary}\n\nNEW HISTORY SINCE THEN:\n${oldText}`
-      : `HISTORY TO SUMMARIZE:\n${oldText}`;
-
-    const summaryText = await callMainModelText(services, key, [
-      { role: "developer", content: [{ type: "input_text", text: SUMMARY_PROMPT }] },
-      { role: "user", content: [{ type: "input_text", text: summarizeTarget }] },
-    ], { maxOutputTokens: 500, timeoutMs: 120_000 });
-    if (!summaryText) return null;
-    applySummaryToPayload(payload, summaryText);
-    return summaryText;
-  } catch (error) {
-    debugLog(services, `summary failed: ${error.message}`);
-    return null;
-  }
-}
 
 export function createServices(config = loadConfig()) {
   const mutableConfig = { ...config };
@@ -1510,63 +1322,23 @@ export function createServices(config = loadConfig()) {
     maxEntries: mutableConfig.mediaMaxEntries,
   });
   const modelSelection = { mainModel: mutableConfig.mainModel, visionModel: mutableConfig.visionModel };
-  // L2: rolling per-session summaries (session_id -> { text, at }). Grows monotonically
-  // with the conversation; each compaction folds the new delta into the old summary.
-  // Persisted to disk so a gate restart does not lose the summaries: without them the
-  // next request carries the full un-compacted history, which balloons the payload and
-  // was observed to stall the upstream (and cascade into client disconnect + retry
-  // loops).
-  const sessionSummaries = new Map();
-  // Path is configurable so tests can point it at a temp dir instead of the real
-  // ~/.modeldock/summaries.json (npm test was polluting the live persisted file).
-  const summariesFile = config.summariesFile || path.join(os.homedir(), ".modeldock", "summaries.json");
-  let summariesSaveTimer = null;
-  const saveSummaries = () => {
-    if (summariesSaveTimer) return;
-    summariesSaveTimer = setTimeout(() => {
-      summariesSaveTimer = null;
-      import("node:fs").then(({ mkdirSync, writeFileSync }) => {
-        try {
-          mkdirSync(path.dirname(summariesFile), { recursive: true });
-          writeFileSync(summariesFile, JSON.stringify(Object.fromEntries(sessionSummaries)), "utf8");
-        } catch (error) {
-          console.log(`[gate] summaries save failed: ${error.message}`);
-        }
-      });
-    }, 5_000);
-  };
-  import("node:fs").then(({ readFileSync, existsSync }) => {
-    try {
-      if (existsSync(summariesFile)) {
-        const parsed = JSON.parse(readFileSync(summariesFile, "utf8"));
-        for (const [k, v] of Object.entries(parsed)) {
-          if (v && typeof v.text === "string" && v.text.trim()) sessionSummaries.set(k, v);
-        }
-        console.log(`[gate] loaded ${sessionSummaries.size} persisted summaries`);
-      }
-    } catch (error) {
-      console.log(`[gate] summaries load failed: ${error.message}`);
-    }
+  // md_memory: the single memory-compression pipeline for every profile we relay
+  // (opencode-go, deepseek-official, ...). It owns the rolling session summaries
+  // (bounded to MAX_SESSION_SUMMARIES and persisted), the reasoning cache, the
+  // reasoning clip, and the anti-breakpoint revival.
+  // Declared before md_memory because its callbacks close over the finished services
+  // object (debugLog reads config.debug, the summarizer side-call needs the transport).
+  // Filled in by the Object.assign at the end of this function.
+  const services = {};
+  const memory = createMdMemory({
+    enabled: mutableConfig.mdMemory !== false,
+    // Path is configurable so tests can point it at a temp dir instead of the real
+    // ~/.modeldock/summaries.json (npm test was polluting the live persisted file).
+    summariesFile: config.summariesFile || path.join(os.homedir(), ".modeldock", "summaries.json"),
+    debugLog: (message) => debugLog(services, message),
+    // Side-task calls (summary) go through the same profile rules as normal traffic.
+    callModelText: (key, messages, opts) => callMainModelText(services, key, messages, opts),
   });
-  // Bounded like the other per-session caches (reasoning: 256 entries, media: TTL+LRU).
-  // Without this the map gains one entry per session forever, is persisted in full on
-  // every write and reloaded at boot - it only ever grows.
-  const MAX_SESSION_SUMMARIES = 200;
-  const origSet = sessionSummaries.set.bind(sessionSummaries);
-  sessionSummaries.set = (key, value) => {
-    origSet(key, value);
-    if (sessionSummaries.size > MAX_SESSION_SUMMARIES) {
-      // Drop the least recently summarized sessions.
-      const oldest = [...sessionSummaries.entries()]
-        .sort((a, b) => (a[1]?.at || 0) - (b[1]?.at || 0))
-        .slice(0, sessionSummaries.size - MAX_SESSION_SUMMARIES);
-      for (const [staleKey] of oldest) sessionSummaries.delete(staleKey);
-    }
-    saveSummaries();
-  };
-  // Session completion checker state: session_id -> { at, answer }. Fire-and-forget
-  // model calls asked at most once per session per 30s.
-  const sessionChecks = new Map();
   // Vision calls carry the same opencode session identity as the main-model turn that
   // triggered them (set per request by the relay), so the dashboard groups them under
   // one session instead of a session-less row.
@@ -1589,19 +1361,6 @@ export function createServices(config = loadConfig()) {
   const updater = createUpdater();
   updater.check().catch(() => {});
   const routeAffinity = new RouteAffinity();
-  // Reasoning cache: call_id -> the reasoning text the model produced before that tool
-  // call. Codex drops reasoning from its re-posted history, but Go's chat camp (thinking
-  // mode) demands reasoning_content on every assistant.tool_calls turn, so the relay
-  // records it here and the chat bridge replays it on the next turn. Bounded LRU.
-  const reasoningCache = new Map();
-  const MAX_REASONING_ENTRIES = 256;
-  const rememberReasoning = (callId, text) => {
-    if (!callId || typeof text !== "string" || !text.trim()) return;
-    reasoningCache.delete(callId);
-    reasoningCache.set(callId, text);
-    while (reasoningCache.size > MAX_REASONING_ENTRIES) reasoningCache.delete(reasoningCache.keys().next().value);
-  };
-  const reasoningFor = (callId) => reasoningCache.get(callId) || null;
   const runtime = { profile: mutableConfig.profile, profileId: mutableConfig.profileId };
   const refreshModelCatalog = () => refreshProfileModels(mutableConfig.profile, mutableConfig).then(
     () => console.log(`[gate] model refresh done, availableModels=${(mutableConfig.profile?.availableModels || []).length}`),
@@ -1613,7 +1372,17 @@ export function createServices(config = loadConfig()) {
     ? setInterval(refreshModelCatalog, refreshIntervalHours * 3_600_000)
     : null;
   if (modelRefreshTimer) modelRefreshTimer.unref();
-  return { config: mutableConfig, runtime, metrics, mediaStore, upstreams, configSwitcher, autostart, updater, autoRoute, routeAffinity, modelSelection, reasoningCache, rememberReasoning, reasoningFor, sessionSummaries, sessionChecks, refreshModelCatalog, modelRefreshTimer, setActiveSessionSeed: (seed) => { activeSessionSeed = seed; } };
+  return Object.assign(services, {
+    config: mutableConfig, runtime, metrics, mediaStore, upstreams, configSwitcher,
+    autostart, updater, autoRoute, routeAffinity, modelSelection,
+    memory,
+    // The md_memory state is reached through `memory`; these aliases keep the
+    // dashboard and tests reading one obvious place.
+    sessionSummaries: memory.sessionSummaries,
+    sessionChecks: memory.sessionChecks,
+    refreshModelCatalog, modelRefreshTimer,
+    setActiveSessionSeed: (seed) => { activeSessionSeed = seed; },
+  });
 }
 
 export function createApp(services = createServices()) {
