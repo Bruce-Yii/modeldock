@@ -220,11 +220,13 @@ test("mock install: download -> install -> run", async (t) => {
   const installedCatalog = path.join(installDir, ".modeldock", "codex-model-catalog.json");
   assert.ok(existsSync(installedCatalog), "catalog should follow MODELDOCK_STATE_DIR");
   const installedCatalogPayload = JSON.parse(readFileSync(installedCatalog, "utf8"));
-  const baked = installedCatalogPayload.models?.[0]?.base_instructions || "";
   // The baked restart path is compared through realpath: Windows may render the
   // temp parent as an 8.3 short name (CHENBA~1) while mkdtempSync returned the
   // long form, so a raw string compare would be flaky.
   const marker = `${path.sep}scripts${path.sep}restart.ps1`;
+  const baked = (installedCatalogPayload.models || [])
+    .map((model) => model?.base_instructions || "")
+    .find((instructions) => instructions.includes(marker)) || "";
   const bakedIndex = baked.indexOf(marker);
   assert.ok(bakedIndex > 0, "catalog base_instructions should reference scripts/restart.ps1");
   // The path is quoted inside the instruction ("...\scripts\restart.ps1"); walk
