@@ -262,6 +262,24 @@ test("createUsageTee extracts usage from response.completed events across chunks
   assert.equal(usages[0].output_tokens, 5);
 });
 
+test("createUsageTee extracts usage and output from a full non-streaming JSON body on end", () => {
+  const events = [];
+  const tee = createUsageTee((event) => events.push(event));
+  const body = JSON.stringify({
+    id: "resp_x",
+    object: "response",
+    status: "completed",
+    output: [{ type: "function_call", call_id: "call_00_nonstream", name: "ls", arguments: "{}" }],
+    usage: { input_tokens: 33, output_tokens: 9, total_tokens: 42 },
+  });
+  tee.push(body);
+  tee.end();
+  assert.equal(events.length, 1);
+  assert.equal(events[0].type, "response.completed");
+  assert.equal(events[0].response.usage.input_tokens, 33);
+  assert.equal(events[0].response.output[0].call_id, "call_00_nonstream");
+});
+
 test("pipeGatewayStream forwards bytes verbatim and feeds the tee", async () => {
   const sink = collectStream();
   const res = responseStub(sink);

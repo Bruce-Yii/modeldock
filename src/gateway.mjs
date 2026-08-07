@@ -202,6 +202,21 @@ export function createUsageTee(onEvent) {
     if (buffer.length > 1_000_000) buffer = buffer.slice(-500_000);
   };
   const end = () => {
+    // Non-streaming upstreams return a single JSON body with no SSE framing. When
+    // the buffer is a complete JSON object (a stream would leave a partial event
+    // or an empty buffer here), surface it as a completed response so usage and
+    // tool-call affinity are still captured.
+    const trimmed = buffer.trim();
+    if (trimmed) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          onEvent?.({ type: "response.completed", response: parsed });
+        }
+      } catch {
+        // Partial SSE event residue or non-JSON body: ignore.
+      }
+    }
     buffer = "";
   };
   return { push, end };
