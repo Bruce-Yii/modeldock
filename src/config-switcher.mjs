@@ -64,6 +64,7 @@ function managedSignature(source) {
     model: topLevelString(source, "model"),
     modelProvider: topLevelString(source, "model_provider"),
     webSearch: topLevelString(source, "web_search"),
+    modelCatalogJson: topLevelString(source, "model_catalog_json"),
     provider: entries,
   });
 }
@@ -87,7 +88,7 @@ export function mergeRestoredCodexConfig(current, original) {
   const newline = current.includes("\r\n") ? "\r\n" : "\n";
   const originalSection = providerSection(original);
   const lines = removeManagedProvider(current.replace(/\r\n/g, "\n").split("\n"));
-  for (const key of ["model", "model_provider", "web_search"]) restoreTopLevel(lines, key, topLevelLine(original, key));
+  for (const key of ["model", "model_provider", "web_search", "model_catalog_json"]) restoreTopLevel(lines, key, topLevelLine(original, key));
   while (lines.length && !lines.at(-1).trim()) lines.pop();
   if (originalSection.length) lines.push("", ...originalSection);
   return `${lines.join("\n").replace(/\n/g, newline)}${newline}`;
@@ -108,13 +109,17 @@ function setTopLevel(lines, key, value) {
   return lines;
 }
 
-export function buildManagedCodexConfig(source, { baseUrl, model }) {
+export function buildManagedCodexConfig(source, { baseUrl, model, catalogFile = "" }) {
   const newline = source.includes("\r\n") ? "\r\n" : "\n";
   let lines = removeManagedProvider(source.replace(/\r\n/g, "\n").split("\n"));
   while (lines.length && !lines.at(-1).trim()) lines.pop();
   lines = setTopLevel(lines, "model", model);
   lines = setTopLevel(lines, "model_provider", "modeldock_go");
   lines = setTopLevel(lines, "web_search", "disabled");
+  // The Codex App does not refresh a custom provider's /models (openai/codex#32119),
+  // so point it at the catalog file the gate writes; without this the App picker shows
+  // "Custom" for every model it cannot name locally. The CLI keeps using /v1/models.
+  if (catalogFile) lines = setTopLevel(lines, "model_catalog_json", catalogFile);
   lines.push(
     "",
     "[model_providers.modeldock_go]",
@@ -129,13 +134,16 @@ export function buildManagedCodexConfig(source, { baseUrl, model }) {
 }
 
 export class CodexConfigSwitcher {
-  constructor({ codexHome, baseUrl, model }) {
+  constructor({ codexHome, baseUrl, model, catalogFile = "" }) {
     this.codexHome = path.resolve(codexHome || path.join(process.cwd(), ".modeldock-codex-home"));
     this.configPath = path.join(this.codexHome, "config.toml");
     this.stateDir = path.join(this.codexHome, "modeldock");
     this.statePath = path.join(this.stateDir, "config-switch-state.json");
     this.baseUrl = baseUrl;
     this.model = model;
+    // Written by the gate; named in the managed config so the Codex App can list our
+    // models instead of labelling every one of them "Custom".
+    this.catalogFile = catalogFile;
   }
 
   async #readState() {
@@ -207,7 +215,7 @@ export class CodexConfigSwitcher {
     if (originalExisted) await copyFile(this.configPath, backupPath);
     else await writeFile(backupPath, "", { encoding: "utf8", flag: "wx", mode: 0o600 });
 
-    const managed = buildManagedCodexConfig(original, { baseUrl: this.baseUrl, model: this.model });
+    const managed = buildManagedCodexConfig(original, { baseUrl: this.baseUrl, model: this.model, catalogFile: this.catalogFile });
     try {
       await writeFile(this.configPath, managed, { encoding: "utf8", mode: 0o600 });
       await this.#writeState({

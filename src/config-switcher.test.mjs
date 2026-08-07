@@ -102,3 +102,27 @@ test("restores the absence of config when none existed before enable", async (t)
   await switcher.disable();
   await assert.rejects(() => access(path.join(codexHome, "config.toml")), (error) => error.code === "ENOENT");
 });
+
+test("the managed config names the catalog file and restore removes it", async (t) => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "modeldock-catalog-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const original = 'model = "gpt-5.6-sol"\nmodel_reasoning_effort = "high"\n';
+  await writeFile(path.join(home, "config.toml"), original, "utf8");
+
+  const switcher = new CodexConfigSwitcher({
+    codexHome: home,
+    baseUrl: "http://127.0.0.1:4097/v1",
+    model: "deepseek-v4-flash",
+    catalogFile: "C:/Users/x/.modeldock/codex-model-catalog.json",
+  });
+  await switcher.enable();
+
+  const managed = await readFile(path.join(home, "config.toml"), "utf8");
+  // The App never refreshes a custom provider's /models, so it needs this pointer.
+  assert.match(managed, /^model_catalog_json = "C:\/Users\/x\/\.modeldock\/codex-model-catalog\.json"$/m);
+
+  await switcher.disable();
+  const restored = await readFile(path.join(home, "config.toml"), "utf8");
+  assert.equal(/model_catalog_json/.test(restored), false, "the key is a managed field and goes away with the rest");
+  assert.match(restored, /^model = "gpt-5\.6-sol"$/m, "the user's own model comes back");
+});

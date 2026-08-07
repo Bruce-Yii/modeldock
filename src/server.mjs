@@ -1,5 +1,6 @@
 import path from "node:path";
 import os from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { randomUUID, createHash } from "node:crypto";
 import express from "express";
@@ -1350,10 +1351,13 @@ export function createServices(config = loadConfig()) {
     getVisionModel: () => modelSelection.visionModel,
     getSessionSeed: () => activeSessionSeed,
   });
+  const catalogFile = mutableConfig.codexCatalogFile
+    || path.join(os.homedir(), ".modeldock", "codex-model-catalog.json");
   const configSwitcher = new CodexConfigSwitcher({
     codexHome: mutableConfig.codexHome,
     baseUrl: `http://${urlHost(mutableConfig.host)}:${mutableConfig.port}/v1`,
     model: mutableConfig.mainModel,
+    catalogFile,
   });
   const autostart = createAutostart();
   autostart.refresh().catch(() => {});
@@ -1362,10 +1366,36 @@ export function createServices(config = loadConfig()) {
   updater.check().catch(() => {});
   const routeAffinity = new RouteAffinity();
   const runtime = { profile: mutableConfig.profile, profileId: mutableConfig.profileId };
+  // The Codex App never fetches a custom provider's /models: its refresh predicate is
+  // `uses_codex_backend() || has_command_auth()`, and an API-key provider satisfies
+  // neither (openai/codex#32119), so the App picker shows "Custom" for everything it
+  // cannot name locally. It does read a catalog file named by `model_catalog_json`, so
+  // publish the same catalog we serve over HTTP to disk and point the managed Codex
+  // config at it. The CLI keeps using /v1/models; both then see one list.
+  const writeCatalogFile = () => {
+    try {
+      const catalog = codexModelCatalog({
+        ...mutableConfig,
+        mainModel: modelSelection.mainModel,
+        visionModel: modelSelection.visionModel,
+      });
+      mkdirSync(path.dirname(catalogFile), { recursive: true });
+      writeFileSync(catalogFile, JSON.stringify(catalog, null, 2), "utf8");
+      return catalog.models?.length || 0;
+    } catch (error) {
+      console.log(`[gate] model catalog file write failed: ${error.message}`);
+      return 0;
+    }
+  };
   const refreshModelCatalog = () => refreshProfileModels(mutableConfig.profile, mutableConfig).then(
-    () => console.log(`[gate] model refresh done, availableModels=${(mutableConfig.profile?.availableModels || []).length}`),
+    () => {
+      const written = writeCatalogFile();
+      console.log(`[gate] model refresh done, availableModels=${(mutableConfig.profile?.availableModels || []).length}, catalog file=${written} models`);
+    },
     (error) => console.log(`[gate] model refresh error: ${error.message}`),
   );
+  // Write once at boot so the file exists even when the refresh is disabled or fails.
+  writeCatalogFile();
   refreshModelCatalog();
   const refreshIntervalHours = Number(mutableConfig.modelRefreshHours || 24);
   const modelRefreshTimer = refreshIntervalHours > 0
