@@ -25,8 +25,13 @@ as tools, without rewriting the conversation history:
   model you chose in Settings, or let the model call `vision_inspect` on a
   screenshot or file.
 - **Speak** - the `speak` tool turns text into a local audio file.
-- **Hear** - the `hear` tool transcribes an audio file back to text.
+- **Hear** - the `hear` tool transcribes an audio file back to text (Windows SAPI, or whisper.cpp on macOS/Linux).
 - **Search** - the `web_search_exa` tool queries the web through Exa.
+
+On macOS, `hear` uses whisper.cpp (`brew install whisper-cpp`) with a small ggml
+model. The first `hear` call downloads `ggml-tiny.bin` automatically, or you can
+point `MODELDOCK_WHISPER_MODEL` at another `ggml-*.bin` file. Set
+`MODELDOCK_WHISPER_AUTO_MODEL=0` to disable the automatic download.
 
 The bridge pipes the Responses stream through without buffering or resynthesizing
 SSE. Its rewrites are surgical and documented: orphaned tool rows a compact task
