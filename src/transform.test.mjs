@@ -637,3 +637,30 @@ test("a provider-suffixed model id is stripped before it reaches the upstream", 
       targetModel: "deepseek-v4-flash@deepseek-official" });
   assert.equal(payload.model, "deepseek-v4-flash", "the owner suffix is a routing address, not a model name");
 });
+
+test("artifact tasks get a skill-priority nudge with the tool import path", () => {
+  const source = {
+    model: "gpt-5.6-luna",
+    input: [{ role: "user", content: [{ type: "input_text", text: "把这个论文做成一个 pptx 总结" }] }],
+  };
+  const { payload } = transformResponsesRequest(source, {
+      profile: UNFILTERED_GO_PROFILE,
+      mediaStore: fakeStore(), defaultModel: "deepseek-v4-flash",
+      targetModel: "gpt-5.6-luna" });
+  assert.match(payload.instructions || "", /ARTIFACT SKILLS/);
+  assert.match(payload.instructions, /prefer the bundled artifact plugins/);
+  assert.match(payload.instructions, /@oai\/artifact-tool/);
+  assert.match(payload.instructions, /js_add_node_module_dir/);
+});
+
+test("non-artifact tasks get no artifact nudge", () => {
+  const source = {
+    model: "gpt-5.6-luna",
+    input: [{ role: "user", content: [{ type: "input_text", text: "看看这个按钮为什么被遮挡" }] }],
+  };
+  const { payload } = transformResponsesRequest(source, {
+      profile: UNFILTERED_GO_PROFILE,
+      mediaStore: fakeStore(), defaultModel: "deepseek-v4-flash",
+      targetModel: "gpt-5.6-luna" });
+  assert.doesNotMatch(payload.instructions || "", /ARTIFACT SKILLS/);
+});

@@ -1,6 +1,41 @@
 import { bareModelId } from "./profiles.mjs";
 import { clipReasoningHistory } from "./md-memory.mjs";
+import { existsSync, readdirSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 const DEFAULT_BLOCKED_TOOL_TYPES = new Set(["tool_search", "web_search"]);
+
+const ARTIFACT_TASK_KEYWORDS = /(pptx|ppt|powerpoint|slide deck|slides|presentation|docx|word document|word doc|xlsx|excel|spreadsheet|\.pdf\b|pdf file|pdf document|pdf summary)/i;
+
+let artifactPathsCache = null;
+
+// Locate the Codex artifact-tool environment once: the plugin SKILL.md cache under
+// ~/.codex/plugins/cache/openai-primary-runtime, and the @oai/artifact-tool package in
+// the primary runtime's node_modules. node_repl's own runtime does NOT ship the package.
+function resolveArtifactPaths() {
+  if (artifactPathsCache !== null) return artifactPathsCache;
+  const result = { pluginRoot: "", nodeModules: "" };
+  try {
+    const home = os.homedir();
+    const pluginRoot = path.join(home, ".codex", "plugins", "cache", "openai-primary-runtime");
+    if (existsSync(pluginRoot)) result.pluginRoot = pluginRoot;
+    const runtimesRoot = path.join(home, ".cache", "codex-runtimes");
+    if (existsSync(runtimesRoot)) {
+      for (const entry of readdirSync(runtimesRoot, { withFileTypes: true })) {
+        if (!entry.isDirectory() || !entry.name.startsWith("codex-primary-runtime")) continue;
+        const candidate = path.join(runtimesRoot, entry.name, "dependencies", "node", "node_modules", "@oai", "artifact-tool");
+        if (existsSync(candidate)) {
+          result.nodeModules = path.join(runtimesRoot, entry.name, "dependencies", "node", "node_modules");
+          break;
+        }
+      }
+    }
+  } catch {
+    // Path resolution is best-effort; without it the nudge falls back to generic text.
+  }
+  artifactPathsCache = result;
+  return result;
+}
 
 // Bridge schema for Codex's client-side tool_search (MCP-tool elicitation): the hosted
 // `{type:"tool_search"}` schema is rejected by the Go camp (400), but Codex executes the
@@ -648,6 +683,35 @@ export function transformResponsesRequest(source, { mediaStore, defaultModel, ta
       "Do not improvise Windows or browser automation with shell scripts, screenshots, or window-enumeration scripts before loading the node_repl MCP tools via tool_search.",
     ].join(" ");
     payload.instructions = [payload.instructions, elicitationInstruction].filter((value) => typeof value === "string" && value.trim()).join("\n\n");
+  }
+  // Artifact-file tasks (pptx/docx/xlsx/pdf) should use the bundled artifact plugins and
+  // @oai/artifact-tool, not ad-hoc libraries. The plugins are lazy skills (the model must
+  // read the SKILL.md), and the package lives in the Codex primary runtime's node_modules
+  // (NOT the node_repl cua runtime), so the import path must be spelled out.
+  const lastUserText = (() => {
+    const input = Array.isArray(payload.input) ? payload.input : [];
+    for (let index = input.length - 1; index >= 0; index -= 1) {
+      const item = input[index];
+      if (item?.role !== "user") continue;
+      if (typeof item.content === "string") return item.content;
+      if (Array.isArray(item.content)) return item.content.map((part) => part?.text || "").join(" ");
+    }
+    return "";
+  })();
+  if (ARTIFACT_TASK_KEYWORDS.test(lastUserText)) {
+    const { pluginRoot, nodeModules } = resolveArtifactPaths();
+    const artifactParts = [
+      "[ARTIFACT SKILLS] For document, spreadsheet, presentation, or PDF file work (pptx/docx/xlsx/pdf), prefer the bundled artifact plugins over ad-hoc libraries such as python-pptx or python-docx.",
+    ];
+    if (pluginRoot) {
+      artifactParts.push(`First read the matching plugin's SKILL.md under ${pluginRoot} (presentations for decks, documents for .docx, spreadsheets for .xlsx, pdf for PDFs) and follow its render-and-verify workflow.`);
+    }
+    if (nodeModules) {
+      artifactParts.push(`Use the @oai/artifact-tool package: in a node_repl js session, run js_add_node_module_dir with "${nodeModules}" first, then await import("@oai/artifact-tool").`);
+    } else {
+      artifactParts.push("Use the @oai/artifact-tool package when it is available in the runtime node_modules.");
+    }
+    payload.instructions = [payload.instructions, artifactParts.join(" ")].filter((value) => typeof value === "string" && value.trim()).join("\n\n");
   }
 
   return {
