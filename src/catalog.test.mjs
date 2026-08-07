@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { baseInstructionsFor, catalogFor } from "./catalog.mjs";
+import { baseInstructionsFor, catalogFor, enabledProvidersFor } from "./catalog.mjs";
 import { OPENCODE_GO_PROFILE } from "./profiles.mjs";
 
 function configStub() {
@@ -9,6 +9,8 @@ function configStub() {
     profileId: "opencode-go",
     mainModel: "deepseek-v4-flash",
     visionModel: "gpt-5.6-luna",
+    goToken: "go-token",
+    tokens: { "opencode-go": "go-token", "deepseek-official": "" },
   };
 }
 
@@ -52,4 +54,29 @@ test("baseInstructionsFor includes the design-first workflow", () => {
   assert.match(instructions, /call image_gen first/);
   assert.match(instructions, /call vision_inspect with that path/);
   assert.match(instructions, /translate the vision_inspect observation into HTML\/CSS/);
+});
+
+test("enabledProvidersFor includes the active profile and any provider with a token", () => {
+  const ids = enabledProvidersFor(configStub());
+  assert.deepEqual([...ids].sort(), ["opencode-go"]);
+
+  const withDeepSeek = {
+    ...configStub(),
+    tokens: { "opencode-go": "go-token", "deepseek-official": "ds-token" },
+  };
+  assert.deepEqual([...enabledProvidersFor(withDeepSeek)].sort(), ["deepseek-official", "opencode-go"]);
+});
+
+test("catalogFor publishes only models owned by enabled providers", () => {
+  const catalog = catalogFor(configStub());
+  const slugs = catalog.models.map((entry) => entry.slug);
+  assert.ok(slugs.includes("deepseek-v4-flash"));
+  assert.ok(!slugs.some((slug) => slug.endsWith("@deepseek-official")), "DeepSeek official models are hidden without a token");
+
+  const withDeepSeek = {
+    ...configStub(),
+    tokens: { "opencode-go": "go-token", "deepseek-official": "ds-token" },
+  };
+  const withDeepSeekCatalog = catalogFor(withDeepSeek);
+  assert.ok(withDeepSeekCatalog.models.some((entry) => entry.slug === "deepseek-v4-flash@deepseek-official"));
 });

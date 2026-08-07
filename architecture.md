@@ -217,6 +217,11 @@ The dashboard shows:
   provider + model pair, just switches from a selector to a display.
 - Vision model: a picker restricted to models declared vision-capable. Audio
   tools (`speak` / `hear`) stay available as MCP tools.
+- Provider visibility: only providers with a configured token are shown and
+  published. The active profile is always shown (its token may resolve from the
+  Codex config backup); other providers appear only when their key is set in
+  `.env`. A provider with no key cannot serve requests, so it stays hidden from
+  the dashboard and the Codex model catalog.
 - Meter: per-tool counters, latency, upstream usage from `response.completed`,
   and recent request/error trace.
 - Config switch state and the backup/restore status.

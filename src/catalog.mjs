@@ -26,12 +26,34 @@ export function catalogFor(config) {
     visionModel: config.visionModel,
     baseInstructions: baseInstructionsFor(config),
   });
+  const enabledProviderIds = enabledProvidersFor(config);
   const models = (catalog.models || []).map((entry) => {
     // Direct image escalation: a request whose current turn carries an
     // input_image is routed to the vision model, so every relayed model may
     // declare image input at the endpoint. This describes the endpoint's
     // effective capability, not the main model's native modality.
     return { ...entry, input_modalities: ["text", "image"] };
+  }).filter((entry) => {
+    // Only models owned by a provider with a configured token are published. The
+    // active profile is always included (its token may resolve from the Codex
+    // config backup); other providers need an explicit key.
+    const owner = ownerProviderFor(entry.slug);
+    return enabledProviderIds.has(owner);
   });
   return { ...catalog, models };
+}
+
+export function enabledProvidersFor(config) {
+  const ids = new Set([config.profileId || "opencode-go"]);
+  const tokens = config.tokens || {};
+  for (const [provider, token] of Object.entries(tokens)) {
+    if (token) ids.add(provider);
+  }
+  if (config.goToken) ids.add("opencode-go");
+  return ids;
+}
+
+function ownerProviderFor(slug) {
+  const at = String(slug || "").lastIndexOf("@");
+  return at > 0 ? String(slug).slice(at + 1) : "opencode-go";
 }

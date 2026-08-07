@@ -121,10 +121,13 @@ function publishedModelIds(config) {
 
 function modelOptions(config, profileId) {
   const all = [];
-  for (const entry of profileOptions()) {
+  for (const entry of enabledProviders(config)) {
     const profile = profileById(entry.id);
     for (const model of profile?.availableModels || []) {
-      if (!all.some((existing) => existing.id === model.id && existing.provider === entry.id)) {
+      if (
+        model.status !== "unavailable"
+        && !all.some((existing) => existing.id === model.id && existing.provider === entry.id)
+      ) {
         all.push({ ...withTierLabel(model), provider: entry.id });
       }
     }
@@ -143,7 +146,20 @@ function modelCatalogModels(config, profileId) {
 }
 
 function providerOptions(config) {
-  return profileOptions();
+  return enabledProviders(config);
+}
+
+// Only providers with a configured token (or the active profile, which may resolve
+// its token from the Codex config backup) are shown in the picker and published in
+// the catalog. A provider with no key cannot serve requests, so it stays hidden.
+function enabledProviders(config) {
+  const all = profileOptions();
+  const active = config.profileId || "opencode-go";
+  return all.filter((entry) => {
+    if (entry.id === active) return true;
+    const token = config.tokens?.[entry.id];
+    return Boolean(token);
+  });
 }
 
 function modelsPayload(services) {
