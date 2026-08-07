@@ -50,10 +50,10 @@ test("baseInstructionsFor includes the vision and restart guidance", () => {
 
 test("baseInstructionsFor includes the design-first workflow", () => {
   const instructions = baseInstructionsFor(configStub());
-  assert.match(instructions, /Design-first workflow \(MANDATORY before any frontend\/UI work\)/);
-  assert.match(instructions, /call image_gen first/);
-  assert.match(instructions, /call vision_inspect with that path/);
-  assert.match(instructions, /translate the vision_inspect observation into HTML\/CSS/);
+  assert.match(instructions, /Design-first workflow \(MANDATORY for frontend\/UI work\)/);
+  assert.match(instructions, /run image_gen first/);
+  assert.match(instructions, /read the output with vision_inspect/);
+  assert.match(instructions, /implement by translating structure, palette, and hierarchy/);
 });
 
 test("enabledProvidersFor includes the active profile and any provider with a token", () => {
@@ -79,4 +79,16 @@ test("catalogFor publishes only models owned by enabled providers", () => {
   };
   const withDeepSeekCatalog = catalogFor(withDeepSeek);
   assert.ok(withDeepSeekCatalog.models.some((entry) => entry.slug === "deepseek-v4-flash@deepseek-official"));
+});
+
+test("catalogFor never publishes chat-dialect models even if marked available", () => {
+  const profile = {
+    ...OPENCODE_GO_PROFILE,
+    availableModels: [
+      ...OPENCODE_GO_PROFILE.availableModels.filter((m) => m.id !== "qwen3.8-max"),
+      { id: "qwen3.8-max", label: "Qwen 3.8 Max", endpoint: "chat", supportsVision: true, visionScore: 9, visionMaxScore: 9, visionTier: "strong", quota5h: 160, speedTier: "medium", status: "available" },
+    ],
+  };
+  const catalog = catalogFor({ ...configStub(), profile });
+  assert.ok(!catalog.models.some((entry) => entry.slug === "qwen3.8-max"), "chat vision model must not be published");
 });

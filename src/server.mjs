@@ -126,6 +126,7 @@ function modelOptions(config, profileId) {
     for (const model of profile?.availableModels || []) {
       if (
         model.status !== "unavailable"
+        && model.endpoint !== "chat"
         && !all.some((existing) => existing.id === model.id && existing.provider === entry.id)
       ) {
         all.push({ ...withTierLabel(model), provider: entry.id });

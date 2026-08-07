@@ -212,6 +212,13 @@ function usageFromEvent(event) {
 // re-emission, no synthetic keepalive: an idle upstream stays idle downstream so
 // Codex's own timeout remains the only stall safety net. The tee observer
 // receives a read-only copy of each chunk for usage extraction.
+//
+// Node stream .pipe() is used instead of a manual read/write loop so downstream
+// backpressure is honoured (a slow client pauses the upstream read instead of
+// buffering the whole response in memory). A client that disconnects mid-stream
+// emits "close" without "finish" or "error"; without that handler the promise
+// never settles and the request stays counted as in-flight forever, with the
+// upstream body still being read.
 export async function pipeGatewayStream(upstreamBody, res, tee) {
   if (!upstreamBody) {
     res.end();
@@ -219,7 +226,7 @@ export async function pipeGatewayStream(upstreamBody, res, tee) {
   }
   let bytes = 0;
   await new Promise((resolve, reject) => {
-    const reader = upstreamBody.getReader();
+    const stream = Readable.fromWeb(upstreamBody);
     let settled = false;
     const settle = (error) => {
       if (settled) return;
@@ -227,25 +234,19 @@ export async function pipeGatewayStream(upstreamBody, res, tee) {
       if (error) reject(error);
       else resolve();
     };
-    const pump = async () => {
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          if (value) {
-            tee?.push(value);
-            res.write(value);
-            bytes += value.byteLength || Buffer.byteLength(value);
-          }
-        }
-        tee?.end?.();
-        res.end();
-        settle();
-      } catch (error) {
-        settle(error);
-      }
-    };
-    pump();
+    stream.on("data", (chunk) => {
+      tee?.push(chunk);
+      bytes += chunk.byteLength || Buffer.byteLength(chunk);
+    });
+    stream.once("end", () => tee?.end?.());
+    stream.once("error", settle);
+    res.once("finish", () => settle());
+    res.once("error", settle);
+    res.once("close", () => {
+      if (!settled) stream.destroy();
+      settle();
+    });
+    stream.pipe(res);
   });
   return bytes;
 }
