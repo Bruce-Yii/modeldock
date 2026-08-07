@@ -3,12 +3,26 @@ import assert from "node:assert/strict";
 import {
   OPENCODE_GO_PROFILE,
   DEEPSEEK_OFFICIAL_PROFILE,
+  publishedSlugFor,
   profileById,
   profileOptions,
   CONTEXT_WINDOW,
   AUTO_COMPACT_PERCENT,
   AUTO_COMPACT_TOKEN_LIMIT,
 } from "./profiles.mjs";
+
+test("publishedSlugFor keeps bare ids unless a collision needs the provider suffix", () => {
+  const luna = OPENCODE_GO_PROFILE.availableModels.find((model) => model.id === "gpt-5.6-luna");
+  assert.equal(luna.ownerQualified, true, "our Luna must stay out of the bare native gpt-5.6-luna slot");
+  assert.equal(publishedSlugFor("opencode-go", luna), "gpt-5.6-luna@opencode-go");
+  assert.equal(publishedSlugFor("opencode-go", "gpt-5.6-luna"), "gpt-5.6-luna@opencode-go", "string ids resolve through the profile entry too");
+  assert.equal(publishedSlugFor("opencode-go", "deepseek-v4-flash"), "deepseek-v4-flash");
+  assert.equal(
+    publishedSlugFor("deepseek-official", "deepseek-v4-flash"),
+    "deepseek-v4-flash@deepseek-official",
+    "a duplicate in another provider is owner-qualified",
+  );
+});
 
 test("exposes every registered profile through the registry", () => {
   assert.equal(profileById("opencode-go"), OPENCODE_GO_PROFILE);
@@ -68,9 +82,9 @@ test("every profile compacts at 80% of the model context window", () => {
   for (const profile of [OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE]) {
     const catalog = profile.modelCatalog({ mainModel: "deepseek-v4-flash", baseInstructions: "base" });
     const model = catalog.models[0];
-    assert.equal(model.context_window, 300_000, `${profile.id} declares deepseek-v4-flash at 300k`);
-    assert.equal(model.max_context_window, 300_000);
-    assert.equal(model.auto_compact_token_limit, Math.floor(300_000 * AUTO_COMPACT_PERCENT), `${profile.id} must auto-compact at 80% of the 300k window`);
+    assert.equal(model.context_window, 400_000, `${profile.id} declares deepseek-v4-flash at 400k`);
+    assert.equal(model.max_context_window, 400_000);
+    assert.equal(model.auto_compact_token_limit, Math.floor(400_000 * AUTO_COMPACT_PERCENT), `${profile.id} must auto-compact at 80% of the 400k window`);
   }
 });
 

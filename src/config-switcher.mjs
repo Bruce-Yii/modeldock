@@ -82,9 +82,12 @@ function extractManagedBlock(source) {
   return block;
 }
 
+// The top-level `model` key is deliberately NOT part of the signature: the Codex
+// App picker rewrites it on every model selection, and the whole catalog exists
+// so the picker can drive routing. Treating a picker change as foreign drift
+// made the dashboard scream and disable() refuse to restore after normal use.
 function managedSignature(source) {
   return JSON.stringify({
-    model: topLevelString(source, "model"),
     block: extractManagedBlock(source),
     legacy: {
       modelProvider: topLevelString(source, "model_provider"),
@@ -271,7 +274,25 @@ export class CodexConfigSwitcher {
     let current = "";
     if (configExists) current = await readFile(this.configPath, "utf8");
     const routeActive = hasManagedRoute(current);
-    const drifted = Boolean(state.enabled && routeActive && state.managedHash && currentHash !== state.managedHash);
+    // Whole-file hash is only the fast path: ANY unrelated edit to config.toml
+    // (an MCP server registration, a project trust entry, an App-written pref)
+    // changes it. Real drift means OUR managed fields differ from what enable
+    // would write today, so fall back to the managed signature before flagging.
+    const hashChanged = Boolean(state.enabled && routeActive && state.managedHash && currentHash !== state.managedHash);
+    let drifted = false;
+    if (hashChanged) {
+      const expected = buildManagedCodexConfig(current, {
+        baseUrl: this.baseUrl,
+        model: this.model,
+        catalogFile: this.catalogFile,
+        mcpUrl: this.mcpUrl,
+      });
+      drifted = managedSignature(current) !== managedSignature(expected);
+      // Our own pre-transparent modeldock_go shape is a format migration, not
+      // user drift - restore already treats it that way, and needsMigration
+      // below tells the UI what to actually do about it.
+      if (drifted && isLegacyManaged(current) && !isNewManaged(current)) drifted = false;
+    }
     return {
       enabled: Boolean(state.enabled && routeActive),
       managed: Boolean(state.enabled && routeActive && !drifted),

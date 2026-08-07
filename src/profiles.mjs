@@ -85,7 +85,9 @@ function catalogEntry({ slug, displayName, description, compHash, inputModalitie
 
 function modelCatalogDefaults({ mainModel, displayName, description, compHash, inputModalities, supportsSearchTool, baseInstructions, defaultReasoningLevel = "high", supportedReasoningLevels = [ { effort: "low", description: "Fast responses with lighter reasoning" }, { effort: "high", description: "Deeper reasoning for complex work" }, { effort: "xhigh", description: "Extra-deep reasoning for hard problems" } ], availableModels = [], autoRouteEntry = null }) {
   const base = { compHash, supportsSearchTool, baseInstructions, defaultReasoningLevel, supportedReasoningLevels };
-  const contextWindowFor = (id) => availableModels.find((model) => model.id === id)?.contextWindow || CONTEXT_WINDOW;
+  // The main model may be the published slug (gpt-5.6-luna@opencode-go); the profile
+  // catalog stores bare ids, so resolve through bareModelId before looking it up.
+  const contextWindowFor = (id) => availableModels.find((model) => model.id === bareModelId(id))?.contextWindow || CONTEXT_WINDOW;
   // Every provider's models in one list, each labelled with its source, so the picker
   // can switch upstream as well as model. The bare id stays with the default profile so
   // existing Codex configs keep resolving; another provider's copy of the same id is
@@ -95,9 +97,7 @@ function modelCatalogDefaults({ mainModel, displayName, description, compHash, i
     const profile = profileById(entry.id);
     for (const model of profile.availableModels || []) {
       if (!model?.id || model.status === "unavailable") continue;
-      const owned = entry.id !== DEFAULT_PROFILE_ID
-        && (profileById(DEFAULT_PROFILE_ID).availableModels || []).some((m) => m.id === model.id);
-      const slug = owned ? `${model.id}${PROVIDER_SEPARATOR}${entry.id}` : model.id;
+      const slug = publishedSlugFor(entry.id, model);
       if (slug === mainModel || rest.some((m) => m.slug === slug)) continue;
       rest.push({
         slug,
@@ -146,7 +146,7 @@ const OPENCODE_GO_PROFILE = {
 
   blockedToolTypes: new Set(["tool_search", "web_search"]),
   availableModels: [
-    { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash", endpoint: "responses", supportsVision: false, contextWindow: 300_000, status: "available" },
+    { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash", endpoint: "responses", supportsVision: false, contextWindow: 400_000, status: "available" },
     // Zen free tier: same OpenCode token, but the upstream is zen/v1 not zen/go/v1.
     // deepseek-v4-flash-free is available but frequently returns 503 when the free
     // quota is exhausted; the upstream surfaces it per request.
@@ -154,11 +154,14 @@ const OPENCODE_GO_PROFILE = {
     { id: "nemotron-3-ultra-free", label: "Nemotron 3 Ultra Free", endpoint: "responses", zen: true, free: true, supportsVision: false, status: "available" },
     { id: "laguna-s-2.1-free", label: "Laguna S 2.1 Free", endpoint: "responses", zen: true, free: true, supportsVision: false, status: "available" },
     { id: "longcat-2.0-free", label: "Longcat 2.0 Free", endpoint: "responses", zen: true, free: true, supportsVision: false, status: "available" },
-    { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro", endpoint: "responses", supportsVision: false, status: "available" },
+    { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro", endpoint: "responses", supportsVision: false, contextWindow: 400_000, status: "available" },
     { id: "glm-5", label: "GLM 5", endpoint: "responses", supportsVision: false, status: "available" },
     { id: "glm-5.1", label: "GLM 5.1", endpoint: "responses", supportsVision: false, status: "available" },
     { id: "glm-5.2", label: "GLM 5.2", endpoint: "responses", supportsVision: false, status: "available" },
-    { id: "gpt-5.6-luna", label: "Luna", endpoint: "responses", supportsVision: true, visionScore: 7, visionMaxScore: 9, visionTier: "medium", quota5h: 2050, speedTier: "fast", status: "available" },
+    // The bare id gpt-5.6-luna is also a native GPT picker slot, so our Luna is
+    // published under the @opencode-go suffix and the bare id stays reserved for
+    // the native backend's GPT-5.6-Luna.
+    { id: "gpt-5.6-luna", label: "Luna", endpoint: "responses", supportsVision: true, visionScore: 7, visionMaxScore: 9, visionTier: "medium", quota5h: 2050, speedTier: "fast", ownerQualified: true, status: "available" },
     { id: "grok-4.5", label: "Grok 4.5", endpoint: "responses", supportsVision: true, visionScore: 9, visionMaxScore: 9, visionTier: "strong", quota5h: 120, speedTier: "fast", status: "available" },
     { id: "hy3", label: "Hy3", endpoint: "responses", supportsVision: false, status: "available" },
     { id: "hy3-preview", label: "Hy3 Preview", endpoint: "responses", supportsVision: false, status: "unavailable" },
@@ -189,7 +192,7 @@ const OPENCODE_GO_PROFILE = {
   modelCatalog({ mainModel, visionModel, baseInstructions }) {
     return modelCatalogDefaults({
       mainModel,
-      displayName: `${OPENCODE_GO_PROFILE.availableModels.find((m) => m.id === mainModel)?.label || mainModel} (OpenCode Go)`,
+      displayName: `${OPENCODE_GO_PROFILE.availableModels.find((m) => m.id === bareModelId(mainModel))?.label || mainModel} (OpenCode Go)`,
       description: "OpenCode Go through the local ModelDock Responses gate.",
       compHash: "modeldock-opencode-go-v1",
       inputModalities: ["text", "image"],
@@ -222,8 +225,8 @@ const DEEPSEEK_OFFICIAL_PROFILE = {
   // Hosted web_search is native too (echoed in the response tools list); tool_search is
   // silently ignored. So the same allowlist as opencode-go works, and nothing is blocked.
   availableModels: [
-    { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash", endpoint: "responses", supportsVision: false, contextWindow: 300_000, status: "available" },
-    { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro", endpoint: "responses", supportsVision: false, status: "available" },
+    { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash", endpoint: "responses", supportsVision: false, contextWindow: 400_000, status: "available" },
+    { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro", endpoint: "responses", supportsVision: false, contextWindow: 400_000, status: "available" },
   ],
 
   modelCatalog({ mainModel, baseInstructions }) {
@@ -269,6 +272,22 @@ export const PROVIDER_SEPARATOR = "@";
 // The profile whose ids are published bare, so ids already written into Codex configs
 // keep resolving without a suffix.
 const DEFAULT_PROFILE_ID = "opencode-go";
+
+// The slug under which a model id is published in the Codex catalog. Bare ids stay
+// with the default profile so existing Codex configs keep resolving; a duplicate in
+// another provider, or a model whose bare id must stay reserved (gpt-5.6-luna is
+// also a native GPT picker slot), carries the @provider suffix. Accepts either a
+// profile model object or a bare id string, so the catalog builder and config
+// loading share one rule.
+export function publishedSlugFor(profileId, model) {
+  const id = typeof model === "string" ? model : model?.id;
+  if (!id) return model;
+  const entry = profileById(profileId || DEFAULT_PROFILE_ID).availableModels?.find((candidate) => candidate.id === id);
+  const ownerQualified = Boolean(entry?.ownerQualified || (typeof model === "object" && model?.ownerQualified));
+  const owned = profileId !== DEFAULT_PROFILE_ID
+    && (profileById(DEFAULT_PROFILE_ID).availableModels || []).some((candidate) => candidate.id === id);
+  return owned || ownerQualified ? `${id}${PROVIDER_SEPARATOR}${profileId || DEFAULT_PROFILE_ID}` : id;
+}
 
 export function bareModelId(model) {
   const at = String(model || "").lastIndexOf(PROVIDER_SEPARATOR);

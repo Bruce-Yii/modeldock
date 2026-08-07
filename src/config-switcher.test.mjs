@@ -102,7 +102,10 @@ test("preserves unrelated edits made after enable while restoring managed fields
   await switcher.enable();
   await appendFile(configPath, "\n[plugins.user_added]\nenabled = true\n", "utf8");
   const status = await switcher.status();
-  assert.equal(status.drifted, true);
+  // Unrelated additions are NOT drift: the managed fields are untouched, and
+  // flagging every MCP registration / App-written pref made the dashboard show
+  // "changed outside ModelDock" during completely normal use.
+  assert.equal(status.drifted, false);
   await switcher.disable();
   const restored = await readFile(configPath, "utf8");
   assert.match(restored, /model = "gpt-5.6-sol"/);
@@ -121,7 +124,23 @@ test("refuses restore only when ModelDock-managed fields conflict", async (t) =>
     current.replace('openai_base_url = "http://127.0.0.1:4097/v1"', 'openai_base_url = "http://127.0.0.1:9999/v1"'),
     "utf8",
   );
+  const status = await switcher.status();
+  assert.equal(status.drifted, true, "a tampered managed field must still flag drift");
   await assert.rejects(() => switcher.disable(), (error) => error.code === "CONFIG_DRIFTED");
+});
+
+test("a picker-driven model change is not drift and does not block restore", async (t) => {
+  const { configPath, switcher } = await fixture(t);
+  await switcher.enable();
+  const current = await readFile(configPath, "utf8");
+  // The Codex App picker rewrites the top-level model on every selection; the
+  // catalog exists precisely so it can. That must neither flag drift nor make
+  // disable() refuse the restore.
+  await writeFile(configPath, current.replace(/^model = .*$/m, 'model = "glm-5.2"'), "utf8");
+  const status = await switcher.status();
+  assert.equal(status.drifted, false);
+  const disabled = await switcher.disable();
+  assert.equal(disabled.enabled, false);
 });
 
 test("recognizes a config already restored outside ModelDock and clears stale state", async (t) => {
