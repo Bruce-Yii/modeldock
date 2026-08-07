@@ -339,8 +339,9 @@ test("relayResponses forwards a streamed response and records usage", async () =
   const sink = collectStream();
   const res = responseStub(sink);
   const blockedReports = [];
+  const finishResults = [];
   const metrics = {
-    begin: () => () => {},
+    begin: () => (result) => finishResults.push(result),
     recordResponseTransform: (report) => blockedReports.push(report.blocked),
     recordResponseUsage: () => {},
   };
@@ -388,6 +389,11 @@ test("relayResponses forwards a streamed response and records usage", async () =
     assert.match(forwarded, /response\.completed/);
     const blocked = blockedReports[blockedReports.length - 1];
     assert.deepEqual(blocked, { tool_search: 0, web_search: 1 }, "web_search is counted separately from tool_search");
+    // The dashboard's context-token waveform reads recent[].inputTokens, which
+    // comes from the finish() payload - regression guard for the flat-line bug.
+    const finished = finishResults[finishResults.length - 1];
+    assert.equal(finished.inputTokens, 4, "finish must carry input tokens onto the trace record");
+    assert.equal(finished.outputTokens, 2, "finish must carry output tokens onto the trace record");
   } finally {
     globalThis.fetch = originalFetch;
   }

@@ -384,7 +384,16 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     if (completedResponse && routeAffinity) {
       routeAffinity.registerResponse(completedResponse, route.model);
     }
-    finish?.({ ok: true, httpStatus: upstream.status, upstream: target.provider, bytesOut });
+    // inputTokens/outputTokens ride on the trace record: the dashboard's
+    // context-token waveform plots recent[].inputTokens per completed call.
+    finish?.({
+      ok: true,
+      httpStatus: upstream.status,
+      upstream: target.provider,
+      bytesOut,
+      inputTokens: usage?.input_tokens || 0,
+      outputTokens: usage?.output_tokens || 0,
+    });
     metrics?.recordResponseTransform?.({
       blocked: { tool_search: stripped.toolSearch, web_search: stripped.webSearch },
       toolChoiceRewritten: false,
