@@ -109,7 +109,7 @@ function setTopLevel(lines, key, value) {
   return lines;
 }
 
-export function buildManagedCodexConfig(source, { baseUrl, model, catalogFile = "" }) {
+export function buildManagedCodexConfig(source, { baseUrl, model, catalogFile = "", mcpUrl = "" }) {
   const newline = source.includes("\r\n") ? "\r\n" : "\n";
   let lines = removeManagedProvider(source.replace(/\r\n/g, "\n").split("\n"));
   while (lines.length && !lines.at(-1).trim()) lines.pop();
@@ -120,6 +120,14 @@ export function buildManagedCodexConfig(source, { baseUrl, model, catalogFile = 
   // so point it at the catalog file the gate writes; without this the App picker shows
   // "Custom" for every model it cannot name locally. The CLI keeps using /v1/models.
   if (catalogFile) lines = setTopLevel(lines, "model_catalog_json", catalogFile);
+  if (mcpUrl) {
+    lines.push(
+      "",
+      "[mcp_servers.modeldock]",
+      "# Managed by ModelDock: web_search_exa / vision_inspect / speak / hear sidecar.",
+      `url = ${tomlString(mcpUrl)}`,
+    );
+  }
   lines.push(
     "",
     "[model_providers.modeldock_go]",
@@ -134,7 +142,7 @@ export function buildManagedCodexConfig(source, { baseUrl, model, catalogFile = 
 }
 
 export class CodexConfigSwitcher {
-  constructor({ codexHome, baseUrl, model, catalogFile = "" }) {
+  constructor({ codexHome, baseUrl, model, catalogFile = "", mcpUrl = "" }) {
     this.codexHome = path.resolve(codexHome || path.join(process.cwd(), ".modeldock-codex-home"));
     this.configPath = path.join(this.codexHome, "config.toml");
     this.stateDir = path.join(this.codexHome, "modeldock");
@@ -144,6 +152,7 @@ export class CodexConfigSwitcher {
     // Written by the gate; named in the managed config so the Codex App can list our
     // models instead of labelling every one of them "Custom".
     this.catalogFile = catalogFile;
+    this.mcpUrl = mcpUrl;
   }
 
   async #readState() {
@@ -215,7 +224,7 @@ export class CodexConfigSwitcher {
     if (originalExisted) await copyFile(this.configPath, backupPath);
     else await writeFile(backupPath, "", { encoding: "utf8", flag: "wx", mode: 0o600 });
 
-    const managed = buildManagedCodexConfig(original, { baseUrl: this.baseUrl, model: this.model, catalogFile: this.catalogFile });
+    const managed = buildManagedCodexConfig(original, { baseUrl: this.baseUrl, model: this.model, catalogFile: this.catalogFile, mcpUrl: this.mcpUrl });
     try {
       await writeFile(this.configPath, managed, { encoding: "utf8", mode: 0o600 });
       await this.#writeState({
@@ -256,7 +265,7 @@ export class CodexConfigSwitcher {
           cause: error,
         });
       }
-      const expected = buildManagedCodexConfig(backup, { baseUrl: this.baseUrl, model: this.model });
+      const expected = buildManagedCodexConfig(backup, { baseUrl: this.baseUrl, model: this.model, mcpUrl: this.mcpUrl });
       if (sha256(current) !== state.managedHash && managedSignature(current) !== managedSignature(expected)) {
         throw Object.assign(new Error("ModelDock-managed provider fields changed outside ModelDock; refusing an ambiguous restore."), {
           code: "CONFIG_DRIFTED",

@@ -567,6 +567,7 @@ export function createServices(config = loadConfig()) {
   const configSwitcher = new CodexConfigSwitcher({
     codexHome: mutableConfig.codexHome,
     baseUrl: `http://${urlHost(mutableConfig.host)}:${mutableConfig.port}${callerBasePath(callerKey)}`,
+    mcpUrl: `http://${urlHost(mutableConfig.host)}:${mutableConfig.port}/mcp`,
     model: mutableConfig.mainModel,
     catalogFile,
   });

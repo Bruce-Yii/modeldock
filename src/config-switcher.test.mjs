@@ -23,7 +23,12 @@ async function fixture(t) {
   return {
     codexHome,
     configPath,
-    switcher: new CodexConfigSwitcher({ codexHome, baseUrl: "http://127.0.0.1:4097/v1", model: "deepseek-v4-flash" }),
+    switcher: new CodexConfigSwitcher({
+      codexHome,
+      baseUrl: "http://127.0.0.1:4097/v1",
+      mcpUrl: "http://127.0.0.1:4097/mcp",
+      model: "deepseek-v4-flash",
+    }),
   };
 }
 
@@ -31,6 +36,7 @@ test("managed config replaces only top-level provider defaults", () => {
   const managed = buildManagedCodexConfig(originalConfig, {
     baseUrl: "http://127.0.0.1:4097/v1",
     model: "deepseek-v4-flash",
+    mcpUrl: "http://127.0.0.1:4097/mcp",
   });
   assert.match(managed, /^model = "deepseek-v4-flash"/m);
   assert.match(managed, /^model_provider = "modeldock_go"/m);
@@ -39,7 +45,17 @@ test("managed config replaces only top-level provider defaults", () => {
   assert.match(managed, /\[mcp_servers\.docs\]/);
   assert.equal((managed.match(/\[model_providers\.modeldock_go\]/g) || []).length, 1);
   assert.match(managed, /\[model_providers\.modeldock_go\]\n# Managed by ModelDock\./);
-  assert.equal((managed.match(/# Managed by ModelDock/g) || []).length, 1);
+  assert.ok((managed.match(/# Managed by ModelDock/g) || []).length >= 1, "managed sections are commented");
+  assert.match(managed, /\[mcp_servers\.modeldock\]\n# Managed by ModelDock: web_search_exa/);
+  assert.match(managed, /url = "http:\/\/127\.0\.0\.1:4097\/mcp"/);
+});
+
+test("managed config without mcpUrl writes no mcp_servers.modeldock section", () => {
+  const managed = buildManagedCodexConfig(originalConfig, {
+    baseUrl: "http://127.0.0.1:4097/v1",
+    model: "deepseek-v4-flash",
+  });
+  assert.doesNotMatch(managed, /\[mcp_servers\.modeldock\]/);
 });
 
 test("defaults off, backs up on enable, and restores exact config on disable", async (t) => {
@@ -58,6 +74,7 @@ test("defaults off, backs up on enable, and restores exact config on disable", a
   assert.equal(disabled.enabled, false);
   assert.equal(disabled.restartRequired, true);
   assert.equal(await readFile(configPath, "utf8"), originalConfig);
+  assert.doesNotMatch(await readFile(configPath, "utf8"), /mcp_servers\.modeldock/, "restore removes the ModelDock MCP section");
 });
 
 test("preserves unrelated edits made after enable while restoring managed fields", async (t) => {
