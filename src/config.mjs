@@ -2,7 +2,7 @@ import process from "node:process";
 import os from "node:os";
 import path from "node:path";
 import { readdirSync, readFileSync, statSync, existsSync, mkdirSync, writeFileSync, copyFileSync } from "node:fs";
-import { profileById } from "./profiles.mjs";
+import { PROVIDER_SEPARATOR, profileById, publishedSlugFor } from "./profiles.mjs";
 import { encryptSecret, decryptSecret, isSecretKey } from "./secrets.mjs";
 
 // Resolve the user configuration (.env) file. Priority:
@@ -210,6 +210,17 @@ export function loadConfig() {
     "deepseek-official": deepseekToken,
   };
 
+  // A model reference may come from an older .env as a bare id (gpt-5.6-luna). Publish
+  // the provider-qualified slug when the id needs one so the Codex picker and internal
+  // routing agree on what is ours versus the native backend's GPT-5.6-Luna.
+  const modelRef = (raw) => {
+    const id = String(raw || "").trim();
+    return !id || id.includes(PROVIDER_SEPARATOR) ? id : publishedSlugFor(profileId, id);
+  };
+  const mainModel = modelRef(process.env.MODELDOCK_MAIN_MODEL || "deepseek-v4-flash");
+  const visionModel = modelRef(process.env.MODELDOCK_VISION_MODEL || "mimo-v2.5-free");
+  const visionFallbackModel = modelRef(process.env.MODELDOCK_VISION_FALLBACK_MODEL || "minimax-m3");
+
   const debug = {
     enabled: process.env.MODELDOCK_DEBUG === "1" || process.env.MODELDOCK_DEBUG === "true",
     noReasoning: process.env.MODELDOCK_NO_REASONING === "1",
@@ -230,9 +241,9 @@ export function loadConfig() {
     goToken: discovered.token,
     goTokenSource: discovered.source,
     tokens,
-    mainModel: process.env.MODELDOCK_MAIN_MODEL || "deepseek-v4-flash",
-    visionModel: process.env.MODELDOCK_VISION_MODEL || "mimo-v2.5-free",
-    visionFallbackModel: process.env.MODELDOCK_VISION_FALLBACK_MODEL || "minimax-m3",
+    mainModel,
+    visionModel,
+    visionFallbackModel,
     visionTimeoutMs: integer("MODELDOCK_VISION_TIMEOUT_MS", 90_000, { min: 1_000, max: 300_000 }),
     mediaTtlMs: integer("MODELDOCK_MEDIA_TTL_MS", 3_600_000, { min: 60_000 }),
     mediaMaxBytes: integer("MODELDOCK_MEDIA_MAX_BYTES", 10 * 1024 * 1024, { min: 1_024 }),

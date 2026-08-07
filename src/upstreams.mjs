@@ -1,4 +1,4 @@
-import { providerForModel, tokenFor, profileById } from "./profiles.mjs";
+import { bareModelId, providerForModel, tokenFor, profileById } from "./profiles.mjs";
 function upstreamUrl(baseUrl, path) {
   return `${baseUrl.replace(/\/$/, "")}/${path.replace(/^\//, "")}`;
 }
@@ -89,8 +89,11 @@ export function createUpstreams({ config, metrics, mediaStore, getVisionModel = 
     const provider = providerForModel(config, model);
     if (provider === "deepseek-official") return { url: upstreamUrl(config.deepseekBaseUrl || profileById("deepseek-official").baseUrl, "responses"), style: "responses" };
     const opencodeBase = config.opencodeBaseUrl || config.goBaseUrl;
-    if (model.endsWith("-free") || model === "big-pickle") return { url: ZEN_FREE_BASE, style: "chat" };
-    if (RESPONSES_MODELS.has(model)) return { url: upstreamUrl(opencodeBase, "responses"), style: "responses" };
+    // The selected model may be the published slug (gpt-5.6-luna@opencode-go); the
+    // endpoint tables key on the bare id the upstream actually serves.
+    const upstream = bareModelId(model);
+    if (upstream.endsWith("-free") || upstream === "big-pickle") return { url: ZEN_FREE_BASE, style: "chat" };
+    if (RESPONSES_MODELS.has(upstream)) return { url: upstreamUrl(opencodeBase, "responses"), style: "responses" };
     return { url: upstreamUrl(opencodeBase, "chat/completions"), style: "chat" };
   }
 
@@ -98,7 +101,9 @@ export function createUpstreams({ config, metrics, mediaStore, getVisionModel = 
     const token = tokenFor(config, model);
     if (!token) throw new Error(`No token configured for provider of ${model}`);
     const { url, style } = visionEndpointFor(model);
-    const common = { model, max_output_tokens: 4_096, stream: false };
+    // Send the bare id upstream; the @provider suffix is a routing address for this
+    // gate, never part of the model name an upstream API knows.
+    const common = { model: bareModelId(model), max_output_tokens: 4_096, stream: false };
     if (style === "responses") {
       const content = [{ type: "input_text", text: prompt }];
       for (const image of images) content.push({ type: "input_image", image_url: image.imageUrl });

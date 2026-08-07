@@ -17,7 +17,7 @@ import { createUpdater } from "./update.mjs";
 import { clearOwnerFile, describeOwnerConflict, writeOwnerFile } from "./instance-owner.mjs";
 import { CALLER_PATH_PREFIX, callerBasePath, callerKeyEqual, loadOrCreateCallerKey } from "./caller-key.mjs";
 import { RouteAffinity } from "./router.mjs";
-import { profileOptions, profileById, providerForModel, publishedSlugFor, tokenFor } from "./profiles.mjs";
+import { bareModelId, profileOptions, profileById, providerForModel, publishedSlugFor, tokenFor } from "./profiles.mjs";
 import staticFiles from "./static-inline.mjs";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -278,7 +278,8 @@ const ZEN_FREE_BASE = "https://opencode.ai/zen/v1";
 function upstreamBaseForModel(config, model) {
   const provider = providerForModel(config, model);
   if (provider === "deepseek-official") return (config.deepseekBaseUrl || profileById("deepseek-official").baseUrl).replace(/\/$/, "");
-  if (model && (model.endsWith("-free") || model === "big-pickle")) return ZEN_FREE_BASE;
+  const upstream = bareModelId(model);
+  if (upstream && (upstream.endsWith("-free") || upstream === "big-pickle")) return ZEN_FREE_BASE;
   return (config.opencodeBaseUrl || config.goBaseUrl).replace(/\/$/, "");
 }
 
@@ -325,24 +326,25 @@ function visionProbeUrlAndBody(modelId, config, imageUrl) {
   const provider = providerForModel(config, modelId);
   const base = (provider === "deepseek-official" ? profileById("deepseek-official").baseUrl : config.goBaseUrl).replace(/\/$/, "");
   const headers = { "Content-Type": "application/json", Authorization: `Bearer ${tokenFor(config, modelId)}` };
-  if (["gpt-5.6-luna", "grok-4.5"].includes(modelId)) {
+  const upstream = bareModelId(modelId);
+  if (["gpt-5.6-luna", "grok-4.5"].includes(upstream)) {
     return {
       url: `${base}/responses`,
       headers,
       body: JSON.stringify({
-        model: modelId,
+        model: upstream,
         input: [{ role: "user", content: [{ type: "input_text", text: "What is this?" }, { type: "input_image", image_url: imageUrl }] }],
         stream: false,
         max_output_tokens: 64,
       }),
     };
   }
-  const zenFree = modelId.endsWith("-free") || modelId === "big-pickle";
+  const zenFree = upstream.endsWith("-free") || upstream === "big-pickle";
   return {
     url: zenFree ? "https://opencode.ai/zen/v1/chat/completions" : `${base}/chat/completions`,
     headers,
     body: JSON.stringify({
-      model: modelId,
+      model: upstream,
       max_tokens: 64,
       messages: [{ role: "user", content: [{ type: "text", text: "What is this?" }, { type: "image_url", image_url: { url: imageUrl } }] }],
     }),
