@@ -31,7 +31,18 @@ const TARGET_URL = process.argv[2] || "http://127.0.0.1:4097";
 const OUT = path.resolve(process.argv[3] || "assets/dashboard.png");
 const PORT = 9333;
 const WIDTH = 1500;
-const SCALE = 1.5; // 2x doubles the file size for a README hero without looking better.
+// GitHub renders README images around 850px wide, so a 1500px capture is already
+// ~1.75x the display size and stays sharp on HiDPI. Scaling up from there only
+// grew the file: the gradient-heavy metric cards cost far more than the crop saved.
+const SCALE = Number(process.env.MODELDOCK_SHOT_SCALE || 1);
+// The hero shows what the gateway *is*: the route diagram and the live metric
+// cards. Everything below (the trace table and the runtime list) is long, mostly
+// text, and doubled the file for detail nobody reads at README scale - so the
+// capture stops at the bottom of this element instead of taking the whole page.
+const CROP_THROUGH = ".metric-grid";
+// Smaller than the grid gap below: padding wider than the gap lets the next
+// section's top edge peek in and the hero looks accidentally truncated.
+const CROP_PADDING = 10;
 
 const chromePath = (CHROME_CANDIDATES[process.platform] || []).find(existsSync);
 if (!chromePath) {
@@ -110,17 +121,36 @@ try {
 
   await sleep(1200); // let fonts and the waveform settle
   const { result: metrics } = await send("Runtime.evaluate", {
-    expression: "JSON.stringify({ h: document.documentElement.scrollHeight })",
+    expression: `JSON.stringify({
+      h: document.documentElement.scrollHeight,
+      crop: (() => {
+        const el = document.querySelector(${JSON.stringify(CROP_THROUGH)});
+        return el ? Math.ceil(el.getBoundingClientRect().bottom + window.scrollY) : 0;
+      })(),
+    })`,
     returnByValue: true,
   });
-  const { h } = JSON.parse(metrics.value);
-  await send("Emulation.setDeviceMetricsOverride", { width: WIDTH, height: h, deviceScaleFactor: SCALE, mobile: false });
+  const { h, crop } = JSON.parse(metrics.value);
+  // Lay the page out at its full height first: the cards below the fold must be
+  // rendered before they can be captured, and a viewport-sized override would
+  // leave them unlaid-out. deviceScaleFactor stays 1 here because the clip below
+  // carries the scale - setting both multiplies them.
+  await send("Emulation.setDeviceMetricsOverride", { width: WIDTH, height: h, deviceScaleFactor: 1, mobile: false });
   await sleep(600);
 
-  const shot = await send("Page.captureScreenshot", { format: "png", captureBeyondViewport: true });
+  // A missing selector means the markup moved; fall back to the full page rather
+  // than silently shipping a hero cropped to nothing.
+  const height = crop > 0 ? Math.min(h, crop + CROP_PADDING) : h;
+  if (crop <= 0) console.warn(`WARNING: ${CROP_THROUGH} not found; capturing the full page.`);
+
+  const shot = await send("Page.captureScreenshot", {
+    format: "png",
+    captureBeyondViewport: true,
+    clip: { x: 0, y: 0, width: WIDTH, height, scale: SCALE },
+  });
   const png = Buffer.from(shot.data, "base64");
   writeFileSync(OUT, png);
-  console.log(`wrote ${path.relative(process.cwd(), OUT)} - ${WIDTH}x${h} @${SCALE}x, ${(png.length / 1024).toFixed(0)} KB`);
+  console.log(`wrote ${path.relative(process.cwd(), OUT)} - ${WIDTH}x${height} @${SCALE}x (page was ${h}px), ${(png.length / 1024).toFixed(0)} KB`);
 } finally {
   ws?.close();
   chrome.kill();
