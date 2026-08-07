@@ -98,6 +98,33 @@ appears when a new release is ready - one click downloads, restarts, and reloads
 
 ---
 
+## Manual recovery
+
+If the gateway is not reachable, use the small recovery menu shipped with the
+installation. It has exactly two actions:
+
+Windows:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.modeldock\scripts\recover.ps1"
+```
+
+macOS or Linux:
+
+```sh
+sh ~/.modeldock/scripts/recover.sh
+```
+
+1. **Restart ModelDock gateway** stops only the gateway owned by this
+   installation, starts it again, and waits for `/healthz`.
+2. **Restore Codex native route** first asks the running gateway to disable its
+   route. If the gateway is down, it restores the last verified
+   `config.toml` backup directly and marks Codex for restart. The current
+   config is saved as a `.native-recovery-*.bak` file before replacement.
+
+After either configuration change, fully quit and restart Codex. The recovery
+menu does not remove ModelDock or delete the backup.
+
 ## 中文
 
 给 DeepSeek 装上眼睛、耳朵、声音和网络搜索能力——通过一个薄薄的

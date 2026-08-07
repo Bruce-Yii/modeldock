@@ -164,6 +164,10 @@ test("mock install: download -> install -> run", async (t) => {
   assert.ok(existsSync(installedBundle), "dist/modeldock.mjs should be downloaded");
   assert.ok(existsSync(launcher), `${launcherName} launcher should be written`);
   assert.ok(existsSync(path.join(installDir, "scripts", "restart.ps1")), "scripts/restart.ps1 should be written");
+  assert.ok(
+    existsSync(path.join(installDir, "scripts", isWindows ? "recover.ps1" : "recover.sh")),
+    "manual recovery script should be written",
+  );
   assert.equal(readFileSync(installedBundle).length, asset.length, "bundle byte-identical");
 
   // 5. The installer already started the gateway in the background on $port. Hit
