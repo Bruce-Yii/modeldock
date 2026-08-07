@@ -1,0 +1,70 @@
+# restart.ps1 - restart the ModelDock gateway service.
+#
+# The model (Codex/DeepSeek/Luna) can restart the gateway itself by running:
+#   powershell -ExecutionPolicy Bypass -File <modeldock>\scripts\restart.ps1
+#
+# What it does:
+#   1. Reads MODELDOCK_PORT from <modeldock>\.env (default 4097).
+#   2. Stops the process listening on that port (if any).
+#   3. Starts a fresh detached `node src/server.mjs` from the project root.
+#   4. Waits for /healthz and reports the result.
+
+$ErrorActionPreference = "Stop"
+
+$root = Split-Path -Parent $PSScriptRoot
+$envFile = Join-Path $root ".env"
+
+$port = 4097
+if (Test-Path $envFile) {
+  $line = Select-String -Path $envFile -Pattern '^MODELDOCK_PORT=' | Select-Object -First 1
+  if ($line) {
+    $parsed = 0
+    if ([int]::TryParse(($line.Line -replace '^MODELDOCK_PORT=', ''), [ref]$parsed) -and $parsed -gt 0) {
+      $port = $parsed
+    }
+  }
+}
+
+$listener = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($listener) {
+  $oldPid = $listener.OwningProcess
+  Write-Output "restart.ps1: stopping gateway (PID $oldPid, port $port)"
+  Stop-Process -Id $oldPid -Force
+  for ($i = 0; $i -lt 20; $i += 1) {
+    Start-Sleep -Milliseconds 250
+    if (-not (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue)) { break }
+  }
+} else {
+  Write-Output "restart.ps1: no gateway on port $port; starting fresh"
+}
+
+$logDir = Join-Path $env:TEMP "modeldock"
+New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+$stdout = Join-Path $logDir "gateway.log"
+$stderr = Join-Path $logDir "gateway.err.log"
+
+$nodeExe = (Get-Command node -ErrorAction SilentlyContinue).Source
+if (-not $nodeExe) {
+  Write-Output "ERROR: node.exe not found on PATH"
+  exit 1
+}
+
+Start-Process -FilePath $nodeExe -ArgumentList "src/server.mjs" -WorkingDirectory $root -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+Write-Output "restart.ps1: started gateway from $root (logs: $logDir)"
+
+for ($i = 0; $i -lt 40; $i += 1) {
+  Start-Sleep -Milliseconds 250
+  try {
+    $health = Invoke-RestMethod -Uri "http://127.0.0.1:$port/healthz" -TimeoutSec 2
+    if ($health.ok) {
+      Write-Output "restart.ps1: gateway healthy at http://127.0.0.1:$port"
+      exit 0
+    }
+  } catch {
+    # Gateway still booting; keep polling.
+  }
+}
+
+Write-Output "ERROR: gateway did not become healthy within 10s"
+if (Test-Path $stderr) { Get-Content $stderr -Tail 10 -ErrorAction SilentlyContinue }
+exit 1
