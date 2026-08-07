@@ -1300,7 +1300,7 @@ test("host guard rejects non-loopback Host headers (DNS rebinding)", async (t) =
   assert.equal(legit.status, 200);
 });
 
-test("anti-breakpoint revival splices summary + last text + tools, no side API call", async (t) => {
+test("anti-breakpoint revival asks one question, no side API call", async (t) => {
   let mainCalls = 0;
   let upstreamRequests = 0;
   let secondMainInput = null;
@@ -1341,11 +1341,10 @@ test("anti-breakpoint revival splices summary + last text + tools, no side API c
   assert.equal(mainCalls, 2, "the plain-text end was revived into a second upstream round");
   assert.equal(upstreamRequests, 2, "no side checker API call, only the two main rounds");
   const revivalText = JSON.stringify(secondMainInput ?? "");
-  assert.match(revivalText, /session continuation/);
-  assert.match(revivalText, /YOUR LAST TEXT/);
-  assert.match(revivalText, /wheels done/, "this turn's own text is echoed back");
-  assert.match(revivalText, /AVAILABLE TOOLS/);
-  assert.match(revivalText, /shell_command/, "tool names are listed");
+  assert.match(revivalText, /Is the task complete\? If not, keep working until it is\./);
+  // The nudge is the whole message: the model already has its own last text and the
+  // tool list in the payload, so repeating them would only cost tokens.
+  assert.equal(/YOUR LAST TEXT|AVAILABLE TOOLS/.test(revivalText), false);
   assert.match(sse, /wheels done/);
   const check = instance.services.sessionChecks?.get("default");
   assert.equal(check?.state, "continue");

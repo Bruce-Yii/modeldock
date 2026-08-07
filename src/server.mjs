@@ -673,7 +673,7 @@ async function relayLiveResponses(payload, res, services, signal, { autoRoute = 
       // profile (the md_memory line); disable with debug.noSessionCheck.
       if (mode === "text" && services.checker && !services.config.debug?.noSessionCheck) {
         const key = payload?.client_metadata?.session_id || payload?.client_metadata?.thread_id || "default";
-        const revive = services.checker.check(key, payload, writer.message?.text || "");
+        const revive = services.checker.check(key);
         if (revive) {
           currentPayload = { ...currentPayload, input: [...(currentPayload.input || []), revive], stream: true };
           mode = null;
