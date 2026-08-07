@@ -714,6 +714,7 @@ async function saveSettings() {
     status.textContent = t("settings.saved");
     closeSettings();
     poll().catch(() => {});
+    pollConfig().catch(() => {});
   } catch (error) {
     status.textContent = error.message;
   } finally {

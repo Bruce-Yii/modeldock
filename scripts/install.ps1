@@ -88,4 +88,4 @@ Write-Host ""
 Write-Host "Done. Dashboard: http://127.0.0.1:$port" -ForegroundColor Green
 Write-Host "First run: paste your API token into the Settings dialog that opens automatically."
 Write-Host "Optional: flip the 'Start at login' toggle on the dashboard."
-if (-not $skipOpen) { Start-Process "http://127.0.0.1:$port" }
+if (-not $skipOpen) { Start-Process "http://127.0.0.1:$port/?settings=1" }

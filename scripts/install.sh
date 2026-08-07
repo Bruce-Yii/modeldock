@@ -87,5 +87,5 @@ echo "Done. Dashboard: http://127.0.0.1:$PORT"
 echo "First run: paste your API token into the Settings dialog that opens automatically."
 echo "Optional: flip the 'Start at login' toggle on the dashboard."
 if [ "$SKIP_OPEN" != "1" ]; then
-  command -v open >/dev/null 2>&1 && open "http://127.0.0.1:$PORT" || true
+  command -v open >/dev/null 2>&1 && open "http://127.0.0.1:$PORT/?settings=1" || true
 fi
