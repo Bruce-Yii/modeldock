@@ -95,7 +95,7 @@ Non-goals:
   MCP sidecar tools:
     web_search_exa   -> Exa hosted MCP
     vision_inspect   -> vision model (MODELDOCK_VISION_MODEL) over OpenCode Go
-    speak / hear     -> local TTS (msedge-tts) / local STT (Windows SAPI)
+    speak / hear     -> local TTS (msedge-tts) / local STT (SAPI or Whisper)
 ```
 
 There is exactly one mode. The gateway and the MCP sidecar run in the same
@@ -250,7 +250,7 @@ functions, the model calls them, Codex attaches results as
 | `web_search_exa(query, numResults, livecrawl, type, contextMaxCharacters)` | Exa hosted MCP (`EXA_MCP_URL`, `EXA_API_KEY`) | Existing implementation in `upstreams.mjs` |
 | `vision_inspect(path, compare_image_ref?, question, mode)` | Vision model over OpenCode Go (`MODELDOCK_VISION_MODEL`) | Text answer returned; image never enters the main request |
 | `speak(text, voice?, output?)` | `msedge-tts` (on-demand install) | Returns absolute audio path |
-| `hear(file, language?, output?)` | Windows SAPI (System.Speech) | Returns text + confidence |
+| `hear(file, language?, output?)` | Windows SAPI / macOS + Linux whisper.cpp | Returns text + confidence |
 
 `vision_inspect` is path-first: the model passes a local file path (for example
 a screenshot it just took). `compare_image_ref` is optional and only relevant
@@ -511,7 +511,7 @@ Resolved during the rewrite:
    needs for client-side plugin machinery; the gateway strips hosted tool
    *definitions* (`web_search`, `computer_use`, `browser_use`, `artifact`,
    `tool_search`) before they reach Go.
-3. TTS uses on-demand `msedge-tts` install (kept; avoids CI packaging issues).
+3. TTS bundles `msedge-tts` into the release bundle, so speak works out of the box.
 4. `vision-eval.mjs` survives as dev-only tooling (never runs at startup);
    vision fields in the catalog are hand-maintained constants.
 5. Direct image escalation: kept. Request-level routing to the vision model

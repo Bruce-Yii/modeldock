@@ -564,9 +564,11 @@ async function renderSpeech(data) {
     const stt = body.stt || {};
     ttsStatus.textContent = tts.installed ? t("speech.ttsOn") : t("speech.ttsOff");
     ttsStatus.style.color = tts.installed ? green : red;
+    const sttDetail = stt.cultures?.length ? stt.cultures.join(" / ") : stt.engine || "";
     sttStatus.textContent = stt.available
-      ? `${t("speech.sttOn")} · ${stt.cultures.join(" / ")}`
+      ? `${t("speech.sttOn")}${sttDetail ? ` · ${sttDetail}` : ""}`
       : t("speech.sttOff");
+    sttStatus.title = stt.hint || "";
     sttStatus.style.color = stt.available ? green : red;
     installBtn.hidden = tts.installed;
     installBtn.disabled = false;

@@ -98,10 +98,10 @@ export function createMcpServer({ upstreams }) {
         {
           title: "Speech To Text",
           description:
-            "Transcribe a local audio file into text using the Windows built-in speech recognizer (System.Speech, offline, no API key; Windows only - requires the target language recognizer and ffmpeg for non-WAV input). Returns the recognized text and a confidence score.",
+            "Transcribe a local audio file into text. Windows uses the built-in SAPI recognizer; macOS/Linux use whisper.cpp (small native binary, Apple Silicon friendly, no large OpenAI stack; first use auto-downloads the small ggml-tiny model). Returns the recognized text and a confidence score.",
           inputSchema: z.object({
             file: z.string().min(1).describe("Absolute local file path of the audio file to transcribe (mp3, wav, webm/opus, m4a)."),
-            language: z.string().optional().describe("Optional language hint, e.g. zh-CN, en-US. Defaults to the installed Chinese recognizer."),
+            language: z.string().optional().describe("Optional language hint, e.g. zh-CN, en-US. Defaults to automatic detection."),
             output: z.string().optional().describe("Optional absolute file path for the intermediate WAV."),
           }),
           annotations: { readOnlyHint: true, openWorldHint: false },

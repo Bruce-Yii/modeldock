@@ -1,20 +1,37 @@
-// Local STT (WINDOWS ONLY): transcribe an audio file using the Windows SAPI dictation
-// engine (System.Speech, ships with Windows — no install). The audio must be converted
-// to 16kHz mono PCM WAV first; ffmpeg is used when present, otherwise the tool reports
-// that transcription needs ffmpeg. Chinese and English are the primary targets; any
-// installed SAPI recognizer culture works. Non-Windows platforms get available:false.
+// Local STT: transcribe an audio file with the best engine available per platform.
+// Windows uses the built-in SAPI dictation engine (System.Speech, ships with
+// Windows). macOS/Linux use whisper.cpp's small native `whisper-cli` binary
+// (Homebrew's `whisper-cpp`), which is Apple Silicon friendly and does not need a
+// large Python/OpenAI stack. ffmpeg is used when present to convert non-WAV input.
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { existsSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 
 const run = promisify(execFile);
 
 const CHECK_TTL_MS = 10_000;
+const FFMPEG_TTL_MS = 10_000;
+const WHISPER_TTL_MS = 10_000;
+const WHISPER_RUN_TIMEOUT_MS = 600_000;
+
 let sapiCache = null;
 let sapiCheckedAt = 0;
+let ffmpegCache = null;
+let ffmpegCheckedAt = 0;
+let whisperCache = null;
+let whisperCheckedAt = 0;
+
+function runCommand(cmd, args, options = {}) {
+  return run(cmd, args, {
+    timeout: 10_000,
+    windowsHide: true,
+    maxBuffer: 16 * 1024 * 1024,
+    ...options,
+  });
+}
 
 async function probeSapi() {
   if (process.platform !== "win32") return [];
@@ -31,34 +48,131 @@ async function probeSapi() {
   return sapiCache;
 }
 
-export async function sttStatus() {
-  const cultures = await probeSapi();
-  const ffmpeg = await findFfmpeg();
-  return {
-    available: cultures.length > 0,
-    cultures,
-    ffmpeg,
-  };
+async function probeWhisper() {
+  if (process.platform === "win32") return null;
+  const now = Date.now();
+  if (whisperCache !== null && now - whisperCheckedAt < WHISPER_TTL_MS) return whisperCache;
+  const configured = process.env.MODELDOCK_WHISPER_BIN?.trim();
+  if (configured) {
+    whisperCache = {
+      kind: "whisper-cpp",
+      bin: configured,
+    };
+  } else {
+    whisperCache = null;
+    try {
+      await runCommand("which", ["whisper-cli"]);
+      whisperCache = { kind: "whisper-cpp", bin: "whisper-cli" };
+    } catch {
+      whisperCache = null;
+    }
+  }
+  whisperCheckedAt = now;
+  return whisperCache;
 }
 
-// ffmpeg availability probe is cached (TTL 10s) the same way the SAPI probe
-// is, so the dashboard's per-SSE-event /api/speech call stops spawning
-// `where.exe` on every hit.
-const FFMPEG_TTL_MS = 10_000;
-let ffmpegCache = null;
-let ffmpegCheckedAt = 0;
+export function whisperLanguageFor(language) {
+  if (!language || language === "auto") return "";
+  const code = String(language).split(/[-_]/)[0].toLowerCase();
+  return /^[a-z]{2,3}$/.test(code) ? code : "";
+}
+
+function whisperModelCandidates() {
+  const configured = process.env.MODELDOCK_WHISPER_MODEL?.trim();
+  if (configured) return [path.resolve(configured)];
+  const roots = [
+    path.join(homedir(), "Library", "Application Support", "whisper-cpp"),
+    path.join(homedir(), ".cache", "whisper"),
+    path.join(homedir(), ".whisper", "models"),
+    "/opt/homebrew/share/whisper-cpp/models",
+    "/usr/local/share/whisper-cpp/models",
+  ];
+  const found = [];
+  for (const root of roots) {
+    if (!existsSync(root)) continue;
+    for (const name of readdirSync(root)) {
+      if (name.endsWith(".bin")) found.push(path.join(root, name));
+    }
+  }
+  return found;
+}
+
+async function findWhisperModel() {
+  for (const model of whisperModelCandidates()) {
+    if (existsSync(model)) return model;
+  }
+  return null;
+}
+
+async function ensureWhisperModel() {
+  const existing = await findWhisperModel();
+  if (existing) return existing;
+  if (process.env.MODELDOCK_WHISPER_AUTO_MODEL === "0") return null;
+  const url = process.env.MODELDOCK_WHISPER_MODEL_URL
+    || "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin";
+  const target = path.join(homedir(), ".cache", "whisper", "ggml-tiny.bin");
+  if (!existsSync(target)) {
+    mkdirSync(path.dirname(target), { recursive: true });
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`Failed to download whisper model: HTTP ${response.status}`);
+    const body = Buffer.from(await response.arrayBuffer());
+    const tmp = `${target}.tmp`;
+    writeFileSync(tmp, body);
+    renameSync(tmp, target);
+  }
+  return target;
+}
+
+export async function sttStatus() {
+  if (process.platform === "win32") {
+    const cultures = await probeSapi();
+    return {
+      available: cultures.length > 0,
+      cultures,
+      engine: "sapi",
+      ffmpeg: await findFfmpeg(),
+      hint: null,
+    };
+  }
+  const engine = await probeWhisper();
+  const model = engine?.kind === "whisper-cpp" ? await findWhisperModel() : null;
+  const available = Boolean(engine) && Boolean(model);
+  let hint = null;
+  if (!available) {
+    hint = engine
+      ? "whisper.cpp is installed. The first hear call downloads the small ggml-tiny model unless MODELDOCK_WHISPER_AUTO_MODEL=0 or MODELDOCK_WHISPER_MODEL is set."
+      : "No whisper.cpp engine found. Install it with: brew install whisper-cpp, then set MODELDOCK_WHISPER_MODEL to a ggml-*.bin path.";
+  }
+  return {
+    available,
+    cultures: available ? [engine.kind] : [],
+    engine: engine?.kind || null,
+    model,
+    ffmpeg: await findFfmpeg(),
+    hint,
+  };
+}
 
 async function findFfmpeg() {
   const now = Date.now();
   if (ffmpegCache !== null && now - ffmpegCheckedAt < FFMPEG_TTL_MS) return ffmpegCache;
   try {
-    await run(process.platform === "win32" ? "where.exe" : "which", ["ffmpeg"], { timeout: 10_000, windowsHide: true });
+    await runCommand(process.platform === "win32" ? "where.exe" : "which", ["ffmpeg"]);
     ffmpegCache = true;
   } catch {
     ffmpegCache = false;
   }
   ffmpegCheckedAt = now;
   return ffmpegCache;
+}
+
+async function findFfmpegPath() {
+  try {
+    const { stdout } = await runCommand(process.platform === "win32" ? "where.exe" : "which", ["ffmpeg"]);
+    return stdout.split(/\r?\n/)[0].trim() || null;
+  } catch {
+    return null;
+  }
 }
 
 // Values that come from the model (culture, file paths) are passed as environment
@@ -79,13 +193,9 @@ async function runPowerShell(script, vars = {}) {
   });
 }
 
-export async function sttTranscribe({ file = "", language = "auto", output = "" } = {}) {
-  if (!file) throw new Error("hear requires a file path");
-  if (!existsSync(file)) throw new Error(`audio file not found: ${file}`);
+async function transcribeWindows({ file, language = "auto", output = "" }) {
   const cultures = await probeSapi();
   if (!cultures.length) throw new Error("no Windows SAPI recognizer available");
-  // Only ever hand PowerShell a culture we actually resolved, or a well-formed BCP-47
-  // tag - never an arbitrary model-supplied string.
   const requested = String(language || "auto");
   const matched = requested !== "auto"
     ? cultures.find((c) => c.toLowerCase().startsWith(requested.toLowerCase()))
@@ -95,16 +205,11 @@ export async function sttTranscribe({ file = "", language = "auto", output = "" 
     || (cultures.includes("zh-CN") ? "zh-CN" : cultures[0]);
   const hasFfmpeg = await findFfmpeg();
   const wav = output || path.join(tmpdir(), `stt-input-${Date.now()}.wav`);
-  if (!hasFfmpeg) {
-    // SAPI needs PCM WAV; without ffmpeg we can only try direct (rarely works for mp3/webm).
-  } else {
+  if (hasFfmpeg) {
     const ffmpeg = (await findFfmpegPath()) || "ffmpeg";
-    await run(ffmpeg, ["-y", "-i", file, "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wav], { timeout: 120_000, windowsHide: true });
+    await runCommand(ffmpeg, ["-y", "-i", file, "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wav], { timeout: 120_000 });
   }
   const script = [
-    // PowerShell 5.1 pipes text out in the console OEM codepage (GBK on a Chinese
-    // system); node decodes child stdout as UTF-8, so force UTF-8 here or Chinese
-    // recognition results come back as mojibake.
     "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8",
     "Add-Type -AssemblyName System.Speech",
     "$ci = [System.Globalization.CultureInfo]::GetCultureInfo($env:MODELDOCK_STT_CULTURE)",
@@ -122,14 +227,46 @@ export async function sttTranscribe({ file = "", language = "auto", output = "" 
   });
   const text = (out.match(/TEXT:(.*)/) || [])[1]?.trim() || "";
   const conf = parseFloat((out.match(/CONF:(.*)/) || [])[1] || "0");
-  return { text, confidence: conf, language: culture };
+  return { text, confidence: conf, language: culture, engine: "sapi" };
 }
 
-async function findFfmpegPath() {
-  try {
-    const { stdout } = await run("where.exe", ["ffmpeg"], { timeout: 10_000, windowsHide: true });
-    return stdout.split(/\r?\n/)[0].trim() || null;
-  } catch {
-    return null;
+async function ensureWav(file, output) {
+  if (path.extname(file).toLowerCase() === ".wav") return file;
+  if (!(await findFfmpeg())) {
+    throw new Error("ffmpeg is required to convert non-WAV audio for whisper.cpp; install it with: brew install ffmpeg");
   }
+  const ffmpeg = (await findFfmpegPath()) || "ffmpeg";
+  const wav = output || path.join(tmpdir(), `stt-input-${Date.now()}.wav`);
+  await runCommand(ffmpeg, ["-y", "-i", file, "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wav], { timeout: 120_000 });
+  return wav;
+}
+
+async function transcribeWhisper(engine, file, language, output) {
+  const lang = whisperLanguageFor(language);
+  const dir = mkdtempSync(path.join(tmpdir(), "modeldock-stt-"));
+
+  const model = await ensureWhisperModel();
+  if (!model) throw new Error("whisper.cpp model is disabled. Set MODELDOCK_WHISPER_MODEL to a ggml-*.bin path or unset MODELDOCK_WHISPER_AUTO_MODEL.");
+  const input = await ensureWav(file, output);
+  const prefix = path.join(dir, "out");
+  const args = ["-m", model, "-f", input, "-otxt", "-of", prefix];
+  if (lang) args.push("-l", lang);
+  await runCommand(engine.bin, args, { timeout: WHISPER_RUN_TIMEOUT_MS });
+  const outFile = `${prefix}.txt`;
+  if (!existsSync(outFile)) throw new Error(`whisper.cpp produced no transcript at ${outFile}`);
+  return {
+    text: readFileSync(outFile, "utf8").trim(),
+    confidence: 1,
+    language: language === "auto" ? "auto" : lang,
+    engine: engine.kind,
+  };
+}
+
+export async function sttTranscribe({ file = "", language = "auto", output = "" } = {}) {
+  if (!file) throw new Error("hear requires a file path");
+  if (!existsSync(file)) throw new Error(`audio file not found: ${file}`);
+  if (process.platform === "win32") return transcribeWindows({ file, language, output });
+  const engine = await probeWhisper();
+  if (!engine) throw new Error((await sttStatus()).hint || "No Whisper STT engine found");
+  return transcribeWhisper(engine, file, language, output);
 }
