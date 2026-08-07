@@ -315,3 +315,28 @@ test("caller-key routes: correct key relays, wrong key and enforced bare path 40
   const bare = await fetch(`${instance.base}/v1/responses`, { method: "POST", headers, body });
   assert.equal(bare.status, 401, "bare path is refused once enforcement is on");
 });
+
+test("zstd-encoded request bodies are decompressed before the relay", { skip: typeof (await import("node:zlib")).zstdCompressSync !== "function" }, async (t) => {
+  const zlib = await import("node:zlib");
+  let seenModel = null;
+  const upstream = createServer(async (req, res) => {
+    seenModel = (await jsonBody(req)).model;
+    res.setHeader("content-type", "text/event-stream");
+    res.end('data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1}}}\n\ndata: [DONE]\n\n');
+  });
+  const port = await listen(upstream);
+  t.after(() => upstream.close());
+  const instance = await startApp({ goBaseUrl: `http://127.0.0.1:${port}`, opencodeBaseUrl: `http://127.0.0.1:${port}` });
+  t.after(instance.stop);
+  const payload = JSON.stringify({ model: "deepseek-v4-flash", stream: true, input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }] });
+  // Codex sends zstd-compressed bodies on some requests (remote compact tasks);
+  // body-parser only speaks gzip/deflate/br and 415'd the whole turn.
+  const res = await fetch(`${instance.base}/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "content-encoding": "zstd" },
+    body: zlib.zstdCompressSync(Buffer.from(payload)),
+  });
+  assert.equal(res.status, 200, "zstd body must relay, not 415");
+  await res.text();
+  assert.equal(seenModel, "deepseek-v4-flash");
+});

@@ -3,6 +3,7 @@ import os from "node:os";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import express from "express";
+import zlib from "node:zlib";
 import { createMcpExpressApp } from "@modelcontextprotocol/express";
 import { loadConfig, publicConfig, writeEnvFile, envFileFor, migrateEnvSecrets } from "./config.mjs";
 import { catalogFor } from "./catalog.mjs";
@@ -631,6 +632,37 @@ export function createServices(config = loadConfig()) {
   });
 }
 
+// Codex compresses some request bodies (observed on remote compact tasks) with
+// Content-Encoding: zstd, which body-parser does not speak - it 415s before any
+// route runs, taking down the whole turn. body-parser's json handler skips a
+// request whose stream is already consumed (onFinished.isFinished) and keeps a
+// pre-set req.body, so this outer middleware drains + decompresses zstd bodies
+// itself and hands the parsed JSON through. gzip/deflate/br stay with
+// body-parser, which supports them natively.
+function zstdRequestDecoder() {
+  const canZstd = typeof zlib.zstdDecompressSync === "function";
+  return (req, res, next) => {
+    if (String(req.headers["content-encoding"] || "").toLowerCase() !== "zstd") return next();
+    if (!canZstd) {
+      return res.status(415).json({ error: { type: "unsupported_encoding", message: "zstd request bodies require Node 23.8+ (run ModelDock on Node 24)." } });
+    }
+    const chunks = [];
+    req.on("data", (chunk) => chunks.push(chunk));
+    req.on("error", next);
+    req.on("end", () => {
+      try {
+        const body = zlib.zstdDecompressSync(Buffer.concat(chunks));
+        req.headers["content-encoding"] = "identity";
+        req.headers["content-length"] = String(body.length);
+        req.body = JSON.parse(body.toString("utf8"));
+        next();
+      } catch (error) {
+        res.status(400).json({ error: { type: "bad_request", message: `zstd request decode failed: ${error.message}` } });
+      }
+    });
+  };
+}
+
 export function createApp(services = createServices()) {
   const { config, metrics, mediaStore, upstreams, configSwitcher, autostart, routeAffinity } = services;
   const app = createMcpExpressApp({ host: config.host, jsonLimit: "25mb" });
@@ -835,7 +867,13 @@ export function createApp(services = createServices()) {
   app.use("/assets", express.static(assetsDir, { maxAge: "7d" }));
   app.use((req, res) => res.status(404).json({ error: { message: "Not found" } }));
 
-  return { app, close: () => mcpHandler.close?.(), services };
+  // Outer wrapper so the zstd decoder runs BEFORE the MCP app's body parser
+  // (which is registered inside createMcpExpressApp and cannot be reordered).
+  const outer = express();
+  outer.disable("x-powered-by");
+  outer.use(zstdRequestDecoder());
+  outer.use(app);
+  return { app: outer, close: () => mcpHandler.close?.(), services };
 }
 
 export async function startServer(config = loadConfig()) {
