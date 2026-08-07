@@ -1,9 +1,8 @@
-// Local TTS (msedge-tts): synthesize speech to a file. The package is a normal npm
-// dependency and is bundled into dist/modeldock.mjs, so installed releases have
-// speak available out of the box. msedge-tts is pure JS (no native binary) and
-// calls the Microsoft Edge Read Aloud API with the Edge browser user agent. The
-// synthesized file path is returned to the model so it can be surfaced in the
-// conversation (same pattern as vision_inspect image refs).
+// Local TTS (msedge-tts): detect, install on demand, and synthesize speech to a file.
+// msedge-tts is a pure npm package (no native binary) that calls the Microsoft Edge
+// Read Aloud API with the Edge browser user agent. The synthesized file path is
+// returned to the model so it can be surfaced in the conversation (same pattern as
+// vision_inspect image refs).
 
 const INSTALL_TIMEOUT_MS = 180_000;
 const SPEAK_TIMEOUT_MS = 120_000;
