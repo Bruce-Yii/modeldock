@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { baseInstructionsFor, catalogFor, enabledProvidersFor } from "./catalog.mjs";
 import { OPENCODE_GO_PROFILE } from "./profiles.mjs";
+import { isNativeModel } from "./gateway.mjs";
 
 function configStub() {
   return {
@@ -79,6 +80,16 @@ test("catalogFor publishes only models owned by enabled providers", () => {
   };
   const withDeepSeekCatalog = catalogFor(withDeepSeek);
   assert.ok(withDeepSeekCatalog.models.some((entry) => entry.slug === "deepseek-v4-flash@deepseek-official"));
+});
+
+test("the bare gpt-5.6-luna slot stays reserved for the native GPT pipeline", () => {
+  const catalog = catalogFor(configStub());
+  const slugs = catalog.models.map((entry) => entry.slug);
+  assert.ok(slugs.includes("gpt-5.6-luna@opencode-go"), "our Luna is published under the owner suffix");
+  assert.ok(!slugs.includes("gpt-5.6-luna"), "the bare id stays free for the native backend's GPT-5.6-Luna");
+  const known = new Set(slugs);
+  assert.equal(isNativeModel("gpt-5.6-luna", known), true, "a native request for the bare id passes through to ChatGPT");
+  assert.equal(isNativeModel("gpt-5.6-luna@opencode-go", known), false, "our qualified slug stays on the routed path");
 });
 
 test("catalogFor never publishes chat-dialect models even if marked available", () => {
