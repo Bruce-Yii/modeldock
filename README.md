@@ -126,6 +126,22 @@ sh ~/.modeldock/scripts/recover.sh
 After either configuration change, fully quit and restart Codex. The recovery
 menu does not remove ModelDock or delete the backup.
 
+## Disclaimer
+
+Model Dock For Codex is an independent, community-maintained project. It is
+not affiliated with, endorsed by, or sponsored by OpenAI, DeepSeek, or
+opencode.ai, and it is not an official product of any of them. "Codex",
+"OpenAI", "DeepSeek", "OpenCode", and any other names or marks referenced in
+this repository are trademarks or registered trademarks of their respective
+owners and are used here only to describe interoperability.
+
+The software is provided "as is", without warranty of any kind, express or
+implied, including but not limited to the warranties of merchantability,
+fitness for a particular purpose, and non-infringement. In no event shall the
+authors be liable for any claim, damages, or other liability arising from or in
+connection with the software or its use. Nothing in this repository constitutes
+legal, financial, or professional advice.
+
 ## 中文
 
 给 DeepSeek 装上眼睛、耳朵、声音和网络搜索能力——通过一个薄薄的
