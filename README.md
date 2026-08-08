@@ -19,7 +19,7 @@ Responses bridge for OpenCode Go and DeepSeek official.
 
 DeepSeek V4 Flash is fast and cheap, but it cannot see, speak, or listen, and
 the OpenCode Go Responses endpoint it runs through has no hosted search (the
-DeepSeek official endpoint does). Model Dock For Codex adds all four as tools,
+DeepSeek official endpoint does). Model Dock For Codex adds these as tools,
 without rewriting the conversation history:
 
 - **See** - paste an image into Codex and the request is routed to the vision
@@ -28,13 +28,12 @@ without rewriting the conversation history:
 - **Speak** - the `speak` tool turns text into a local audio file.
 - **Hear** - the `hear` tool transcribes an audio file back to text.
 - **Search** - the `web_search_exa` tool queries the web through Exa.
+- **Remember** - `store_memory` and `recall_memory` give the model a lightweight
+  cross-session memory, so decisions and baselines survive between sessions.
 
-The bridge pipes the Responses stream through without buffering or resynthesizing
-SSE. Its rewrites are surgical and documented: orphaned tool rows a compact task
-can slice apart are dropped or re-paired, and remote compaction is synthesized
-for routed models that do not speak Codex's native compact protocol. Multi-turn
-tool loops, streaming, and compaction behave the way they do on the native
-channel.
+The bridge is a thin local gateway: the Responses stream passes through
+untouched, and multi-turn tool loops, streaming, and long-session compaction
+keep working the way they do on the native channel.
 
 ## Install
 
@@ -81,14 +80,11 @@ ChatGPT subscription instead of an external upstream.
 **Speech** - open the TTS / STT tile on the dashboard and toggle TTS or STT on.
 The `speak` and `hear` tools become available to the model.
 
-**MCP tools** - web search, vision, and speech reach Codex through a stdio
-bridge (`src/mcp-standalone.mjs`) that Codex spawns itself, so gateway restarts
-never disconnect a session's tools. If a session's MCP connection is already
-stale, call the tools directly instead of restarting Codex:
+**MCP tools** - web search, vision, and speech reach Codex as tools that
+survive gateway restarts. If a session's tool connection is stale, call them
+directly instead of restarting Codex:
 `node scripts/mcp-call.mjs search "..."` or
-`node scripts/mcp-call.mjs vision <path> <question>`. Set
-`MODELDOCK_MCP_TRANSPORT=url` in `.env` to go back to the streamable-HTTP
-wiring.
+`node scripts/mcp-call.mjs vision <path> <question>`.
 
 **Language** - the dashboard speaks English, 简体中文, 日本語, Français,
 Español. Change it anytime under Settings -> Interface language.
@@ -149,19 +145,17 @@ Responses 桥接层连接 OpenCode Go 与 DeepSeek 官方 API。
 
 DeepSeek V4 Flash 又快又便宜，但它看不见、听不到、不会说话，Responses
 端点也没有内置搜索——确切地说，它所经过的 OpenCode Go Responses 端点没有
-内置搜索（DeepSeek 官方端点有）。Model Dock For Codex 以工具的形式补全这
-四项能力，且不改写对话历史：
+内置搜索（DeepSeek 官方端点有）。Model Dock For Codex 以工具的形式补全这些能力，并附带轻量跨会话记忆，
+且不改写对话历史：
 
 - **看图** - 把图片粘贴进 Codex，请求会自动路由到你在设置中选择的视觉模型；
   也可以让模型对截图或文件调用 `vision_inspect`。
 - **说话** - `speak` 工具把文本合成本地音频文件。
 - **听写** - `hear` 工具把音频文件转写成文本。
 - **搜索** - `web_search_exa` 工具通过 Exa 查询网络。
+- **记住** - `store_memory` 和 `recall_memory` 给模型一份轻量跨会话记忆，决策和基线在会话之间也能保留。
 
-桥接层原样转发 Responses 流，不缓冲也不重组 SSE；改写仅限文档列出的必要
-修复：压缩任务切散的工具调用/结果会被丢弃或重新配对，对于不讲原生压缩协议
-的路由模型则由网关合成远程压缩。多轮工具循环、流式输出和上下文压缩都像
-原生通道一样工作。
+桥接层是轻量本地网关：Responses 流原样透传，多轮工具循环、流式输出和长会话压缩都与原生通道一致。
 
 ### 安装
 
