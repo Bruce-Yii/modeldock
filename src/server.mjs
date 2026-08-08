@@ -20,6 +20,7 @@ import { createAutostart } from "./autostart.mjs";
 import { createUpdater } from "./update.mjs";
 import { clearOwnerFile, describeOwnerConflict, writeOwnerFile } from "./instance-owner.mjs";
 import { CALLER_PATH_PREFIX, callerBasePath, callerKeyEqual, loadOrCreateCallerKey } from "./caller-key.mjs";
+import { validateProviderToken } from "./token-validate.mjs";
 import { RouteAffinity } from "./router.mjs";
 import { PROVIDER_SEPARATOR, applyCustomProfile, bareModelId, profileOptions, profileById, providerForModel, publishedSlugFor, tokenFor, TRIAL_MAIN_MODEL, TRIAL_VISION_MODEL } from "./profiles.mjs";
 import { CustomEndpointError, listEndpointModels, normalizeBaseUrl, probeCustomResponses } from "./custom-endpoint.mjs";
@@ -1056,6 +1057,10 @@ export function createApp(services = createServices()) {
     const providers = [];
     let failedProvider = null;
     try {
+      // Config objects built by tests (and any future non-loadConfig wiring)
+      // may lack the tokens map; the settings write must still work.
+      config.tokens = config.tokens || {};
+      const targetFile = config.envFile || envFileFor();
       if (body.opencodeGoToken) {
         const token = String(body.opencodeGoToken).trim();
         providers.push("opencode-go");
@@ -1069,12 +1074,20 @@ export function createApp(services = createServices()) {
       if (body.deepseekApiKey) {
         const token = String(body.deepseekApiKey).trim();
         providers.push("deepseek-official");
+        const checked = validateProviderToken("deepseek-official", token);
+        if (!checked.ok) throw Object.assign(new Error(checked.error), { code: "invalid_deepseek_api_key" });
         if (isPlaceholderToken(token)) {
           const error = new Error("A valid DeepSeek API key is required.");
           error.code = "invalid_deepseek_api_key";
           throw error;
         }
-        updates.DEEPSEEK_API_KEY = token;
+        updates.DEEPSEEK_API_KEY = checked.value;
+      }
+      if (body.exaApiKey) {
+        const checked = validateProviderToken("exa", body.exaApiKey);
+        if (!checked.ok) throw Object.assign(new Error(checked.error), { code: "invalid_exa_api_key" });
+        writeEnvFile({ EXA_API_KEY: checked.value }, targetFile);
+        config.exaApiKey = checked.value;
       }
       if (Object.keys(updates).length) {
         for (const [envKey, provider, label] of [
