@@ -491,3 +491,103 @@ test("gateway: trial mode serves only the free pair and relays zen-free models t
   assert.equal(seen[0].model, "deepseek-v4-flash-free", "the zen base receives the free model");
   assert.match(seen[0].url, /\/responses$/, "the free model goes over the responses wire");
 });
+
+test("gateway: captures zen free 200+empty output as a quota error on both wires", async (t) => {
+  const seen = [];
+  const upstream = createServer(async (req, res) => {
+    const body = await jsonBody(req);
+    seen.push({ url: req.url, model: body.model, stream: body.stream });
+    if (body.model === "deepseek-v4-flash-free") {
+      // Free endpoint answering 200 with no output items on both wires.
+      if (body.stream === true) {
+        res.setHeader("content-type", "text/event-stream");
+        res.end(
+          "event: response.completed\n" +
+            'data: {"type":"response.completed","response":{"id":"resp_bare","model":"deepseek-v4-flash-free"}}\n\n' +
+            'data: {"id":"c1","object":"chat.completion.chunk","choices":[],"usage":{"prompt_tokens":42,"completion_tokens":64,"total_tokens":106}}\n\n' +
+            "data: [DONE]\n\n",
+        );
+        return;
+      }
+      res.setHeader("content-type", "application/json");
+      res.end(
+        JSON.stringify({
+          id: "resp_empty",
+          output: [],
+          stop_reason: "max_output_tokens",
+          usage: { input_tokens: 42, output_tokens: 64 },
+        }),
+      );
+      return;
+    }
+    if (body.model === "mimo-v2.5-free") {
+      // Free endpoint that answered properly.
+      res.setHeader("content-type", "application/json");
+      res.end(
+        JSON.stringify({
+          id: "resp_ok",
+          output: [{ id: "m", type: "message", role: "assistant", content: [{ type: "output_text", text: "free ok" }] }],
+        }),
+      );
+      return;
+    }
+    // Paid model: an empty output must pass through untouched - the capture is free-only.
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({ id: "resp_paid_empty", output: [], stop_reason: "max_output_tokens" }));
+  });
+  const port = await listen(upstream);
+  t.after(() => upstream.close());
+  const instance = await startApp({
+    goBaseUrl: `http://127.0.0.1:${port}`,
+    opencodeBaseUrl: `http://127.0.0.1:${port}`,
+    zenBaseUrl: `http://127.0.0.1:${port}/v1`,
+  });
+  t.after(instance.stop);
+  const post = (model, stream) =>
+    fetch(`${instance.base}/v1/responses`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model,
+        stream,
+        input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }],
+      }),
+    });
+
+  // Non-stream free empty: 429 + the reused quota_exhausted guidance.
+  const json = await post("deepseek-v4-flash-free", false);
+  assert.equal(json.status, 429);
+  const jsonBodyRes = await json.json();
+  assert.equal(jsonBodyRes.error.type, "quota_exhausted");
+  assert.match(jsonBodyRes.error.message, /\[opencode-go\]/);
+  assert.match(jsonBodyRes.error.message, /zen free endpoint has no quota left/);
+  assert.match(jsonBodyRes.error.message, /5h rolling window/);
+  assert.match(jsonBodyRes.error.message, /switch to ON mode/);
+
+  // Streaming free empty: the bare completed is replaced by response.failed.
+  const stream = await post("deepseek-v4-flash-free", true);
+  assert.equal(stream.status, 200);
+  const streamText = await stream.text();
+  assert.match(streamText, /event: response\.failed/);
+  assert.match(streamText, /zen free endpoint has no quota left/);
+  assert.doesNotMatch(streamText, /response\.completed/);
+
+  // The captured streaming failure lands in the metrics trace as an error.
+  const trace = instance.services.metrics.recent.find(
+    (record) => record.ok === false && record.httpStatus === 429,
+  );
+  assert.ok(trace, "the empty free stream records an error trace");
+  assert.match(trace.error, /zen free endpoint has no quota left/);
+
+  // Free normal response stays untouched.
+  const ok = await post("mimo-v2.5-free", false);
+  assert.equal(ok.status, 200);
+  const okBody = await ok.json();
+  assert.equal(okBody.output[0].content[0].text, "free ok");
+
+  // Paid empty output is NOT intercepted.
+  const paid = await post("deepseek-v4-flash", false);
+  assert.equal(paid.status, 200);
+  const paidBody = await paid.json();
+  assert.deepEqual(paidBody.output, []);
+});

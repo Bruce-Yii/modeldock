@@ -11,6 +11,7 @@ import {
   describeInputShape,
   dropUnpairedToolItems,
   encodeCompactionSummary,
+  freeResponseFailure,
   isCompactV1Request,
   isCompactV2Request,
   isNativeModel,
@@ -440,6 +441,24 @@ test("upstreamTargetFor routes zen free models to the zen/v1 responses endpoint"
 
   const paid = upstreamTargetFor(config, "deepseek-v4-flash");
   assert.equal(paid.free, false, "paid models keep the generic error hints");
+});
+
+test("freeResponseFailure classifies silent zen free 200 bodies", () => {
+  assert.equal(freeResponseFailure({ id: "r", output: [], stop_reason: "max_output_tokens" }), "empty_output");
+  assert.equal(
+    freeResponseFailure({ id: "r", error: { type: "server_error", message: "upstream failed" } }),
+    "upstream_error",
+  );
+  assert.equal(
+    freeResponseFailure({
+      id: "r",
+      output: [{ id: "m", type: "message", role: "assistant", content: [{ type: "output_text", text: "ok" }] }],
+    }),
+    null,
+  );
+  assert.equal(freeResponseFailure({ id: "r", output: [{ type: "reasoning" }] }), null);
+  assert.equal(freeResponseFailure(null), null);
+  assert.equal(freeResponseFailure([]), null);
 });
 
 test("routeGatewayRequest escalates current-turn images to the vision model", () => {

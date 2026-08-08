@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { classifyUpstreamError, parseUpstreamError, translateUpstreamError } from "./error-translation.mjs";
+import {
+  classifyUpstreamError,
+  freeEmptyOutputError,
+  parseUpstreamError,
+  translateUpstreamError,
+} from "./error-translation.mjs";
 
 test("parseUpstreamError reads the message from every known provider shape", () => {
   assert.equal(parseUpstreamError('{"error":{"message":"model not found","type":"invalid_request_error"}}').message, "model not found");
@@ -12,7 +17,7 @@ test("parseUpstreamError reads the message from every known provider shape", () 
 });
 
 test("quota exhaustion is classified before the status mapping", () => {
-  // DeepSeek reports no credits as 402, xAI as 403, OpenAI as 429 — all quota.
+  // DeepSeek reports no credits as 402, xAI as 403, OpenAI as 429 - all quota.
   assert.equal(classifyUpstreamError(402, "Insufficient Balance"), "quota_exhausted");
   assert.equal(classifyUpstreamError(429, "You exceeded your current quota"), "quota_exhausted");
   assert.equal(classifyUpstreamError(403, "Your team is out of credits"), "quota_exhausted");
@@ -56,4 +61,12 @@ test("free upstream errors carry trial-mode guidance instead of the generic hint
   const plain = translateUpstreamError({ provider: "opencode-go", status: 503, bodyText: '{"error":{"message":"boom"}}' });
   assert.match(plain.body.error.message, /unavailable; retry shortly/);
   assert.doesNotMatch(plain.body.error.message, /zen free endpoint/);
+});
+
+test("freeEmptyOutputError reuses the quota_exhausted copy for silent empty outputs", () => {
+  const error = freeEmptyOutputError({ provider: "opencode-go" });
+  assert.equal(error.classification, "quota_exhausted");
+  assert.match(error.body.error.message, /^\[opencode-go\] the zen free endpoint returned an empty response/);
+  assert.match(error.body.error.message, /5h rolling window/);
+  assert.match(error.body.error.message, /switch to ON mode/);
 });

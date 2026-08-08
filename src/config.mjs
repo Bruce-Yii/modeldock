@@ -218,7 +218,18 @@ export function loadConfig() {
     return !id || id.includes(PROVIDER_SEPARATOR) ? id : publishedSlugFor(profileId, id);
   };
   const mainModel = modelRef(process.env.MODELDOCK_MAIN_MODEL || "deepseek-v4-flash");
-  const visionModel = modelRef(process.env.MODELDOCK_VISION_MODEL || "mimo-v2.5-free");
+  // Mode-aware default vision model. ON mode (paid native-GPT merge) defaults to
+  // Luna so image turns never route to the zen free endpoint, whose empty-output
+  // bug burns the whole output budget and returns nothing (200 + output:[] or a
+  // bare response.completed). Trial is the fixed free pair and OFF has no native
+  // GPT to fall back on, so both keep the free vision model unless explicitly
+  // overridden via MODELDOCK_VISION_MODEL.
+  const trialMode = process.env.MODELDOCK_TRIAL === "1";
+  const nativeMerge = !["0", "false", "off"].includes(
+    String(process.env.MODELDOCK_NATIVE_MERGE || "").toLowerCase(),
+  );
+  const defaultVisionModel = trialMode || !nativeMerge ? "mimo-v2.5-free" : "gpt-5.6-luna";
+  const visionModel = modelRef(process.env.MODELDOCK_VISION_MODEL || defaultVisionModel);
   const visionFallbackModel = modelRef(process.env.MODELDOCK_VISION_FALLBACK_MODEL || "minimax-m3");
 
   const debug = {
@@ -256,11 +267,11 @@ export function loadConfig() {
     // Trial mode: the fixed zen-free model pair (deepseek-v4-flash-free /
     // mimo-v2.5-free) on the opencode-go profile with a free-only catalog and
     // trial-specific upstream error copy. Managed by /api/config/mode.
-    trialMode: process.env.MODELDOCK_TRIAL === "1",
+    trialMode,
     // Wizard-managed native-GPT merge: off for users without a ChatGPT/Codex
     // subscription so the picker never advertises models that 401 on request.
     // Defaults to on (current behavior) when the env key is unset.
-    nativeMerge: !["0", "false", "off"].includes(String(process.env.MODELDOCK_NATIVE_MERGE || "").toLowerCase()),
+    nativeMerge,
     mcpTransport,
     visionTimeoutMs: integer("MODELDOCK_VISION_TIMEOUT_MS", 90_000, { min: 1_000, max: 300_000 }),
     mediaTtlMs: integer("MODELDOCK_MEDIA_TTL_MS", 3_600_000, { min: 60_000 }),

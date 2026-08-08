@@ -5,7 +5,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { bareModelId, modelEntryFor, providerForModel } from "./profiles.mjs";
 import { recordUsageEvent } from "./usage-events.mjs";
-import { translateUpstreamError } from "./error-translation.mjs";
+import { translateUpstreamError, freeEmptyOutputError } from "./error-translation.mjs";
 import { RouteAffinity, routeResponsesRequest } from "./router.mjs";
 import { extractResponseUsage } from "./metrics.mjs";
 
@@ -668,6 +668,149 @@ export async function pipeGatewayStream(upstreamBody, res, tee) {
   return bytes;
 }
 
+// Classify a 200 zen-free response body that silently failed. Returns
+// "empty_output" when the output array is empty (the whole output budget was
+// spent on reasoning), "upstream_error" when the body carries an error object
+// despite the 200 (observed as a nemotron-free server_error), or null for a
+// real response.
+export function freeResponseFailure(parsed) {
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  if (parsed.error !== undefined) return "upstream_error";
+  if (Array.isArray(parsed.output) && parsed.output.length === 0) return "empty_output";
+  return null;
+}
+
+// Zen free streaming: the endpoint intermittently answers 200 with no output
+// items - a bare response.completed event with no output array (all output
+// tokens spent on reasoning). Codex's client parses a bare completed as a
+// successful empty turn (its ResponseCompleted struct only requires an id), so
+// the failure has to ride on the stream instead: hold the terminal tail
+// (everything after the last response.completed block) and, when no output item
+// arrived, replace it with a synthesized response.failed event carrying the
+// free-tier guidance. Non-free traffic and upstream failures are untouched -
+// only a response.completed block starts the hold. The tee still receives every
+// chunk so usage extraction keeps working.
+export async function pipeFreeStream(upstreamBody, res, tee, failedMessage) {
+  if (!upstreamBody) {
+    res.end();
+    return { bytes: 0, empty: false, usage: undefined };
+  }
+  let bytes = 0;
+  let sawOutput = false;
+  let holding = false;
+  let tail = "";
+  let sseBuffer = "";
+  let responseId = "";
+  let usage;
+  let outStream = null;
+  const writeOut = (text) => {
+    if (!res.write(text)) outStream?.pause();
+  };
+  const processBlock = (block, delim) => {
+    let completed = false;
+    for (const line of block.split(/\r?\n/)) {
+      if (!line.startsWith("data:")) continue;
+      const data = line.slice(5).trim();
+      if (!data || data === "[DONE]") continue;
+      let parsed;
+      try {
+        parsed = JSON.parse(data);
+      } catch {
+        continue;
+      }
+      if (usage === undefined) usage = extractResponseUsage(parsed);
+      const kind = parsed?.type;
+      if (kind === "response.completed") {
+        completed = true;
+        responseId = parsed?.response?.id || "";
+        const output = parsed?.response?.output;
+        if (Array.isArray(output) && output.length > 0) sawOutput = true;
+      } else if (
+        kind === "response.output_text.delta" ||
+        kind === "response.output_text.done" ||
+        kind === "response.output_item.added" ||
+        kind === "response.function_call_arguments.delta" ||
+        kind === "response.reasoning_summary_part.delta" ||
+        kind === "response.reasoning_content.delta"
+      ) {
+        sawOutput = true;
+      }
+    }
+    if (completed) {
+      holding = true;
+      tail = block + delim;
+      return;
+    }
+    if (holding) {
+      tail += block + delim;
+      return;
+    }
+    writeOut(block + delim);
+  };
+  const push = (chunk) => {
+    const text = typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
+    sseBuffer += text;
+    while (true) {
+      const match = sseBuffer.match(/\r?\n\r?\n/);
+      if (!match) break;
+      const block = sseBuffer.slice(0, match.index);
+      const delim = match[0];
+      sseBuffer = sseBuffer.slice(match.index + delim.length);
+      processBlock(block, delim);
+    }
+    if (sseBuffer.length > 1_000_000) sseBuffer = sseBuffer.slice(-500_000);
+  };
+  await new Promise((resolve, reject) => {
+    const stream = Readable.fromWeb(upstreamBody);
+    outStream = stream;
+    let settled = false;
+    const settle = (error) => {
+      if (settled) return;
+      settled = true;
+      if (error) reject(error);
+      else resolve();
+    };
+    stream.on("data", (chunk) => {
+      tee?.push(chunk);
+      push(chunk);
+      bytes += chunk.byteLength || Buffer.byteLength(chunk);
+    });
+    stream.once("end", () => {
+      tee?.end?.();
+      if (holding) {
+        if (sawOutput || !failedMessage) {
+          writeOut(tail);
+          if (sseBuffer) writeOut(sseBuffer);
+        } else {
+          writeOut(
+            `event: response.failed\r\ndata: ${JSON.stringify({
+              type: "response.failed",
+              response: {
+                id: responseId || undefined,
+                status: "failed",
+                error: { code: "server_error", message: failedMessage },
+              },
+            })}\r\n\r\n`,
+          );
+        }
+      } else if (sseBuffer) {
+        writeOut(sseBuffer);
+      }
+      res.end();
+      settle();
+    });
+    stream.once("error", settle);
+    res.once("drain", () => outStream?.resume());
+    res.once("finish", () => settle());
+    res.once("error", settle);
+    res.once("close", () => {
+      if (!settled) stream.destroy();
+      settle();
+    });
+  });
+  return { bytes, empty: holding && !sawOutput, usage };
+}
+
 // Native passthrough for a Responses request. Unlike the routed path there is no
 // tool policy, no historical-image rewrite, and no image escalation: the native
 // backend owns hosted tools, history images, and its own vision. Only the input
@@ -1282,15 +1425,123 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       return { ok: false, httpStatus: upstream.status, route, error: translated.body.error.message.slice(0, 400), upstreamBytes };
     }
 
+    // Zen free endpoint: a 200 with no output items is a silent failure - the
+    // free tier burns the whole output budget on reasoning and returns nothing.
+    // Capture it on both wires and surface the quota_exhausted guidance instead
+    // of letting Codex read an empty completion as a successful turn.
+    const freeEmptyError = target.free ? freeEmptyOutputError({ provider: target.provider }) : null;
+    let upstreamBody = upstream.body;
+    let freeEmpty = false;
+    if (target.free && normalizedPayload.stream !== true) {
+      const raw = await upstream.text();
+      let parsed = null;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        // Non-JSON 200 (HTML gateway page etc.): leave the response untouched.
+      }
+      const failure = parsed && freeResponseFailure(parsed);
+      if (failure) {
+        const translated = failure === "upstream_error"
+          ? translateUpstreamError({ provider: target.provider, status: 502, bodyText: redactBearer(raw), free: true })
+          : freeEmptyError;
+        const errorStatus = failure === "upstream_error" ? 502 : 429;
+        const errorBody = JSON.stringify(translated.body);
+        if (!res.headersSent) {
+          res.statusCode = errorStatus;
+          res.setHeader("Content-Type", "application/json");
+          res.end(errorBody);
+        }
+        finish?.({
+          ok: false,
+          httpStatus: errorStatus,
+          upstream: target.provider,
+          error: translated.body.error.message.slice(0, 400),
+          requestShape: describeInputShape(normalizedPayload.input),
+        });
+        metrics?.recordResponseTransform?.({
+          blocked: { tool_search: stripped.toolSearch, web_search: stripped.webSearch },
+          toolChoiceRewritten: false,
+          imageRefs: [],
+          directVision: route.directVision,
+          droppedAssistantMessages: 0,
+          nativeToolCalls: 0,
+          nativeToolOutputs: 0,
+          fallbackToolResults: 0,
+        }, { streaming: false, routeReason: route.reason, bytesIn });
+        return { ok: false, httpStatus: errorStatus, route, error: translated.body.error.message.slice(0, 400), upstreamBytes };
+      }
+      // Real non-stream free response: rebuild the body as a web stream so the
+      // shared pipe below handles framing, usage and affinity unchanged.
+      upstreamBody = Readable.toWeb(Readable.from([Buffer.from(raw)]));
+    }
+
     if (!res.headersSent) {
       res.statusCode = upstream.status;
       res.setHeader("Content-Type", upstream.headers.get("content-type") || "text/event-stream; charset=utf-8");
       res.setHeader("Cache-Control", "no-cache, no-transform");
       res.flushHeaders();
     }
-    bytesOut = await pipeGatewayStream(upstream.body, res, tee);
+    if (target.free && normalizedPayload.stream === true) {
+      const result = await pipeFreeStream(upstreamBody, res, tee, freeEmptyError?.body.error.message);
+      bytesOut = result.bytes;
+      freeEmpty = result.empty;
+      if (result.usage) usage = result.usage;
+    } else {
+      bytesOut = await pipeGatewayStream(upstreamBody, res, tee);
+    }
     if (completedResponse && routeAffinity) {
       routeAffinity.registerResponse(completedResponse, route.model);
+    }
+    // The zen free stream reports usage in the trailing chat chunk
+    // (prompt_tokens/completion_tokens) instead of the Responses shape; map it
+    // so the dashboard trace shows the burned budget even on the empty path.
+    const traceUsage =
+      usage && usage.input_tokens === undefined && usage.prompt_tokens !== undefined
+        ? {
+            input_tokens: usage.prompt_tokens,
+            output_tokens: usage.completion_tokens,
+            total_tokens: usage.total_tokens,
+            input_tokens_details: usage.prompt_tokens_details,
+            output_tokens_details: usage.completion_tokens_details,
+          }
+        : usage;
+    if (freeEmpty) {
+      const errorMessage = freeEmptyError.body.error.message;
+      finish?.({
+        ok: false,
+        httpStatus: 429,
+        upstream: target.provider,
+        error: errorMessage.slice(0, 400),
+        requestShape: describeInputShape(normalizedPayload.input),
+        bytesOut,
+        inputTokens: traceUsage?.input_tokens || 0,
+        outputTokens: traceUsage?.output_tokens || 0,
+        cachedTokens: traceUsage?.input_tokens_details?.cached_tokens || 0,
+        reasoningTokens: traceUsage?.output_tokens_details?.reasoning_tokens || 0,
+      });
+      metrics?.recordResponseTransform?.({
+        blocked: { tool_search: stripped.toolSearch, web_search: stripped.webSearch },
+        toolChoiceRewritten: false,
+        imageRefs: [],
+        directVision: route.directVision,
+        droppedAssistantMessages: 0,
+        nativeToolCalls: 0,
+        nativeToolOutputs: 0,
+        fallbackToolResults: 0,
+      }, { streaming: true, routeReason: route.reason, bytesIn });
+      metrics?.recordResponseUsage?.({ bytesOut, usage: traceUsage });
+      (services.recordUsage || recordUsageEvent)({
+        model: normalizedPayload.model,
+        provider: target.provider,
+        route: route.reason,
+        status: 429,
+        durationMs: Date.now() - startedAt,
+        inputTokens: traceUsage?.input_tokens,
+        outputTokens: traceUsage?.output_tokens,
+        totalTokens: traceUsage?.total_tokens,
+      });
+      return { ok: false, httpStatus: 429, route, error: errorMessage.slice(0, 400), usage: traceUsage, bytesOut, upstreamBytes, latencyMs: Date.now() - startedAt, upstream: target.provider };
     }
     // inputTokens/outputTokens ride on the trace record: the dashboard's
     // context-token waveform plots recent[].inputTokens per completed call.
@@ -1299,13 +1550,13 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       httpStatus: upstream.status,
       upstream: target.provider,
       bytesOut,
-      inputTokens: usage?.input_tokens || 0,
-      outputTokens: usage?.output_tokens || 0,
+      inputTokens: traceUsage?.input_tokens || 0,
+      outputTokens: traceUsage?.output_tokens || 0,
       // Both upstreams report prompt-cache hits and reasoning spend in the
       // standard details objects (verified live on go and deepseek-official);
       // the dashboard's cache-rate wave reads these off the trace records.
-      cachedTokens: usage?.input_tokens_details?.cached_tokens || 0,
-      reasoningTokens: usage?.output_tokens_details?.reasoning_tokens || 0,
+      cachedTokens: traceUsage?.input_tokens_details?.cached_tokens || 0,
+      reasoningTokens: traceUsage?.output_tokens_details?.reasoning_tokens || 0,
     });
     metrics?.recordResponseTransform?.({
       blocked: { tool_search: stripped.toolSearch, web_search: stripped.webSearch },
@@ -1317,7 +1568,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       nativeToolOutputs: 0,
       fallbackToolResults: 0,
     }, { streaming: true, routeReason: route.reason, bytesIn });
-    metrics?.recordResponseUsage?.({ bytesOut, usage });
+    metrics?.recordResponseUsage?.({ bytesOut, usage: traceUsage });
     // Injectable so unit tests do not append to the real ~/.modeldock file.
     (services.recordUsage || recordUsageEvent)({
       model: normalizedPayload.model,
@@ -1325,15 +1576,15 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       route: route.reason,
       status: upstream.status,
       durationMs: Date.now() - startedAt,
-      inputTokens: usage?.input_tokens,
-      outputTokens: usage?.output_tokens,
-      totalTokens: usage?.total_tokens,
+      inputTokens: traceUsage?.input_tokens,
+      outputTokens: traceUsage?.output_tokens,
+      totalTokens: traceUsage?.total_tokens,
     });
     return {
       ok: true,
       httpStatus: upstream.status,
       route,
-      usage,
+      usage: traceUsage,
       bytesOut,
       upstreamBytes,
       latencyMs: Date.now() - startedAt,

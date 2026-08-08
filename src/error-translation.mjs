@@ -96,3 +96,23 @@ export function translateUpstreamError({ provider, status, bodyText, free = fals
     },
   };
 }
+
+// The zen free endpoint intermittently accepts a request, burns the whole
+// output budget on reasoning, and answers 200 with no output items: output:[]
+// with stop_reason "max_output_tokens" (non-streaming) or a bare
+// response.completed event (streaming). There is no upstream error body to
+// parse, so synthesize the quota_exhausted guidance in the same shape the relay
+// already uses for upstream failures.
+export function freeEmptyOutputError({ provider, detail } = {}) {
+  const classification = "quota_exhausted";
+  const reason = detail || "the zen free endpoint returned an empty response (no output items)";
+  return {
+    classification,
+    body: {
+      error: {
+        type: classification,
+        message: `[${provider}] ${reason} - ${FREE_HINTS[classification]}`,
+      },
+    },
+  };
+}
