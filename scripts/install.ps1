@@ -97,8 +97,13 @@ if (-not $nodeExe) {
                 if ($line -match "^([0-9a-fA-F]{64})\s+\*?$([regex]::Escape($zipName))\s*$") { $expected = $Matches[1]; break }
             }
             if (-not $expected) { throw "SHA256 for $zipName not found in SHASUMS256.txt" }
-            $actual = (Get-FileHash -LiteralPath (Join-Path $stageDir $zipName) -Algorithm SHA256).Hash.ToLowerInvariant()
-            if ($actual -ne $expected.ToLowerInvariant()) { throw "SHA256 mismatch for $zipName (expected $expected)" }
+              # Get-FileHash is unavailable in some PowerShell environments (e.g.
+              # GitHub Actions runners), so compute the digest with .NET directly.
+              $hasher = [System.Security.Cryptography.SHA256]::Create()
+              $actual = [System.BitConverter]::ToString(
+                $hasher.ComputeHash([System.IO.File]::ReadAllBytes((Join-Path $stageDir $zipName)))
+              ).Replace("-", "").ToLowerInvariant()
+              if ($actual -ne $expected.ToLowerInvariant()) { throw "SHA256 mismatch for $zipName (expected $expected)" }
             Write-Host "  extracting..."
             Expand-Archive -LiteralPath (Join-Path $stageDir $zipName) -DestinationPath $stageDir -Force
             $extracted = Join-Path $stageDir "node-$nodeVer-win-$arch"

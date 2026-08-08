@@ -377,10 +377,18 @@ test("mock install: auto-download a bundled Node 22 LTS when none is suitable", 
       { name: `node-${distName}-linux-x64/bin/node`, type: "file", data: nodeBin },
     ]),
   );
+  const tgzDarwin = gzipSync(
+    buildTar([
+      { name: `node-${distName}-darwin-arm64/`, type: "dir" },
+      { name: `node-${distName}-darwin-arm64/bin/`, type: "dir" },
+      { name: `node-${distName}-darwin-arm64/bin/node`, type: "file", data: nodeBin },
+    ]),
+  );
   const shasums =
     [
       `${sha256(zip)}  node-${distName}-win-x64.zip`,
       `${sha256(tgz)}  node-${distName}-linux-x64.tar.gz`,
+      `${sha256(tgzDarwin)}  node-${distName}-darwin-arm64.tar.gz`,
       `${sha256(Buffer.from("decoy"))}  node-${distName}-darwin-x64.tar.gz`,
     ].join("\n") + "\n";
   const indexJson = JSON.stringify([
@@ -405,6 +413,9 @@ test("mock install: auto-download a bundled Node 22 LTS when none is suitable", 
     } else if (url === `/v${nodeVer}/node-${distName}-linux-x64.tar.gz`) {
       res.writeHead(200, { "content-type": "application/gzip" });
       res.end(tgz);
+    } else if (url === `/v${nodeVer}/node-${distName}-darwin-arm64.tar.gz`) {
+      res.writeHead(200, { "content-type": "application/gzip" });
+      res.end(tgzDarwin);
     } else {
       res.writeHead(404, { "content-type": "text/plain" });
       res.end("not found");
@@ -500,6 +511,7 @@ test("mock install: rejects a Node download whose SHA256 does not match", async 
   const shasums = [
     `${wrong}  node-${distName}-win-x64.zip`,
     `${wrong}  node-${distName}-linux-x64.tar.gz`,
+    `${wrong}  node-${distName}-darwin-arm64.tar.gz`,
   ].join("\n") + "\n";
   const indexJson = JSON.stringify([{ version: "v22.4.0", lts: "Jod", npm: "10.8.0" }]);
   const server = createServer((req, res) => {
