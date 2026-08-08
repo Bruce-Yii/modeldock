@@ -275,6 +275,92 @@ test("config mode endpoint switches OFF / TRIAL / ON and locks the free pair in 
   assert.equal(await readFile(configPath, "utf8"), original, "off restores the original Codex config");
 });
 
+test("config mode ON writes the wizard nativeMerge switch and drops native GPT models when false", async (t) => {
+  const codexHome = await mkdtemp(path.join(os.tmpdir(), "modeldock-server-merge-"));
+  t.after(() => rm(codexHome, { recursive: true, force: true }));
+  const configPath = path.join(codexHome, "config.toml");
+  await writeFile(configPath, 'model = "gpt-5.6-sol"\n', "utf8");
+  const envFile = path.join(codexHome, "modeldock.env");
+  const nativeDir = await mkdtemp(path.join(os.tmpdir(), "modeldock-server-native-"));
+  t.after(() => rm(nativeDir, { recursive: true, force: true }));
+  const nativeCatalogFile = path.join(nativeDir, "native-catalog.json");
+  await writeFile(nativeCatalogFile, JSON.stringify({
+    captured_with: "0.1.0",
+    models: [{ slug: "gpt-5.6-luna", display_name: "GPT-5.6-Luna", visibility: "list", priority: 3 }],
+  }), "utf8");
+  const catalogFile = path.join(nativeDir, "codex-model-catalog.json");
+  const instance = await startApp({ codexHome, envFile, nativeCatalogFile, codexCatalogFile: catalogFile });
+  t.after(instance.stop);
+  const post = (body) => fetch(`${instance.base}/api/config/mode`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+  // Subscriber (nativeMerge=true): native GPT models stay in the published catalog.
+  const merged = await (await post({ mode: "on", nativeMerge: true })).json();
+  assert.equal(merged.enabled, true);
+  assert.match(await readFile(envFile, "utf8"), /MODELDOCK_NATIVE_MERGE=1/);
+  assert.ok(JSON.parse(await readFile(catalogFile, "utf8")).models.some((model) => model.slug === "gpt-5.6-luna"),
+    "nativeMerge=true keeps the native GPT model in the catalog file");
+
+  // Non-subscriber (nativeMerge=false): native GPT models are dropped from the catalog.
+  const nomerge = await (await post({ mode: "on", nativeMerge: false })).json();
+  assert.equal(nomerge.enabled, true);
+  assert.match(await readFile(envFile, "utf8"), /MODELDOCK_NATIVE_MERGE=0/);
+  assert.equal(JSON.parse(await readFile(catalogFile, "utf8")).models.some((model) => model.slug === "gpt-5.6-luna"),
+    false, "nativeMerge=false drops the native GPT model from the catalog file");
+
+  // Trial also persists the switch: a non-subscriber moving trial -> on must not get
+  // the native GPT catalog back.
+  const trial = await (await post({ mode: "trial", nativeMerge: false })).json();
+  assert.equal(trial.trial, true);
+  assert.match(await readFile(envFile, "utf8"), /MODELDOCK_NATIVE_MERGE=0/);
+  assert.equal(instance.services.config.nativeMerge, false, "trial keeps the in-memory switch too");
+});
+
+test("onboarding endpoint prefills, completes, and persists the flag across mode switches", async (t) => {
+  const codexHome = await mkdtemp(path.join(os.tmpdir(), "modeldock-server-onboard-"));
+  t.after(() => rm(codexHome, { recursive: true, force: true }));
+  const configPath = path.join(codexHome, "config.toml");
+  await writeFile(configPath, 'model = "gpt-5.6-sol"\n', "utf8");
+  const envFile = path.join(codexHome, "modeldock.env");
+  const instance = await startApp({ codexHome, envFile });
+  t.after(instance.stop);
+
+  const prefill = await (await fetch(`${instance.base}/api/onboarding`)).json();
+  assert.equal(prefill.onboarded, false);
+  assert.equal(prefill.nativeMerge, true, "defaults to the subscriber-native merge");
+  assert.equal(prefill.mode, "off");
+  assert.deepEqual(prefill.tokenConfigured, { "opencode-go": true, "deepseek-official": false },
+    "prefill reports the configured test token");
+  assert.equal(typeof prefill.autostart.enabled, "boolean");
+
+  const done = await (await fetch(`${instance.base}/api/onboarding/complete`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: "{}",
+  })).json();
+  assert.equal(done.onboarded, true);
+
+  const after = await (await fetch(`${instance.base}/api/onboarding`)).json();
+  assert.equal(after.onboarded, true, "the completed marker is served back");
+  assert.ok(after.onboardedAt, "the completed marker carries a timestamp");
+
+  await fetch(`${instance.base}/api/config/mode`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ mode: "trial" }),
+  });
+  await fetch(`${instance.base}/api/config/mode`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ mode: "off" }),
+  });
+  const survived = await (await fetch(`${instance.base}/api/onboarding`)).json();
+  assert.equal(survived.onboarded, true, "trial/off mode switches do not reset the onboarding flag");
+});
+
 test("api/events streams an initial snapshot", async (t) => {
   const instance = await startApp();
   t.after(instance.stop);

@@ -880,6 +880,14 @@ export function createApp(services = createServices()) {
     try {
       const run = configMutationQueue.then(async () => {
         let result;
+        // Wizard-managed native-GPT merge opt-out (no ChatGPT subscription). It is a
+        // persistent property of the account, so it is applied on every enabling mode
+        // (trial included): a non-subscriber who later moves trial -> on must not get
+        // the native GPT catalog back. "0"/"false"/"off" are accepted for curl users.
+        const nativeMergeRaw = req.body?.nativeMerge;
+        const nativeMerge = nativeMergeRaw === undefined
+          ? undefined
+          : !["0", "false", "off"].includes(String(nativeMergeRaw).toLowerCase());
         if (mode === "off") {
           result = await configSwitcher.disable();
           config.trialMode = false;
@@ -891,14 +899,21 @@ export function createApp(services = createServices()) {
             services.modelSelection.mainModel = TRIAL_MAIN_MODEL;
             services.modelSelection.visionModel = TRIAL_VISION_MODEL;
             services.configSwitcher.model = TRIAL_MAIN_MODEL;
-            writeEnvFile({
+            const trialEnv = {
               MODELDOCK_TRIAL: "1",
               MODELDOCK_MAIN_MODEL: TRIAL_MAIN_MODEL,
               MODELDOCK_VISION_MODEL: TRIAL_VISION_MODEL,
-            }, config.envFile);
+            };
+            if (nativeMerge !== undefined) trialEnv.MODELDOCK_NATIVE_MERGE = nativeMerge ? "1" : "0";
+            writeEnvFile(trialEnv, config.envFile);
+            if (nativeMerge !== undefined) config.nativeMerge = nativeMerge;
           } else {
             config.trialMode = false;
             writeEnvFile({ MODELDOCK_TRIAL: "0" }, config.envFile);
+            if (nativeMerge !== undefined) {
+              config.nativeMerge = nativeMerge;
+              writeEnvFile({ MODELDOCK_NATIVE_MERGE: nativeMerge ? "1" : "0" }, config.envFile);
+            }
           }
           services.writeCatalogFile();
         }
@@ -911,6 +926,38 @@ export function createApp(services = createServices()) {
       recordConfigAction(metrics, `config_mode_${mode}`, { ok: false, error: error.message });
       const conflict = error.code === "STATE_INVALID";
       return res.status(conflict ? 409 : 500).json({ error: { type: error.code || "config_switch_error", message: error.message } });
+    }
+  });
+  // First-run onboarding: what the wizard pre-fills (token presence, autostart)
+  // and where it writes its done marker. Mode application reuses /api/config/mode;
+  // only the onboarding flag lives here.
+  app.get("/api/onboarding", async (req, res) => {
+    try {
+      const status = await configSwitcher.status();
+      const settings = settingsPayload(services);
+      return res.json({
+        onboarded: Boolean(status.onboarded),
+        onboardedAt: status.onboardedAt || null,
+        nativeMerge: config.nativeMerge !== false,
+        mode: status.enabled ? (config.trialMode ? "trial" : "on") : "off",
+        tokenConfigured: {
+          "opencode-go": Boolean(config.goToken),
+          "deepseek-official": Boolean(config.tokens?.["deepseek-official"]),
+        },
+        autostart: settings.autostart,
+      });
+    } catch (error) {
+      return res.status(500).json({ error: { type: "onboarding_status_error", message: error.message } });
+    }
+  });
+  app.post("/api/onboarding/complete", mutateConfig, async (req, res) => {
+    try {
+      const status = await configSwitcher.markOnboarded();
+      recordConfigAction(metrics, "onboarding_complete", { ok: true });
+      return res.json({ onboarded: true, ...status });
+    } catch (error) {
+      recordConfigAction(metrics, "onboarding_complete", { ok: false, error: error.message });
+      return res.status(500).json({ error: { type: "onboarding_failed", message: error.message } });
     }
   });
   app.get("/api/models", (req, res) => res.json(modelsPayload(services)));

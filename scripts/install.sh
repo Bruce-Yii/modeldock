@@ -398,7 +398,52 @@ case "$choice" in 1) restart_gateway ;; 2) restore_native ;; q|Q|"") exit 0 ;; *
 EOF
 chmod +x "$RECOVER"
 
-# 3. Start (unless already running) and point at the dashboard.
+# 3. Enable login autostart on a first install. The gateway also has this
+#    safeguard, but doing it here makes the install result deterministic even
+#    when the first background start is delayed or fails. The marker preserves
+#    an explicit user choice across later reinstalls. Tests redirect the plist
+#    directory and state dir through MODELDOCK_AUTOSTART_PLIST_DIR and
+#    MODELDOCK_STATE_DIR so mock installs never touch the real LaunchAgents.
+STATE_DIR="${MODELDOCK_STATE_DIR:-$ROOT}"
+AUTOSTART_MARK="$STATE_DIR/autostart-initialized"
+if [ "$SKIP_START" != "1" ] && [ ! -e "$AUTOSTART_MARK" ] && [ "$(uname -s)" = "Darwin" ]; then
+  PLIST_DIR="${MODELDOCK_AUTOSTART_PLIST_DIR:-$HOME/Library/LaunchAgents}"
+  PLIST="$PLIST_DIR/com.modeldock.gateway.plist"
+  mkdir -p "$PLIST_DIR"
+  cat > "$PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.modeldock.gateway</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>$(dirname "$NODE_BIN"):/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>MODELDOCK_NODE_PATH</key><string>$NODE_BIN</string>
+  </dict>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>$ROOT/scripts/start-hidden.sh</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>WorkingDirectory</key><string>$ROOT</string>
+  <key>StandardOutPath</key><string>$ROOT/modeldock.log</string>
+  <key>StandardErrorPath</key><string>$ROOT/modeldock.log</string>
+</dict>
+</plist>
+EOF
+  launchctl unload "$PLIST" >/dev/null 2>&1 || true
+  if launchctl load -w "$PLIST"; then
+    mkdir -p "$STATE_DIR"
+    printf '%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$AUTOSTART_MARK"
+    echo "  start at login enabled (default)"
+  else
+    echo "WARNING: could not enable start at login during install" >&2
+  fi
+fi
+
+# 4. Start (unless already running) and point at the dashboard.
 #    MODELDOCK_SKIP_START=1 skips the launch (used by the install mock test, which
 #    feeds the installer a fake node that may not be executable).
 if [ "$SKIP_START" = "1" ]; then
@@ -414,7 +459,7 @@ fi
 echo ""
 echo "Done. Dashboard: http://127.0.0.1:$PORT"
 echo "First run: paste your API token into the Settings dialog that opens automatically."
-echo "Optional: flip the 'Start at login' toggle on the dashboard."
+echo "Start at login is enabled by default; you can turn it off in Settings."
 if [ "$SKIP_OPEN" != "1" ]; then
   command -v open >/dev/null 2>&1 && open "http://127.0.0.1:$PORT/?settings=1" || true
 fi

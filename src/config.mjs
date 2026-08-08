@@ -254,6 +254,10 @@ export function loadConfig() {
     // mimo-v2.5-free) on the opencode-go profile with a free-only catalog and
     // trial-specific upstream error copy. Managed by /api/config/mode.
     trialMode: process.env.MODELDOCK_TRIAL === "1",
+    // Wizard-managed native-GPT merge: off for users without a ChatGPT/Codex
+    // subscription so the picker never advertises models that 401 on request.
+    // Defaults to on (current behavior) when the env key is unset.
+    nativeMerge: !["0", "false", "off"].includes(String(process.env.MODELDOCK_NATIVE_MERGE || "").toLowerCase()),
     mcpTransport,
     visionTimeoutMs: integer("MODELDOCK_VISION_TIMEOUT_MS", 90_000, { min: 1_000, max: 300_000 }),
     mediaTtlMs: integer("MODELDOCK_MEDIA_TTL_MS", 3_600_000, { min: 60_000 }),

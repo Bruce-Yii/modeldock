@@ -4,10 +4,11 @@ import process from "node:process";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { readFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
+import { readFileSync, existsSync, mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { createServer } from "node:http";
 import { spawn, execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { once } from "node:events";
+import { createHash, randomUUID } from "node:crypto";
 import { gzipSync } from "node:zlib";
 import { ownerFilePath } from "../src/instance-owner.mjs";
 
@@ -37,6 +38,294 @@ async function fetchText(url) {
   const res = await fetch(url);
   const text = await res.text();
   return { status: res.status, text };
+}
+
+async function waitForHealth(port, tries = 40) {
+  for (let i = 0; i < tries; i++) {
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/healthz`);
+      return { up: true, status: res.status };
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
+  return { up: false, status: 0 };
+}
+
+// Streamable-HTTP MCP client used against the installed gateway (same call shape
+// Codex uses when mcpTransport=url, and what the stdio bridge forwards to).
+async function rpcMcp(url, method, params) {
+  const res = await fetch(`${url}/mcp`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+  });
+  const text = await res.text();
+  if ((res.headers.get("content-type") || "").includes("text/event-stream")) {
+    for (const line of text.split(/\r?\n/)) {
+      if (!line.startsWith("data:")) continue;
+      const data = line.slice(5).trim();
+      try {
+        return { status: res.status, parsed: JSON.parse(data) };
+      } catch {
+        // Try the next data line.
+      }
+    }
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    parsed = { raw: text.slice(0, 500) };
+  }
+  return { status: res.status, parsed };
+}
+
+// The installed stdio bridge (dist/mcp-standalone.mjs) is what Codex spawns for
+// [mcp_servers.modeldock]; talk to it over JSON-RPC exactly like Codex does.
+function startBridge(bridgePath, gatewayUrl, extraEnv = {}) {
+  const child = spawn(process.execPath, [bridgePath], {
+    env: { ...process.env, MODELDOCK_GATEWAY_URL: gatewayUrl, MODELDOCK_MEMORY: "0", ...extraEnv },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  let stderr = "";
+  child.stderr.on("data", (chunk) => (stderr += chunk));
+  return { child, stderr: () => stderr };
+}
+
+function bridgeRpc(bridge, id, method, params) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`timeout waiting for ${method} response\n${bridge.stderr()}`)), 8_000);
+    const onData = (chunk) => {
+      for (const line of chunk.toString().split(/\r?\n/)) {
+        if (!line.trim()) continue;
+        let parsed;
+        try {
+          parsed = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (parsed.id === id) {
+          clearTimeout(timer);
+          bridge.child.stdout.off("data", onData);
+          resolve(parsed);
+          return;
+        }
+      }
+    };
+    bridge.child.stdout.on("data", onData);
+    bridge.child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
+  });
+}
+
+function bridgeNotify(bridge, method, params) {
+  bridge.child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method, params })}\n`);
+}
+
+async function stopBridge(bridge) {
+  if (bridge.child.exitCode !== null) return;
+  bridge.child.stdin.end();
+  await Promise.race([once(bridge.child, "exit"), new Promise((resolve) => setTimeout(resolve, 3_000))]);
+  if (bridge.child.exitCode === null) bridge.child.kill();
+}
+
+// A stand-in for the OpenCode Go responses endpoint. The gateway relays /v1/responses
+// here, so routing is proven end to end with a distinctive output token per attempt.
+function startFakeUpstream(tag) {
+  const calls = [];
+  const server = createServer((req, res) => {
+    let body = "";
+    req.on("data", (chunk) => (body += chunk));
+    req.on("end", () => {
+      calls.push({ url: req.url, body });
+      const payload = JSON.stringify({
+        type: "response.completed",
+        response: {
+          id: "resp_fake",
+          object: "response",
+          created_at: 0,
+          status: "completed",
+          model: "deepseek-v4-flash",
+          output: [
+            {
+              type: "message",
+              id: "msg_1",
+              status: "completed",
+              role: "assistant",
+              content: [{ type: "output_text", text: tag }],
+            },
+          ],
+          usage: { input_tokens: 3, output_tokens: 5 },
+        },
+      });
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.end(`event: response.completed\ndata: ${payload}\n\n`);
+    });
+  });
+  return new Promise((resolve) => {
+    server.listen(0, "127.0.0.1", () => {
+      resolve({
+        url: `http://127.0.0.1:${server.address().port}`,
+        calls,
+        close: () => new Promise((done) => server.close(done)),
+      });
+    });
+  });
+}
+
+async function assertRoutingWorks(port, upstreamTag) {
+  const res = await fetch(`http://127.0.0.1:${port}/v1/responses`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: "deepseek-v4-flash",
+      stream: true,
+      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "ping" }] }],
+    }),
+  });
+  const text = await res.text();
+  assert.equal(res.status, 200, `relay should return 200 (got ${res.status})`);
+  assert.match(text, new RegExp(upstreamTag), `relay should carry the upstream output through`);
+}
+
+async function assertGatewayMcpTools(port) {
+  const init = await rpcMcp(`http://127.0.0.1:${port}`, "initialize", {
+    protocolVersion: "2025-06-18",
+    capabilities: {},
+    clientInfo: { name: "install-test", version: "1.0.0" },
+  });
+  assert.equal(init.status, 200, "MCP initialize should succeed against the installed gateway");
+  const listed = await rpcMcp(`http://127.0.0.1:${port}`, "tools/list", {});
+  const names = (listed.parsed?.result?.tools || []).map((tool) => tool.name);
+  for (const name of ["web_search_exa", "vision_inspect", "speak", "hear", "recall_memory", "store_memory"]) {
+    assert.ok(names.includes(name), `${name} missing from installed gateway MCP tools: ${names.join(",")}`);
+  }
+}
+
+async function assertBridgeTools(bridgePath, gatewayUrl, memoryDir) {
+  const bridge = startBridge(bridgePath, gatewayUrl, { MODELDOCK_MEMORY: "1", MODELDOCK_MEMORY_DIR: memoryDir });
+  try {
+    const init = await bridgeRpc(bridge, 1, "initialize", {
+      protocolVersion: "2025-06-18",
+      capabilities: {},
+      clientInfo: { name: "install-test", version: "1.0.0" },
+    });
+    assert.equal(init.result?.serverInfo?.name, "modeldock-opencode-go", `bridge init failed:\n${bridge.stderr()}`);
+    bridgeNotify(bridge, "notifications/initialized", {});
+    const listed = await bridgeRpc(bridge, 2, "tools/list", {});
+    const names = (listed.result?.tools || []).map((tool) => tool.name);
+    for (const name of ["web_search_exa", "vision_inspect", "speak", "hear", "recall_memory", "store_memory"]) {
+      assert.ok(names.includes(name), `${name} missing from installed bridge tools: ${names.join(",")}`);
+    }
+    const call = await bridgeRpc(bridge, 3, "tools/call", {
+      name: "recall_memory",
+      arguments: { query: "baseline" },
+    });
+    const text = call.result?.content?.[0]?.text || "";
+    assert.match(text, /MEMORY_RECALL/, `recall_memory should forward through the bridge:\n${bridge.stderr()}`);
+  } finally {
+    await stopBridge(bridge);
+  }
+}
+
+// The catalog is what Codex reads for the picker and for the tool/instruction
+// surface it hands to the LLM, so assert the loaded model entry carries the
+// capability declarations the session depends on.
+function assertCatalogTools(catalogPath) {
+  const payload = JSON.parse(readFileSync(catalogPath, "utf8"));
+  const entry = (payload.models || []).find((model) => String(model.slug || "").includes("deepseek-v4-flash"));
+  assert.ok(entry, "catalog should publish the main model entry");
+  assert.deepEqual(
+    entry.experimental_supported_tools,
+    ["artifact", "tool_call_mcp_elicitation", "workspace_dependencies", "computer_use", "browser_use"],
+    "catalog should declare the Codex experimental tool surface",
+  );
+  const instructions = entry.base_instructions || "";
+  assert.match(instructions, /vision_inspect/, "base instructions should expose the vision tool");
+  assert.match(instructions, /web search/, "base instructions should expose the search tool");
+  assert.match(instructions, /recall_memory/, "base instructions should expose recall_memory");
+  assert.match(instructions, /store_memory/, "base instructions should expose store_memory");
+  assert.ok(entry.context_window > 0, "catalog should declare a context window");
+  assert.ok(Array.isArray(entry.input_modalities), "catalog should declare input modalities");
+}
+
+function writeFakeLaunchctl(binDir, logPath) {
+  mkdirSync(binDir, { recursive: true });
+  writeFileSync(
+    path.join(binDir, "launchctl"),
+    `#!/bin/sh\necho "$*" >> "$MODELDOCK_FAKE_LAUNCHCTL_LOG"\nexit 0\n`,
+    { mode: 0o755 },
+  );
+}
+
+// Windows: the install writes a login Run entry under a redirectable registry key.
+// The value must point back at the installed launcher, and launching that exact
+// command must bring the gateway up (the "reboot" path).
+function assertWinRunEntryPointsAt(keyPath, name, installDir) {
+  const buf = execFileSync("reg.exe", ["query", keyPath, "/v", name], { encoding: "buffer" });
+  assert.ok(
+    buf.includes(Buffer.from(installDir, "utf8")),
+    `Run value under ${keyPath} should reference the installed launcher in ${installDir}`,
+  );
+}
+
+function deleteWinRegistryKey(keyPath) {
+  try {
+    execFileSync("reg.exe", ["delete", keyPath, "/f"], { stdio: "ignore" });
+  } catch {
+    // Already gone.
+  }
+}
+
+function readWinRunValue(keyPath, name) {
+  try {
+    const buf = execFileSync("reg.exe", ["query", keyPath, "/v", name], { encoding: "buffer" });
+    for (const encoding of ["utf16le", "utf8"]) {
+      const text = buf.toString(encoding).replace(/\u0000/g, "");
+      const match = text.match(/REG_SZ\s+(.+?)(?:\r?\n|$)/);
+      if (match && match[1].includes("powershell.exe")) return match[1].trim();
+    }
+  } catch {
+    // Key or value absent.
+  }
+  return null;
+}
+
+// Guard rails against the mock install rewriting the user's real login entry: the
+// throwaway redirect must be airtight, otherwise every test run quietly changes
+// what starts at login. Snapshot before and assert identical after.
+function assertRealLoginUntouched(t, installDir) {
+  if (isWindows) {
+    const realKey = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+    const before = readWinRunValue(realKey, "ModelDock");
+    t.after(() => {
+      const after = readWinRunValue(realKey, "ModelDock");
+      assert.equal(after, before, "the real login Run key must not change during a mock install");
+    });
+    return;
+  }
+  const realPlist = path.join(os.homedir(), "Library", "LaunchAgents", "com.modeldock.gateway.plist");
+  const before = existsSync(realPlist);
+  t.after(() => {
+    assert.equal(existsSync(realPlist), before, "the real LaunchAgents plist must not change during a mock install");
+  });
+}
+
+// Login-autostart sandbox shared by every mock install: a throwaway registry key
+// on Windows, a throwaway plist dir plus a fake launchctl on POSIX.
+function installAutostartEnv(installDir) {
+  if (isWindows) {
+    return {
+      MODELDOCK_AUTOSTART_KEY: `HKCU\\Software\\ModelDockTests\\${randomUUID()}`,
+      MODELDOCK_AUTOSTART_NAME: "ModelDock",
+    };
+  }
+  writeFakeLaunchctl(path.join(installDir, "fakebin"), path.join(installDir, "launchctl.log"));
+  return {
+    MODELDOCK_AUTOSTART_PLIST_DIR: path.join(installDir, "LaunchAgents"),
+    MODELDOCK_FAKE_LAUNCHCTL_LOG: path.join(installDir, "launchctl.log"),
+    PATH: `${path.join(installDir, "fakebin")}${path.delimiter}${process.env.PATH}`,
+  };
 }
 
 // The installer starts the gateway in the background (a hidden node process). Track
@@ -209,14 +498,14 @@ function buildTar(entries) {
   return Buffer.concat(blocks);
 }
 
-test("mock install: download -> install -> run", async (t) => {
+test("mock install lifecycle: first start, second start routes, login relaunch", async (t) => {
   const bundle = path.join(repoRoot, "dist", "modeldock.mjs");
   const bridge = path.join(repoRoot, "dist", "mcp-standalone.mjs");
   assert.ok(existsSync(bundle), "dist/modeldock.mjs must be built before this test");
   assert.ok(existsSync(bridge), "dist/mcp-standalone.mjs must be built before this test");
 
-  // 1. Local HTTP server pretending to be a GitHub Release asset endpoint. It serves
-  //    the real built bundle so the download path is exercised end to end.
+  // 1. Local HTTP server pretending to be a GitHub Release asset endpoint, plus a
+  //    fake OpenCode upstream that proves routing relays end to end.
   const asset = readFileSync(bundle);
   const bridgeAsset = readFileSync(bridge);
   const assetServer = createServer((req, res) => {
@@ -240,6 +529,8 @@ test("mock install: download -> install -> run", async (t) => {
   const assetPort = await listen(assetServer);
   t.after(() => assetServer.close());
   const releaseUrl = `http://127.0.0.1:${assetPort}/modeldock.mjs`;
+  const fakeUpstream = await startFakeUpstream("modeldock-relay-ok");
+  t.after(() => fakeUpstream.close());
 
   // 2. Temp install dir (never touches the real ~/.modeldock) + a free app port.
   const installDir = mkdtempSync(path.join(os.tmpdir(), "modeldock-mock-install-"));
@@ -258,6 +549,15 @@ test("mock install: download -> install -> run", async (t) => {
   // hook running. Sweep the real home path too: if the redirect ever regresses,
   // this test cleans up after itself instead of leaking a file per run.
   t.after(() => rmSync(ownerFilePath(appPort, os.homedir()), { force: true }));
+  // Login autostart is redirected to a throwaway registry key (Windows) or plist
+  // dir (POSIX), so the install never touches the real login entry.
+  const winRunKey = `HKCU\\Software\\ModelDockTests\\install-${randomUUID()}`;
+  if (isWindows) t.after(() => deleteWinRegistryKey(winRunKey));
+  assertRealLoginUntouched(t, installDir);
+  const fakeBinDir = path.join(installDir, "fakebin");
+  const launchctlLog = path.join(installDir, "launchctl.log");
+  writeFakeLaunchctl(fakeBinDir, launchctlLog);
+  const memoryDir = path.join(installDir, ".modeldock", "memory");
 
   // 3. Run the real installer with every default redirected through env vars.
   const installer = path.join(repoRoot, "scripts", installerScript);
@@ -273,6 +573,19 @@ test("mock install: download -> install -> run", async (t) => {
     // removes it too - the promise above ("never touches the real ~/.modeldock")
     // was untrue while the owner file resolved against the home directory.
     MODELDOCK_STATE_DIR: path.join(installDir, ".modeldock"),
+    ...(isWindows
+      ? { MODELDOCK_AUTOSTART_KEY: winRunKey, MODELDOCK_AUTOSTART_NAME: "ModelDock" }
+      : { MODELDOCK_AUTOSTART_PLIST_DIR: path.join(installDir, "LaunchAgents") }),
+    // A valid token + local upstream make /healthz return 200 and let the routing
+    // leg relay a real request; memory is enabled so the MCP tool surface includes
+    // recall_memory / store_memory.
+    OPENCODE_GO_TOKEN: "test-token",
+    MODELDOCK_UPSTREAM_BASE_URL: fakeUpstream.url,
+    MODELDOCK_MEMORY: "1",
+    MODELDOCK_MEMORY_DIR: memoryDir,
+    // POSIX install.sh shells out to launchctl only on macOS; a fake one keeps
+    // every runner deterministic and never registers anything with the host.
+    ...(isWindows ? {} : { PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH}`, MODELDOCK_FAKE_LAUNCHCTL_LOG: launchctlLog }),
   };
   const child = runInstaller(installer, env);
   let out = "";
@@ -297,17 +610,10 @@ test("mock install: download -> install -> run", async (t) => {
 
   // 5. The installer already started the gateway in the background on $port. Hit
   //    /healthz + dashboard + api/status to prove the installed bundle runs.
-  let healthz;
-  for (let i = 0; i < 40 && !healthz; i++) {
-    try {
-      healthz = await fetchText(`http://127.0.0.1:${appPort}/healthz`);
-    } catch {
-      await new Promise((r) => setTimeout(r, 250));
-    }
-  }
+  const healthz = await waitForHealth(appPort);
   // The launcher runs node in the background, so a startup crash only shows up in the
   // log it writes; surface it here or the failure is just "did not come up".
-  if (!healthz) {
+  if (!healthz.up) {
     // Windows writes stdout and stderr separately (Start-Process cannot send both to
     // one file); POSIX appends both to modeldock.log.
     const logs = ["modeldock.log", "modeldock.err.log"]
@@ -318,8 +624,9 @@ test("mock install: download -> install -> run", async (t) => {
       .join("\n");
     assert.fail(`gateway should come up after install\n--- installer stdout ---\n${out}\n--- installer stderr ---\n${err}\n${logs}`);
   }
-  // /healthz answers 503 until a token is configured - that still proves it runs.
-  assert.ok([200, 503].includes(healthz.status), `unexpected /healthz status ${healthz.status}`);
+  assert.equal(healthz.status, 200, "with a token configured the gateway should report healthy");
+
+  const installedCatalog = path.join(installDir, ".modeldock", "codex-model-catalog.json");
 
   const dashboard = await fetchText(`http://127.0.0.1:${appPort}/`);
   assert.equal(dashboard.status, 200, "dashboard should be served");
@@ -330,6 +637,25 @@ test("mock install: download -> install -> run", async (t) => {
   const payload = JSON.parse(status.text);
   assert.ok(payload.config?.bind, "api/status should expose config.bind");
   assert.ok("autostart" in payload, "api/status should expose autostart");
+  // Windows and macOS default autostart ON from the installer; Linux has no login
+  // integration and must report unsupported instead of pretending.
+  if (isWindows || process.platform === "darwin") {
+    assert.equal(payload.autostart?.enabled, true, "first install should leave autostart enabled");
+  } else {
+    assert.equal(payload.autostart?.supported, false, "Linux should report autostart unsupported");
+  }
+  if (isWindows) {
+    assertWinRunEntryPointsAt(winRunKey, "ModelDock", installDir);
+    assert.ok(existsSync(path.join(installDir, ".modeldock", "autostart-initialized")), "installer should record the autostart decision");
+  }
+
+  // 5b. The surfaces a real session depends on must be live after install: the
+  //     MCP tool list (HTTP /mcp + the stdio bridge Codex spawns), and the catalog
+  //     declarations the LLM reads for its tool surface.
+  await assertGatewayMcpTools(appPort);
+  await assertBridgeTools(path.join(installDir, "dist", "mcp-standalone.mjs"), `http://127.0.0.1:${appPort}`, memoryDir);
+  assertCatalogTools(installedCatalog);
+  await assertRoutingWorks(appPort, "modeldock-relay-ok");
 
   // 6. The gateway is up, so it has written its owner record. Assert it landed in
   //    the throwaway root and not in the user's home: this test is stopped with a
@@ -346,7 +672,6 @@ test("mock install: download -> install -> run", async (t) => {
   // real ~/.modeldock would leave the user's catalog pointing at a deleted temp
   // dir. Assert the catalog stayed inside the throwaway root and references the
   // install's own restart script.
-  const installedCatalog = path.join(installDir, ".modeldock", "codex-model-catalog.json");
   assert.ok(existsSync(installedCatalog), "catalog should follow MODELDOCK_STATE_DIR");
   const installedCatalogPayload = JSON.parse(readFileSync(installedCatalog, "utf8"));
   // The baked restart path is compared through realpath: Windows may render the
@@ -366,9 +691,62 @@ test("mock install: download -> install -> run", async (t) => {
   // but the mkdtemp install dir's own name is stable, so compare basenames.
   assert.equal(path.basename(bakedRoot), path.basename(installDir), "restart path should point inside the install root");
 
-  // 7. Stop the background gateway so cleanup can remove the temp install dir.
+  // 7. Second start: stop the install-time gateway and bring it up again through
+  //    the installed launcher (what restart.ps1 / the updater do). Routing and the
+  //    MCP surface must still work after the bounce.
   killByPort(appPort);
   assert.ok(await waitForPortFree(appPort), "background gateway should stop");
+  const second = isWindows
+    ? spawn("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", launcher], { env, stdio: ["ignore", "pipe", "pipe"] })
+    : spawn("/bin/sh", [launcher], { env, stdio: ["ignore", "pipe", "pipe"] });
+  let secondOut = "";
+  let secondErr = "";
+  second.stdout.on("data", (d) => (secondOut += d));
+  second.stderr.on("data", (d) => (secondErr += d));
+  await once(second, "exit");
+  const secondHealth = await waitForHealth(appPort);
+  assert.ok(secondHealth.up, `gateway should come up on second start\n${secondOut}\n${secondErr}`);
+  assert.equal(secondHealth.status, 200);
+  await assertRoutingWorks(appPort, "modeldock-relay-ok");
+  await assertGatewayMcpTools(appPort);
+  assertCatalogTools(installedCatalog);
+
+  // 8. Login relaunch: start through the exact entry the OS uses at login. Windows
+  //    runs the Run key command; macOS launchd runs /bin/sh <launcher> from the
+  //    plist; Linux has no login entry, so this is the manual launcher (already
+  //    proven) and the supported=false state above is the contract.
+  killByPort(appPort);
+  assert.ok(await waitForPortFree(appPort), "gateway should stop before the login relaunch");
+  let relaunch;
+  if (isWindows) {
+    const runCommand = `powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "${launcher}"`;
+    // WScript.Shell.Run uses the same ShellExecute command-line parsing Explorer
+    // applies to the Run key at login, so the exact stored command is exercised.
+    const shell = `(New-Object -ComObject WScript.Shell).Run('${runCommand}', 0)`;
+    relaunch = spawn("powershell", ["-NoProfile", "-Command", shell], { env, stdio: ["ignore", "pipe", "pipe"] });
+  } else if (process.platform === "darwin") {
+    const plist = path.join(installDir, "LaunchAgents", "com.modeldock.gateway.plist");
+    const plistText = readFileSync(plist, "utf8");
+    assert.match(plistText, /RunAtLoad/, "plist should load at login");
+    assert.ok(plistText.includes(launcher), "plist should launch the installed start-hidden.sh");
+    relaunch = spawn("/bin/sh", [launcher], { env, stdio: ["ignore", "pipe", "pipe"] });
+  } else {
+    relaunch = spawn("/bin/sh", [launcher], { env, stdio: ["ignore", "pipe", "pipe"] });
+  }
+  let relaunchOut = "";
+  let relaunchErr = "";
+  relaunch.stdout.on("data", (d) => (relaunchOut += d));
+  relaunch.stderr.on("data", (d) => (relaunchErr += d));
+  await once(relaunch, "exit");
+  const relaunchHealth = await waitForHealth(appPort);
+  assert.ok(relaunchHealth.up, `gateway should come up through the login entry\n${relaunchOut}\n${relaunchErr}`);
+  assert.equal(relaunchHealth.status, 200);
+  await assertRoutingWorks(appPort, "modeldock-relay-ok");
+  await assertGatewayMcpTools(appPort);
+
+  // 9. Stop the final gateway so cleanup can remove the temp install dir.
+  killByPort(appPort);
+  assert.ok(await waitForPortFree(appPort), "final gateway should stop");
 });
 
 test("mock install: auto-download a bundled Node 22 LTS when none is suitable", async (t) => {
@@ -445,6 +823,8 @@ test("mock install: auto-download a bundled Node 22 LTS when none is suitable", 
   await new Promise((resolve) => probe.close(resolve));
   t.after(() => killByPort(appPort));
   t.after(() => rmSync(installDir, { recursive: true, force: true }));
+  const autostartEnv = installAutostartEnv(installDir);
+  if (isWindows) t.after(() => deleteWinRegistryKey(autostartEnv.MODELDOCK_AUTOSTART_KEY));
 
   const env = {
     ...process.env,
@@ -460,6 +840,7 @@ test("mock install: auto-download a bundled Node 22 LTS when none is suitable", 
     MODELDOCK_PORT: String(appPort),
     MODELDOCK_SKIP_OPEN: "1",
     MODELDOCK_STATE_DIR: path.join(installDir, ".modeldock"),
+    ...autostartEnv,
   };
   const child = runInstaller(path.join(repoRoot, "scripts", installerScript), env);
   let out = "";
@@ -566,6 +947,8 @@ test("mock install: rejects a Node download whose SHA256 does not match", async 
   await new Promise((resolve) => probe.close(resolve));
   t.after(() => killByPort(appPort));
   t.after(() => rmSync(installDir, { recursive: true, force: true }));
+  const autostartEnv = installAutostartEnv(installDir);
+  if (isWindows) t.after(() => deleteWinRegistryKey(autostartEnv.MODELDOCK_AUTOSTART_KEY));
 
   const env = {
     ...process.env,
@@ -577,6 +960,7 @@ test("mock install: rejects a Node download whose SHA256 does not match", async 
     MODELDOCK_PORT: String(appPort),
     MODELDOCK_SKIP_OPEN: "1",
     MODELDOCK_STATE_DIR: path.join(installDir, ".modeldock"),
+    ...autostartEnv,
   };
   const child = runInstaller(path.join(repoRoot, "scripts", installerScript), env);
   let out = "";

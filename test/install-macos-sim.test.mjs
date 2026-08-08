@@ -1,0 +1,174 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { readFileSync, existsSync, mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { createServer } from "node:http";
+import { spawn, execFileSync } from "node:child_process";
+
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const isWindows = process.platform === "win32";
+
+function listen(server) {
+  return new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => resolve(server.address().port));
+  });
+}
+
+function wslAvailable() {
+  try {
+    const out = execFileSync("wsl", ["-l", "-q"], { encoding: "utf8", timeout: 15_000 });
+    return out.replace(/\u0000/g, "").trim().length > 0;
+  } catch {
+    return false;
+  }
+}
+
+// wsl.exe mangles backslashes when forwarding arguments, so convert the well-known
+// C:\... temp layout to /mnt/c/... directly instead of shelling out to wslpath.
+function toWslPath(winPath) {
+  const drive = winPath[0].toLowerCase();
+  return `/mnt/${drive}/${winPath.slice(3).replace(/\\/g, "/")}`;
+}
+
+// The macOS branch of install.sh only runs when `uname -s` says Darwin and it
+// shells out to launchctl. A fake PATH of uname/launchctl/node lets any POSIX
+// host (WSL included) exercise that exact branch deterministically: the plist is
+// written to a throwaway dir, launchctl calls are recorded, and the fake node
+// makes the launcher exit instantly so no real gateway starts in the sandbox.
+function writeFakeMacTools(binDir) {
+  mkdirSync(binDir, { recursive: true });
+  writeFileSync(
+    path.join(binDir, "uname"),
+    "#!/bin/sh\ncase \"$1\" in -m) echo arm64 ;; *) echo Darwin ;; esac\n",
+    { mode: 0o755 },
+  );
+  writeFileSync(
+    path.join(binDir, "launchctl"),
+    "#!/bin/sh\necho \"$*\" >> \"$MODELDOCK_FAKE_LAUNCHCTL_LOG\"\nexit 0\n",
+    { mode: 0o755 },
+  );
+  writeFileSync(path.join(binDir, "node"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+}
+
+// Env shared by the install.sh sandbox. `fakeBin` must already exist and be
+// executable on the POSIX side before install.sh runs.
+function sandboxEnv({ root, fakeBin, launchctlLog, releaseUrl, bridgeUrl, port }) {
+  return {
+    MODELDOCK_ROOT: root,
+    MODELDOCK_STATE_DIR: `${root}/.modeldock`,
+    MODELDOCK_AUTOSTART_PLIST_DIR: `${root}/LaunchAgents`,
+    MODELDOCK_RELEASE_URL: releaseUrl,
+    MODELDOCK_BRIDGE_URL: bridgeUrl,
+    MODELDOCK_SKIP_OPEN: "1",
+    MODELDOCK_PORT: String(port),
+    MODELDOCK_NODE_PATH: `${fakeBin}/node`,
+    MODELDOCK_FAKE_LAUNCHCTL_LOG: launchctlLog,
+    PATH: `${fakeBin}:/usr/bin:/bin`,
+  };
+}
+
+test("install.sh macOS branch: plist, launchctl, marker (WSL or direct)", async (t) => {
+  if (isWindows && !wslAvailable()) {
+    t.skip("WSL is required on Windows to model macOS install behavior");
+    return;
+  }
+
+  const bundle = readFileSync(path.join(repoRoot, "dist", "modeldock.mjs"));
+  const bridge = readFileSync(path.join(repoRoot, "dist", "mcp-standalone.mjs"));
+  const assetServer = createServer((req, res) => {
+    const asset = req.url === "/modeldock.mjs" ? bundle : req.url === "/mcp-standalone.mjs" ? bridge : null;
+    if (!asset) {
+      res.writeHead(404);
+      res.end("not found");
+      return;
+    }
+    res.writeHead(200, { "content-type": "application/octet-stream", "content-length": asset.length });
+    res.end(asset);
+  });
+  const assetPort = await listen(assetServer);
+  t.after(() => assetServer.close());
+
+  const installDir = mkdtempSync(path.join(os.tmpdir(), "modeldock-macos-sim-"));
+  t.after(() => rmSync(installDir, { recursive: true, force: true }));
+  const fakeBin = path.join(installDir, "fakebin");
+  writeFakeMacTools(fakeBin);
+  const launchctlLog = path.join(installDir, "launchctl.log");
+  const installer = path.join(repoRoot, "scripts", "install.sh");
+  const releaseUrl = `http://127.0.0.1:${assetPort}/modeldock.mjs`;
+  const bridgeUrl = `http://127.0.0.1:${assetPort}/mcp-standalone.mjs`;
+  const probe = createServer();
+  const appPort = await listen(probe);
+  await new Promise((resolve) => probe.close(resolve));
+
+  let exitCode;
+  let out = "";
+  let err = "";
+  if (isWindows) {
+    // Drive install.sh from inside WSL: the sandbox dir is on the Windows side,
+    // and the fake node/uname/launchctl shims live there too. The runner script
+    // fixes POSIX permissions (NTFS cannot store +x) then runs the real installer.
+    const wslRoot = toWslPath(installDir);
+    const wslFakeBin = toWslPath(fakeBin);
+    const wslLaunchctlLog = toWslPath(launchctlLog);
+    const wslInstaller = toWslPath(installer);
+    const runner = path.join(installDir, "run-macos-sim.sh");
+    const env = sandboxEnv({
+      root: wslRoot,
+      fakeBin: wslFakeBin,
+      launchctlLog: wslLaunchctlLog,
+      releaseUrl,
+      bridgeUrl,
+      port: appPort,
+    });
+    const lines = [
+      "#!/bin/sh",
+      "set -eu",
+      `chmod +x '${wslFakeBin}/uname' '${wslFakeBin}/launchctl' '${wslFakeBin}/node'`,
+      ...Object.entries(env).map(([key, value]) => `export ${key}='${value}'`),
+      `exec sh '${wslInstaller}'`,
+    ];
+    writeFileSync(runner, `${lines.join("\n")}\n`, "utf8");
+    const child = spawn("wsl", ["bash", toWslPath(runner)], { stdio: ["ignore", "pipe", "pipe"] });
+    child.stdout.on("data", (d) => (out += d));
+    child.stderr.on("data", (d) => (err += d));
+    exitCode = await new Promise((resolve) => child.on("close", resolve));
+  } else {
+    const env = {
+      ...process.env,
+      ...sandboxEnv({ root: installDir, fakeBin, launchctlLog, releaseUrl, bridgeUrl, port: appPort }),
+    };
+    const child = spawn("sh", [installer], { env, stdio: ["ignore", "pipe", "pipe"] });
+    child.stdout.on("data", (d) => (out += d));
+    child.stderr.on("data", (d) => (err += d));
+    exitCode = await new Promise((resolve) => child.on("close", resolve));
+  }
+  assert.equal(exitCode, 0, `install.sh failed:\n${out}\n${err}`);
+  assert.match(out, /start at login enabled \(default\)/, `installer should report the default autostart\n${out}`);
+
+  const plist = path.join(installDir, "LaunchAgents", "com.modeldock.gateway.plist");
+  assert.ok(existsSync(plist), "plist should be written to the redirectable LaunchAgents dir");
+  const plistText = readFileSync(plist, "utf8");
+  assert.match(plistText, /<key>RunAtLoad<\/key><true\/>/, "plist should load at login");
+  assert.ok(plistText.includes("start-hidden.sh"), "plist should launch the installed launcher");
+  assert.ok(plistText.includes("<key>MODELDOCK_NODE_PATH</key>"), "plist should pin the node binary");
+  assert.match(plistText, /\/opt\/homebrew\/bin/, "plist should keep the launchd-safe PATH");
+
+  assert.ok(existsSync(launchctlLog), "launchctl log should be written");
+  const launchctlCalls = readFileSync(launchctlLog, "utf8");
+  assert.match(launchctlCalls, /load -w/, `launchctl should load the plist: ${launchctlCalls}`);
+  assert.ok(launchctlCalls.includes("com.modeldock.gateway.plist"), "launchctl should target our plist");
+
+  assert.ok(existsSync(path.join(installDir, ".modeldock", "autostart-initialized")), "installer should record the decision marker");
+  for (const file of [
+    path.join(installDir, "dist", "modeldock.mjs"),
+    path.join(installDir, "dist", "mcp-standalone.mjs"),
+    path.join(installDir, "scripts", "start-hidden.sh"),
+    path.join(installDir, "scripts", "restart.ps1"),
+    path.join(installDir, "scripts", "recover.sh"),
+  ]) {
+    assert.ok(existsSync(file), `${path.basename(file)} should be laid out by the installer`);
+  }
+});

@@ -128,6 +128,23 @@ test("mergeNativeCatalog publishes picker-visible native models grouped with the
   }
 });
 
+test("catalogFor with nativeMerge=false skips the native GPT merge for non-subscribers", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-native-nomerge-"));
+  const file = path.join(dir, "native-catalog.json");
+  writeFileSync(file, JSON.stringify({
+    captured_with: "0.1.0",
+    models: [{ slug: "gpt-5.6-luna", display_name: "GPT-5.6-Luna", visibility: "list", priority: 3 }],
+  }), "utf8");
+  try {
+    const catalog = catalogFor({ ...configStub(), nativeCatalogFile: file, nativeMerge: false });
+    const slugs = catalog.models.map((entry) => entry.slug);
+    assert.ok(slugs.includes("deepseek-v4-flash"), "curated Go models stay published");
+    assert.ok(!slugs.includes("gpt-5.6-luna"), "native GPT models are hidden without a subscription (nativeMerge=false)");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("catalogFor in trial mode publishes only the fixed free pair and never merges native", () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-native-trial-"));
   const file = path.join(dir, "native-catalog.json");

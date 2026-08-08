@@ -54,6 +54,12 @@ export function catalogFor(config) {
     const trialModels = models.filter((entry) => trialIds.has(bareModelId(entry.slug)));
     return { ...catalog, models: orderCatalogByProvider(trialModels) };
   }
+  // Wizard-managed opt-out: without a GPT subscription the native GPT models are
+  // "see it, can't use it" noise (every request 401s), so subscribers keep the
+  // merge and everyone else gets the curated catalog only.
+  if (config.nativeMerge === false) {
+    return { ...catalog, models: orderCatalogByProvider(models) };
+  }
   const merged = mergeNativeCatalog({ ...catalog, models }, config);
   return { ...merged, models: orderCatalogByProvider(merged.models) };
 }

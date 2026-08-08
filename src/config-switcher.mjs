@@ -247,8 +247,8 @@ export class CodexConfigSwitcher {
     try {
       return JSON.parse(await readFile(this.statePath, "utf8"));
     } catch (error) {
-      if (error.code === "ENOENT") return { enabled: false, restartRequired: false };
-      return { enabled: false, restartRequired: false, stateError: error.message };
+      if (error.code === "ENOENT") return { enabled: false, restartRequired: false, onboarded: false };
+      return { enabled: false, restartRequired: false, onboarded: false, stateError: error.message };
     }
   }
 
@@ -282,6 +282,8 @@ export class CodexConfigSwitcher {
       configPath: this.configPath,
       backupPath: state.backupPath || state.lastBackupPath || null,
       changedAt: state.changedAt || null,
+      onboarded: Boolean(state.onboarded),
+      onboardedAt: state.onboardedAt || null,
       targetModel: this.model,
       targetProvider: "openai",
       targetMode: "openai_base_url",
@@ -357,6 +359,8 @@ export class CodexConfigSwitcher {
         originalHash: sha256(original),
         managedHash: sha256(managed),
         changedAt: new Date().toISOString(),
+        onboarded: state.onboarded,
+        onboardedAt: state.onboardedAt,
       });
     } catch (error) {
       if (originalExisted) await writeFile(this.configPath, original, { encoding: "utf8", mode: 0o600 });
@@ -393,6 +397,8 @@ export class CodexConfigSwitcher {
         restartRequired: routeActive ? true : Boolean(state.restartRequired),
         lastBackupPath: state.backupPath,
         changedAt: new Date().toISOString(),
+        onboarded: state.onboarded,
+        onboardedAt: state.onboardedAt,
       });
     } catch (error) {
       await writeFile(this.configPath, current, { encoding: "utf8", mode: 0o600 });
@@ -405,6 +411,13 @@ export class CodexConfigSwitcher {
     const state = await this.#readState();
     if (state.stateError) throw new Error(`Cannot read switch state: ${state.stateError}`);
     await this.#writeState({ ...state, restartRequired: false });
+    return this.status();
+  }
+
+  async markOnboarded() {
+    const state = await this.#readState();
+    if (state.stateError) throw new Error(`Cannot read switch state: ${state.stateError}`);
+    await this.#writeState({ ...state, onboarded: true, onboardedAt: new Date().toISOString() });
     return this.status();
   }
 }

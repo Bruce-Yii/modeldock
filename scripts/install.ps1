@@ -366,7 +366,39 @@ try {
 } catch { Write-Error $_.Exception.Message; exit 1 }
 '@ | Out-File -FilePath $recover -Encoding ascii
 
-# 3. Start (unless already running) and open the dashboard. MODELDOCK_SKIP_START=1
+# 3. Enable login autostart on a first install. The gateway also has this
+#    safeguard, but doing it here makes the install result deterministic even
+#    when the first background start is delayed or fails. The marker preserves
+#    an explicit user choice across later reinstalls. Tests redirect the registry
+#    key and state dir through MODELDOCK_AUTOSTART_KEY / _NAME and
+#    MODELDOCK_STATE_DIR so mock installs never touch the real login entry.
+$autostartKeyName = if ($env:MODELDOCK_AUTOSTART_KEY) { $env:MODELDOCK_AUTOSTART_KEY } else { "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" }
+$autostartValueName = if ($env:MODELDOCK_AUTOSTART_NAME) { $env:MODELDOCK_AUTOSTART_NAME } else { "ModelDock" }
+$stateDir = if ($env:MODELDOCK_STATE_DIR) { $env:MODELDOCK_STATE_DIR } else { $root }
+$autostartMark = Join-Path $stateDir "autostart-initialized"
+if (-not $skipStart -and -not (Test-Path -LiteralPath $autostartMark)) {
+    try {
+        # .NET registry APIs take the subkey path below a base hive, not the
+        # "HKCU\"-prefixed form reg.exe accepts.
+        $subKey = $autostartKeyName
+        if ($subKey -like "HKEY_CURRENT_USER\*") { $subKey = $subKey.Substring("HKEY_CURRENT_USER\".Length) }
+        elseif ($subKey -like "HKCU\*") { $subKey = $subKey.Substring("HKCU\".Length) }
+        $runKey = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($subKey)
+        try {
+            $runCommand = "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$launcher`""
+            $runKey.SetValue($autostartValueName, $runCommand, [Microsoft.Win32.RegistryValueKind]::String)
+        } finally {
+            if ($runKey) { $runKey.Close() }
+        }
+        New-Item -ItemType Directory -Force $stateDir | Out-Null
+        [System.IO.File]::WriteAllText($autostartMark, "$([DateTime]::UtcNow.ToString('o'))`n", [System.Text.Encoding]::ASCII)
+        Write-Host "  start at login enabled (default)"
+    } catch {
+        Write-Warning ("Could not enable start at login during install: {0}" -f $_.Exception.Message)
+    }
+}
+
+# 4. Start (unless already running) and open the dashboard. MODELDOCK_SKIP_START=1
 #    skips the launch entirely (used by the install mock test, which feeds the
 #    installer a fake node.exe that Windows cannot execute).
 if ($skipStart) {
@@ -392,5 +424,5 @@ if ($skipStart) {
 Write-Host ""
 Write-Host "Done. Dashboard: http://127.0.0.1:$port" -ForegroundColor Green
 Write-Host "First run: paste your API token into the Settings dialog that opens automatically."
-Write-Host "Optional: flip the 'Start at login' toggle on the dashboard."
+Write-Host "Start at login is enabled by default; you can turn it off in Settings."
 if (-not $skipOpen) { Start-Process "http://127.0.0.1:$port/?settings=1" }

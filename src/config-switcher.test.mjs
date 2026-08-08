@@ -116,6 +116,27 @@ test("defaults off, backs up on enable, and restores exact config on disable", a
   assert.doesNotMatch(await readFile(configPath, "utf8"), /mcp_servers\.modeldock/, "restore removes the ModelDock MCP section");
 });
 
+test("markOnboarded persists and survives enable/disable round trips", async (t) => {
+  const { switcher } = await fixture(t);
+  const fresh = await switcher.status();
+  assert.equal(fresh.onboarded, false, "a brand-new switch state starts un-onboarded");
+  assert.equal(fresh.onboardedAt, null);
+
+  const marked = await switcher.markOnboarded();
+  assert.equal(marked.onboarded, true, "markOnboarded sets the flag");
+  assert.ok(marked.onboardedAt, "markOnboarded records a timestamp");
+
+  await switcher.enable();
+  const afterEnable = await switcher.status();
+  assert.equal(afterEnable.onboarded, true, "enable keeps the onboarding flag");
+  assert.equal(afterEnable.onboardedAt, marked.onboardedAt, "enable keeps the onboarding timestamp");
+
+  await switcher.disable();
+  const afterDisable = await switcher.status();
+  assert.equal(afterDisable.onboarded, true, "disable keeps the onboarding flag");
+  assert.equal(afterDisable.onboardedAt, marked.onboardedAt, "disable keeps the onboarding timestamp");
+});
+
 test("preserves unrelated edits made after enable while restoring managed fields", async (t) => {
   const { configPath, switcher } = await fixture(t);
   await switcher.enable();

@@ -43,6 +43,9 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: node --test test/install-mock.test.mjs
+      # The macOS install branch is modeled with fake uname/launchctl; Windows
+      # runners without WSL skip it automatically.
+      - run: node --test test/install-macos-sim.test.mjs
 
   # install.sh on a real macOS runner. macos-latest is an Apple Silicon (arm64)
   # hosted image, so this leg exercises the launchd paths, the /opt/homebrew node
@@ -57,6 +60,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
+      # Lifecycle test (native macOS install.sh + fake launchctl sandbox).
       # tee the test output and surface the tail in the run summary on failure:
       # summaries are readable without signing in, job logs are not, and this
       # job has never been green - the summary is the only anonymous diagnostic.
@@ -65,6 +69,9 @@ jobs:
         run: |
           set -o pipefail
           node --test test/install-mock.test.mjs 2>&1 | tee mock-install.log
+      - name: macOS branch simulation
+        shell: bash
+        run: node --test test/install-macos-sim.test.mjs
       - name: Surface failure output in the run summary
         if: failure()
         shell: bash

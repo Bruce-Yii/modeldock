@@ -157,7 +157,7 @@
       <div class="settings-card">
         <div class="settings-head">
           <div><p class="eyebrow" data-i18n="settings.eyebrow">SETTINGS</p><h2 data-i18n="settings.title">Connection</h2></div>
-          <button id="settings-close" type="button" class="settings-close" aria-label="Close settings" data-i18n="settings.close">Close</button>
+          <button id="settings-close" type="button" class="settings-close" aria-label="Close settings" title="Close settings">&times;</button>
         </div>
         <p class="settings-path"><span data-i18n="settings.path">Config file:</span> <code id="settings-envfile"></code></p>
         <label class="field">
@@ -201,8 +201,10 @@
           <button id="settings-save" type="button" data-i18n="settings.save">Save</button>
           <span id="settings-status" aria-live="polite"></span>
         </div>
+        <button id="settings-wizard" type="button" class="settings-wizard-link"></button>
       </div>
     </dialog>
     <script src="/app.js" type="module"></script>
+    <script src="/wizard.js" defer></script>
   </body>
 </html>

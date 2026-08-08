@@ -23,6 +23,13 @@ const RUN_VALUE = "ModelDock";
 const PLIST_LABEL = "com.modeldock.gateway";
 const PLIST_NAME = `${PLIST_LABEL}.plist`;
 
+// Test-only redirects so mock installs never touch the real login registry key or
+// the real LaunchAgents directory. Env is read at createAutostart() time so the
+// gateway (which constructs autostart once at startup) honours the same sandbox
+// as the installer that launched it.
+const runKey = () => process.env.MODELDOCK_AUTOSTART_KEY || RUN_KEY;
+const runValue = () => process.env.MODELDOCK_AUTOSTART_NAME || RUN_VALUE;
+
 function runFile(platform) {
   return platform === "win32"
     ? path.join(dirname, "..", "scripts", "start-hidden.ps1")
@@ -90,12 +97,13 @@ export function createAutostart({
   home = os.homedir(),
 } = {}) {
   const supported = platform === "win32" || platform === "darwin";
+  const macPlistDir = () => process.env.MODELDOCK_AUTOSTART_PLIST_DIR || path.join(home, "Library", "LaunchAgents");
   let cachedEnabled = null;
 
   async function winGetEnabled() {
     try {
-      const out = await exec("reg.exe", ["query", RUN_KEY, "/v", RUN_VALUE]);
-      return out.includes(RUN_VALUE);
+      const out = await exec("reg.exe", ["query", runKey(), "/v", runValue()]);
+      return out.includes(runValue());
     } catch {
       return false;
     }
@@ -104,12 +112,12 @@ export function createAutostart({
   async function winSetEnabled(enabled) {
     if (enabled) {
       await exec("reg.exe", [
-        "add", RUN_KEY, "/v", RUN_VALUE, "/t", "REG_SZ",
+        "add", runKey(), "/v", runValue(), "/t", "REG_SZ",
         "/d", `powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "${launcherPath}"`,
         "/f",
       ]);
     } else {
-      await exec("reg.exe", ["delete", RUN_KEY, "/v", RUN_VALUE, "/f"]);
+      await exec("reg.exe", ["delete", runKey(), "/v", runValue(), "/f"]);
     }
   }
 
@@ -123,7 +131,7 @@ export function createAutostart({
   }
 
   async function macSetEnabled(enabled) {
-    const plistPath = path.join(home, "Library", "LaunchAgents", PLIST_NAME);
+    const plistPath = path.join(macPlistDir(), PLIST_NAME);
     if (enabled) {
       const rootDir = path.resolve(dirname, "..");
       await mkdir(path.dirname(plistPath), { recursive: true });

@@ -27,3 +27,7 @@ dist/
 # Internal docs: kept locally, not published
 AGENTS.md
 architecture.md
+
+
+# Local scratch: sandbox scripts, icon drafts, ad-hoc probes
+tmp/
