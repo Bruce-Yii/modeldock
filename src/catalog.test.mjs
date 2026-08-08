@@ -68,6 +68,18 @@ test("baseInstructionsFor includes the memory lookup guidance", () => {
   assert.match(instructions, /applies_to matches the current working directory/);
 });
 
+test("baseInstructionsFor pushes memory use when the vault is enabled", () => {
+  const instructions = baseInstructionsFor({ ...configStub(), memoryEnabled: true });
+  assert.match(instructions, /Memory \(MANDATORY\)/);
+  assert.match(instructions, /call recall_memory once/);
+  assert.match(instructions, /Call store_memory as soon as/);
+});
+
+test("baseInstructionsFor omits the memory push when the vault is disabled", () => {
+  const instructions = baseInstructionsFor(configStub());
+  assert.doesNotMatch(instructions, /Memory \(MANDATORY\)/);
+});
+
 test("enabledProvidersFor includes the active profile and any provider with a token", () => {
   const ids = enabledProvidersFor(configStub());
   assert.deepEqual([...ids].sort(), ["opencode-go"]);
