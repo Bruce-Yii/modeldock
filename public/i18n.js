@@ -667,6 +667,9 @@ function setLang(lang) {
   currentLang = SUPPORTED.includes(lang) ? lang : "en";
   document.documentElement.lang = HTML_LANG[currentLang];
   try { localStorage.setItem("modeldock-lang", currentLang); } catch {}
+  // The setup wizard (wizard.js) listens for this to re-render in the new
+  // language; the dashboard re-applies static text via applyStaticI18n.
+  try { window.dispatchEvent(new CustomEvent("modeldock:langchange")); } catch {}
 }
 
 function getLang() {

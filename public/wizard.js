@@ -165,10 +165,245 @@
       "done.noChangeBody": "Codex 保持当前配置不变。",
       "done.guideBody": "注册 OpenCode Go 解锁免费档后，从设置中重新运行本引导。",
     },
+    ja: {
+      "wizard.eyebrow": "初回セットアップ",
+      "wizard.title": "Model Dock へようこそ",
+      "wizard.body": "簡単な質問に答えると、ModelDock があなたのアカウントに合ったモードを設定します。",
+      "wizard.detected": "検出済み",
+      "wizard.currentMode": "現在のモード",
+      "wizard.factGo": "OpenCode Go",
+      "wizard.factDs": "DeepSeek キー",
+      "wizard.factAutostart": "ログイン時に起動",
+      "wizard.configured": "設定済み",
+      "wizard.missing": "未設定",
+      "wizard.autostartOn": "オン",
+      "wizard.autostartOff": "オフ",
+      "wizard.autostartUnsupported": "非対応",
+      "wizard.modeOff": "オフ",
+      "wizard.modeTrial": "トライアル",
+      "wizard.modeOn": "オン",
+      "wizard.start": "はじめる",
+      "wizard.skip": "あとで",
+      "wizard.step1": "ステップ 1/3",
+      "wizard.q1": "ChatGPT（Codex）のサブスクリプションをお持ちですか？",
+      "wizard.q1Yes": "はい",
+      "wizard.q1YesSub": "ネイティブ GPT モデルを選択肢に残します。",
+      "wizard.q1No": "いいえ",
+      "wizard.q1NoSub": "使えない有料 GPT モデルを非表示にします。",
+      "wizard.step2": "ステップ 2/3",
+      "wizard.q2": "OpenCode、DeepSeek、その他のサードパーティ API はどうしますか？",
+      "wizard.q2None": "アカウントなし",
+      "wizard.q2NoneSub": "既存のアカウントのみ使用します。無料オプションをご案内します。",
+      "wizard.q2Free": "無料アカウント",
+      "wizard.q2FreeSub": "OpenCode 無料枠：DeepSeek V4 Flash Free + MiMo V2.5 Free、カード不要。",
+      "wizard.q2Paid": "有料プラン",
+      "wizard.q2PaidSub": "OpenCode Go や他の有料サードパーティキーで全カタログが使えます。",
+      "wizard.step3": "ステップ 3/3",
+      "wizard.back": "戻る",
+      "wizard.apply": "適用して Codex を再起動",
+      "wizard.applyBusy": "適用中...",
+      "wizard.done": "完了",
+      "wizard.reRun": "このガイドを再実行",
+      "wizard.closeAria": "セットアップガイドを閉じる",
+      "wizard.settingsEntry": "セットアップガイドを再実行",
+      "wizard.errorTitle": "問題が発生しました",
+      "wizard.skipTitle": "セットアップをスキップ",
+      "wizard.skipBody": "Codex の設定はそのままです。このガイドはいつでも設定から再実行できます。",
+      "reco.onMode": "モード：オン",
+      "reco.trialMode": "モード：トライアル（無料）",
+      "reco.offMode": "モード：オフ（変更なし）",
+      "reco.catalogFull": "OpenCode Go 全カタログ",
+      "reco.catalogTrial": "無料の zen モデル2つのみ",
+      "reco.nativeOn": "ネイティブ GPT モデルを選択肢に保持",
+      "reco.nativeOff": "ネイティブ GPT モデルを非表示（サブスクなし）",
+      "reco.nativeKeep": "Codex は ChatGPT の設定を引き続き使用",
+      "reco.dsAlt": "ヒント：後で設定で DeepSeek キーを追加すると DeepSeek モデルを使えます",
+      "reco.register": "OpenCode Go に登録して無料枠を解放",
+      "reco.rerun": "その後、設定からこのガイドを再実行",
+      "reco.paidGpt": "OpenCode Go + ネイティブ GPT モデル",
+      "reco.paidNoGpt": "OpenCode Go のみ（GPT モデル非表示）",
+      "reco.trial": "無料の zen モデル2つのトライアル",
+      "reco.offGpt": "ChatGPT の設定を維持（オフ）",
+      "reco.guide": "サードパーティのアカウントがまだない",
+      "warn.noToken": "OpenCode Go トークンが検出されませんでした。",
+      "warn.noTokenHint": "設定で追加するか、先に登録してから適用してください。",
+      "warn.register": "OpenCode Go に登録",
+      "warn.openSettings": "設定を開く",
+      "warn.applyDisabled": "トークンを設定すると適用できるようになります。",
+      "done.applied": "セットアップを適用しました",
+      "done.appliedBody": "ModelDock が Codex 設定を書き換えました。新しいタスクを始める前に、Codex を完全に再起動してください（完全に終了してから開き直す）。",
+      "done.appliedNoRestart": "セットアップを適用しました",
+      "done.appliedNoRestartBody": "Codex はすでに推奨設定です。再起動は不要です。",
+      "done.noChange": "変更は不要でした",
+      "done.noChangeBody": "Codex は現在の設定のままです。",
+      "done.guideBody": "OpenCode Go に登録して無料枠を解放し、設定からこのガイドを再実行してください。",
+    },
+    fr: {
+      "wizard.eyebrow": "PREMIÈRE CONFIGURATION",
+      "wizard.title": "Bienvenue dans Model Dock",
+      "wizard.body": "Répondez à deux courtes questions et ModelDock configurera le mode adapté à vos comptes.",
+      "wizard.detected": "DÉTECTÉ",
+      "wizard.currentMode": "Mode actuel",
+      "wizard.factGo": "OpenCode Go",
+      "wizard.factDs": "Clé DeepSeek",
+      "wizard.factAutostart": "Démarrage à la connexion",
+      "wizard.configured": "Configuré",
+      "wizard.missing": "Manquant",
+      "wizard.autostartOn": "Activé",
+      "wizard.autostartOff": "Désactivé",
+      "wizard.autostartUnsupported": "Non pris en charge",
+      "wizard.modeOff": "Désactivé",
+      "wizard.modeTrial": "Essai",
+      "wizard.modeOn": "Activé",
+      "wizard.start": "Commencer",
+      "wizard.skip": "Plus tard",
+      "wizard.step1": "ÉTAPE 1 SUR 3",
+      "wizard.q1": "Avez-vous un abonnement ChatGPT (Codex) ?",
+      "wizard.q1Yes": "Oui",
+      "wizard.q1YesSub": "Conserver les modèles GPT natifs dans le sélecteur.",
+      "wizard.q1No": "Non",
+      "wizard.q1NoSub": "Masquer les modèles GPT payants que vous ne pouvez pas utiliser.",
+      "wizard.step2": "ÉTAPE 2 SUR 3",
+      "wizard.q2": "Et OpenCode, DeepSeek ou une autre API tierce ?",
+      "wizard.q2None": "Aucun compte",
+      "wizard.q2NoneSub": "Utiliser uniquement ce que vous avez déjà - nous vous orienterons vers des options gratuites.",
+      "wizard.q2Free": "Compte gratuit",
+      "wizard.q2FreeSub": "Niveau gratuit OpenCode : DeepSeek V4 Flash Free + MiMo V2.5 Free, sans carte requise.",
+      "wizard.q2Paid": "Forfait payant",
+      "wizard.q2PaidSub": "OpenCode Go ou une autre clé tierce payante débloque le catalogue complet.",
+      "wizard.step3": "ÉTAPE 3 SUR 3",
+      "wizard.back": "Retour",
+      "wizard.apply": "Appliquer et redémarrer Codex",
+      "wizard.applyBusy": "Application...",
+      "wizard.done": "Terminé",
+      "wizard.reRun": "Relancer ce guide",
+      "wizard.closeAria": "Fermer le guide de configuration",
+      "wizard.settingsEntry": "Relancer le guide de configuration",
+      "wizard.errorTitle": "Une erreur est survenue",
+      "wizard.skipTitle": "Ignorer la configuration",
+      "wizard.skipBody": "Votre Codex reste tel quel. Vous pouvez relancer ce guide à tout moment depuis les Paramètres.",
+      "reco.onMode": "Mode : ACTIVÉ",
+      "reco.trialMode": "Mode : ESSAI (gratuit)",
+      "reco.offMode": "Mode : DÉSACTIVÉ (inchangé)",
+      "reco.catalogFull": "Catalogue complet OpenCode Go",
+      "reco.catalogTrial": "Seulement les deux modèles zen gratuits",
+      "reco.nativeOn": "Les modèles GPT natifs restent dans le sélecteur",
+      "reco.nativeOff": "Modèles GPT natifs masqués (sans abonnement)",
+      "reco.nativeKeep": "Codex continue d'utiliser votre configuration ChatGPT",
+      "reco.dsAlt": "Astuce : ajoutez plus tard une clé DeepSeek dans les Paramètres pour utiliser les modèles DeepSeek",
+      "reco.register": "Inscrivez-vous à OpenCode Go pour débloquer le niveau gratuit",
+      "reco.rerun": "Relancez ensuite ce guide depuis les Paramètres",
+      "reco.paidGpt": "OpenCode Go avec modèles GPT natifs",
+      "reco.paidNoGpt": "OpenCode Go uniquement (modèles GPT masqués)",
+      "reco.trial": "Essai gratuit sur les deux modèles zen gratuits",
+      "reco.offGpt": "Conserver votre configuration ChatGPT (DÉSACTIVÉ)",
+      "reco.guide": "Aucun compte tiers pour l'instant",
+      "warn.noToken": "Aucun jeton OpenCode Go détecté.",
+      "warn.noTokenHint": "Ajoutez-le dans les Paramètres ou inscrivez-vous d'abord, puis appliquez.",
+      "warn.register": "S'inscrire à OpenCode Go",
+      "warn.openSettings": "Ouvrir les Paramètres",
+      "warn.applyDisabled": "L'application se débloque une fois un jeton configuré.",
+      "done.applied": "Configuration appliquée",
+      "done.appliedBody": "ModelDock a réécrit votre configuration Codex. Redémarrez complètement Codex - quittez-le entièrement, puis rouvrez-le - avant de commencer une nouvelle tâche.",
+      "done.appliedNoRestart": "Configuration appliquée",
+      "done.appliedNoRestartBody": "Votre Codex utilise déjà la configuration recommandée. Aucun redémarrage nécessaire.",
+      "done.noChange": "Aucune modification nécessaire",
+      "done.noChangeBody": "Votre Codex reste sur sa configuration actuelle.",
+      "done.guideBody": "Inscrivez-vous à OpenCode Go pour débloquer le niveau gratuit, puis relancez ce guide depuis les Paramètres.",
+    },
+    es: {
+      "wizard.eyebrow": "CONFIGURACIÓN INICIAL",
+      "wizard.title": "Bienvenido a Model Dock",
+      "wizard.body": "Responde dos preguntas breves y ModelDock configurará el modo adecuado para tus cuentas.",
+      "wizard.detected": "DETECTADO",
+      "wizard.currentMode": "Modo actual",
+      "wizard.factGo": "OpenCode Go",
+      "wizard.factDs": "Clave de DeepSeek",
+      "wizard.factAutostart": "Iniciar al acceder",
+      "wizard.configured": "Configurado",
+      "wizard.missing": "Falta",
+      "wizard.autostartOn": "Activado",
+      "wizard.autostartOff": "Desactivado",
+      "wizard.autostartUnsupported": "No compatible",
+      "wizard.modeOff": "Desactivado",
+      "wizard.modeTrial": "Prueba",
+      "wizard.modeOn": "Activado",
+      "wizard.start": "Empezar",
+      "wizard.skip": "Ahora no",
+      "wizard.step1": "PASO 1 DE 3",
+      "wizard.q1": "¿Tienes una suscripción de ChatGPT (Codex)?",
+      "wizard.q1Yes": "Sí",
+      "wizard.q1YesSub": "Mantener los modelos GPT nativos en el selector.",
+      "wizard.q1No": "No",
+      "wizard.q1NoSub": "Ocultar los modelos GPT de pago que no puedes usar.",
+      "wizard.step2": "PASO 2 DE 3",
+      "wizard.q2": "¿Y OpenCode, DeepSeek u otra API de terceros?",
+      "wizard.q2None": "Sin cuenta",
+      "wizard.q2NoneSub": "Usar solo lo que ya tienes; te indicaremos opciones gratuitas.",
+      "wizard.q2Free": "Cuenta gratuita",
+      "wizard.q2FreeSub": "Nivel gratuito de OpenCode: DeepSeek V4 Flash Free + MiMo V2.5 Free, sin necesidad de tarjeta.",
+      "wizard.q2Paid": "Plan de pago",
+      "wizard.q2PaidSub": "OpenCode Go u otra clave de pago de terceros desbloquea el catálogo completo.",
+      "wizard.step3": "PASO 3 DE 3",
+      "wizard.back": "Atrás",
+      "wizard.apply": "Aplicar y reiniciar Codex",
+      "wizard.applyBusy": "Aplicando...",
+      "wizard.done": "Hecho",
+      "wizard.reRun": "Volver a ejecutar esta guía",
+      "wizard.closeAria": "Cerrar la guía de configuración",
+      "wizard.settingsEntry": "Volver a ejecutar la guía de configuración",
+      "wizard.errorTitle": "Algo salió mal",
+      "wizard.skipTitle": "Omitir configuración",
+      "wizard.skipBody": "Tu Codex permanece como está. Puedes volver a ejecutar esta guía en cualquier momento desde Ajustes.",
+      "reco.onMode": "Modo: ACTIVADO",
+      "reco.trialMode": "Modo: PRUEBA (gratis)",
+      "reco.offMode": "Modo: DESACTIVADO (sin cambios)",
+      "reco.catalogFull": "Catálogo completo de OpenCode Go",
+      "reco.catalogTrial": "Solo los dos modelos zen gratuitos",
+      "reco.nativeOn": "Los modelos GPT nativos permanecen en el selector",
+      "reco.nativeOff": "Modelos GPT nativos ocultos (sin suscripción)",
+      "reco.nativeKeep": "Codex sigue usando tu configuración de ChatGPT",
+      "reco.dsAlt": "Consejo: añade más tarde una clave de DeepSeek en Ajustes para usar los modelos DeepSeek",
+      "reco.register": "Regístrate en OpenCode Go para desbloquear el nivel gratuito",
+      "reco.rerun": "Luego vuelve a ejecutar esta guía desde Ajustes",
+      "reco.paidGpt": "OpenCode Go con modelos GPT nativos",
+      "reco.paidNoGpt": "Solo OpenCode Go (modelos GPT ocultos)",
+      "reco.trial": "Prueba gratuita de los dos modelos zen gratuitos",
+      "reco.offGpt": "Conservar tu configuración de ChatGPT (DESACTIVADO)",
+      "reco.guide": "Aún no hay cuenta de terceros",
+      "warn.noToken": "No se detectó ningún token de OpenCode Go.",
+      "warn.noTokenHint": "Añádelo en Ajustes o regístrate primero y luego aplica.",
+      "warn.register": "Regístrate en OpenCode Go",
+      "warn.openSettings": "Abrir Ajustes",
+      "warn.applyDisabled": "Aplicar se desbloquea cuando se configura un token.",
+      "done.applied": "Configuración aplicada",
+      "done.appliedBody": "ModelDock reescribió tu configuración de Codex. Reinicia Codex por completo (sal del todo y vuelve a abrirlo) antes de empezar una nueva tarea.",
+      "done.appliedNoRestart": "Configuración aplicada",
+      "done.appliedNoRestartBody": "Tu Codex ya usa la configuración recomendada. No hace falta reiniciar.",
+      "done.noChange": "No se necesitaron cambios",
+      "done.noChangeBody": "Tu Codex permanece en su configuración actual.",
+      "done.guideBody": "Regístrate en OpenCode Go para desbloquear el nivel gratuito y luego vuelve a ejecutar esta guía desde Ajustes.",
+    },
   };
 
+  const SUPPORTED = ["en", "zh", "ja", "fr", "es"];
+  // The wizard follows the dashboard's interface language (i18n.js stores it in
+  // localStorage["modeldock-lang"]), falling back to the browser preference the
+  // same way i18n.js does, so switching the dashboard language switches the
+  // guide too.
+  function resolveLang() {
+    let lang = null;
+    try {
+      lang = localStorage.getItem("modeldock-lang");
+    } catch {}
+    if (!SUPPORTED.includes(lang)) {
+      const primary = (navigator.language || "en").toLowerCase().split("-")[0];
+      lang = SUPPORTED.includes(primary) ? primary : "en";
+    }
+    return lang;
+  }
+
   const state = {
-    lang: (navigator.language || "en").toLowerCase().startsWith("zh") ? "zh" : "en",
     onboard: null,
     step: null,
     hasGpt: null,
@@ -176,16 +411,27 @@
     applying: false,
     applyResult: null,
     autoShown: false,
+    // True while the settings dialog was opened on purpose from the guide's
+    // own "Open Settings" button. The watchdog then leaves it alone, because
+    // the settings modal must sit above the guide while a token is typed.
+    settingsIntent: false,
   };
   let watchdog = null;
 
-  const L = (key) => (I18N[state.lang] && I18N[state.lang][key]) || I18N.en[key] || key;
+  const L = (key) => {
+    const table = I18N[resolveLang()] || I18N.en;
+    return table[key] ?? I18N.en[key] ?? key;
+  };
 
   const CSS = `
   #modeldock-wizard, #modeldock-wizard * { box-sizing: border-box; }
-  #modeldock-wizard { position: fixed; inset: 0; z-index: 200; display: grid; place-items: center;
-    padding: 24px; background: rgba(5,10,16,.72); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); }
+  #modeldock-wizard { position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center;
+    margin: 0; padding: 24px; border: 0; width: 100%; height: 100%; max-width: none; max-height: none;
+    background: rgba(5,10,16,.72); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); color: var(--text); }
   #modeldock-wizard[hidden] { display: none; }
+  /* The guide is its own full-viewport overlay, so the native dialog backdrop
+     must stay transparent or the dimming would be applied twice. */
+  #modeldock-wizard::backdrop { background: transparent; }
   .wz-card { width: min(620px, calc(100vw - 40px)); max-height: min(720px, calc(100vh - 48px)); overflow: auto;
     border: 1px solid var(--line); border-radius: 18px; color: var(--text);
     background: linear-gradient(150deg, rgba(19,35,49,.98), rgba(11,21,30,.99));
@@ -382,25 +628,59 @@
 
   function show() {
     const host = document.getElementById("modeldock-wizard");
-    if (host) host.hidden = false;
+    if (!host) return;
+    // An auto-opened "missing token" prompt must never sit above the guide:
+    // close it first so the wizard is the last element to enter the browser's
+    // top layer (which beats any z-index) and therefore renders on top.
+    if (!state.settingsIntent) closeSettingsDialog();
+    host.hidden = false;
+    if (typeof host.showModal === "function" && !host.open) host.showModal();
+    armWatchdog();
   }
 
   function hide() {
     const host = document.getElementById("modeldock-wizard");
-    if (host) host.hidden = true;
+    if (!host) return;
+    host.hidden = true;
+    if (host.open && typeof host.close === "function") host.close();
+    disarmWatchdog();
+  }
+
+  function armWatchdog() {
+    if (watchdog) return;
+    watchdog = setInterval(() => {
+      const host = document.getElementById("modeldock-wizard");
+      if (!host || host.hidden) {
+        disarmWatchdog();
+        return;
+      }
+      // Close the settings dialog while the guide is visible, but never undo
+      // an intentional open from the guide's own "Open Settings" button.
+      if (!state.settingsIntent) closeSettingsDialog();
+    }, 250);
+  }
+
+  function disarmWatchdog() {
+    if (watchdog) {
+      clearInterval(watchdog);
+      watchdog = null;
+    }
   }
 
   function closeSettingsDialog() {
-    const host = document.getElementById("modeldock-wizard");
-    if (!host || host.hidden) return;
+    // Close unconditionally: a launch from the settings dialog must not leave
+    // the modal open, because the browser top layer beats any z-index and would
+    // cover the wizard while it is still hidden.
     const dialog = document.getElementById("settings-dialog");
     if (dialog && typeof dialog.close === "function") dialog.close();
     else if (dialog) dialog.removeAttribute("open");
   }
 
   function openSettings() {
-    // Keep the wizard open underneath: the settings <dialog> renders in the
-    // browser top-layer above it, and its close event refreshes the summary.
+    // The settings <dialog> renders in the browser top layer above the wizard
+    // while a token is typed; mark the open as intentional so the watchdog
+    // does not undo it, and refresh the summary from its close event.
+    state.settingsIntent = true;
     const button = document.getElementById("settings-open");
     if (button) button.click();
   }
@@ -450,14 +730,6 @@
   function render() {
     const host = document.getElementById("modeldock-wizard");
     const root = card();
-
-    // The settings-close watchdog exists only to win the page-load race against
-    // the dashboard's own "missing token" prompt. Once the user is interacting,
-    // stop it so an explicit "Open Settings" click is never undone.
-    if (watchdog && state.step !== "welcome") {
-      clearInterval(watchdog);
-      watchdog = null;
-    }
 
     if (state.step === "welcome") renderWelcome(root);
     else if (state.step === "q1") renderQ1(root);
@@ -717,19 +989,22 @@
     style.textContent = CSS;
     document.head.append(style);
 
-    const host = document.createElement("div");
+    // A native <dialog> puts the guide in the browser's top layer, above the
+    // settings dialog (which is already a <dialog> and can never be beaten by
+    // a plain z-index). Esc maps to the same dismissal as the X button.
+    const host = document.createElement("dialog");
     host.id = "modeldock-wizard";
     host.hidden = true;
     document.body.append(host);
-
-    // The first-run wizard wins the race against the dashboard's own "missing
-    // token" settings prompt for a short window, so two overlays never stack.
-    watchdog = setInterval(closeSettingsDialog, 250);
-    setTimeout(() => { if (watchdog) { clearInterval(watchdog); watchdog = null; } }, 2000);
+    host.addEventListener("cancel", (event) => {
+      event.preventDefault();
+      hide();
+    });
 
     const dialog = document.getElementById("settings-dialog");
     if (dialog) {
       dialog.addEventListener("close", () => {
+        state.settingsIntent = false;
         const host = document.getElementById("modeldock-wizard");
         if (!host || host.hidden) return;
         refreshOnboard().then(render).catch(() => {});
@@ -744,6 +1019,13 @@
         start(true);
       });
     }
+    // Follow dashboard language changes (i18n.js setLang dispatches this
+    // event): refresh the settings entry label and any visible wizard copy.
+    window.addEventListener("modeldock:langchange", () => {
+      if (settingsEntry) settingsEntry.textContent = L("wizard.settingsEntry");
+      const wizardHost = document.getElementById("modeldock-wizard");
+      if (wizardHost && !wizardHost.hidden && state.step) render();
+    });
   }
 
   async function start(force) {
