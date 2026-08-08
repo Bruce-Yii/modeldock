@@ -84,6 +84,40 @@ test("recall filters by working-directory scope", () => {
   }
 });
 
+test("scopeOnly restricts recall to the project bucket and never falls back to global", () => {
+  const { dir } = memoryDir();
+  const store = new MemoryStore({ dbPath: path.join(dir, "memory.db") });
+  try {
+    store.storeMemory({ content: "General note visible everywhere.", scopeDir: null, kind: "knowledge" });
+    store.storeMemory({
+      content: "StockScan strict baseline lives in stockscan only.",
+      scopeDir: "D:\\projects\\stockscan",
+      kind: "baseline",
+    });
+
+    const layered = store.search({ query: "visible everywhere", scopeDir: "D:\\projects\\other-project" });
+    assert.ok(layered.count >= 1, "layered recall falls back to global when the project misses");
+
+    const strictMiss = store.search({
+      query: "visible everywhere",
+      scopeDir: "D:\\projects\\other-project",
+      scopeOnly: true,
+    });
+    assert.equal(strictMiss.count, 0, "strict recall never sees global memory from another project");
+
+    const strictHit = store.search({
+      query: "strict baseline",
+      scopeDir: "D:\\projects\\stockscan",
+      scopeOnly: true,
+    });
+    assert.ok(strictHit.count >= 1, "strict recall still finds the project's own memory");
+    assert.match(strictHit.text, /StockScan/);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("storeMemory persists an explicit memory scoped to a project", () => {
   const { dir } = memoryDir();
   const store = new MemoryStore({ dbPath: path.join(dir, "memory.db") });
@@ -105,6 +139,39 @@ test("storeMemory persists an explicit memory scoped to a project", () => {
 
     const other = store.search({ query: "DIVO baseline", scopeDir: "D:\\projects\\other-project" });
     assert.equal(other.count, 0, "scoped memory stays out of other projects");
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("search layers project hits first and falls back to global", () => {
+  const { dir } = memoryDir();
+  const store = new MemoryStore({ dbPath: path.join(dir, "memory.db") });
+  try {
+    store.storeMemory({
+      content: "The QCM baseline uses the DIVO cash-sleeve version.",
+      scopeDir: "D:\\projects\\stockscan",
+      kind: "baseline",
+    });
+    store.storeMemory({
+      content: "A preference: always verify the baseline before claiming a fix.",
+      kind: "preference",
+    });
+
+    const projectOnly = store.search({ query: "baseline", scopeDir: "D:\\projects\\stockscan", limit: 1 });
+    assert.equal(projectOnly.count, 1, "the project-scoped hit fills the single slot");
+    assert.match(projectOnly.text, /\[1\] baseline/);
+
+    const layered = store.search({ query: "baseline", scopeDir: "D:\\projects\\stockscan", limit: 5 });
+    assert.equal(layered.count, 2, "project miss falls back upward to the global bucket");
+    assert.ok(
+      layered.text.indexOf("[1] baseline") < layered.text.indexOf("[2] preference"),
+      "project hits rank ahead of the global fallback",
+    );
+
+    const full = store.search({ query: "baseline" });
+    assert.equal(full.count, 2, "without working-directory context the recall stays full");
   } finally {
     store.close();
     rmSync(dir, { recursive: true, force: true });

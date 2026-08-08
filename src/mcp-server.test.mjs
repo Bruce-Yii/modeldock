@@ -74,10 +74,16 @@ test("MCP sidecar registers recall_memory when memory is enabled", async () => {
     const names = (parsed.result?.tools || []).map((tool) => tool.name);
     assert.ok(names.includes("recall_memory"), `recall_memory missing from ${names.join(",")}`);
     assert.ok(names.includes("store_memory"), `store_memory missing from ${names.join(",")}`);
+    const recallSchema = parsed.result.tools.find((tool) => tool.name === "recall_memory")?.inputSchema || {};
+    assert.equal(
+      recallSchema.properties?.scope_only?.type,
+      "boolean",
+      "gateway-side schema keeps scope_only so bridge-injected calls survive validation",
+    );
 
     const call = await rpc(instance.url, "tools/call", {
       name: "recall_memory",
-      arguments: { query: "baseline" },
+      arguments: { query: "baseline", scope_dir: "D:\\projects\\stockscan", scope_only: true },
     });
     assert.equal(call.status, 200);
     const text = call.parsed.result?.content?.[0]?.text || "";

@@ -119,6 +119,13 @@ test("stdio bridge exposes recall_memory when memory is enabled and forwards cal
     const names = listed.result.tools.map((tool) => tool.name);
     assert.ok(names.includes("recall_memory"), `recall_memory missing from ${names.join(",")}`);
     assert.ok(names.includes("store_memory"), `store_memory missing from ${names.join(",")}`);
+    const recallSchema = listed.result.tools.find((tool) => tool.name === "recall_memory")?.inputSchema || {};
+    assert.equal(
+      recallSchema.properties?.scope_only,
+      undefined,
+      "scope_only must not be advertised to the model through the bridge tools/list",
+    );
+    assert.ok(recallSchema.properties?.scope_dir, "scope_dir stays visible for explicit project recalls");
 
     const called = await rpc(bridge, 3, "tools/call", {
       name: "recall_memory",
@@ -140,6 +147,73 @@ test("stdio bridge exposes recall_memory when memory is enabled and forwards cal
     assert.deepEqual(storedParsed.args, { content: "Remember the DIVO baseline.", kind: "baseline", scope_dir: "D:\\projects\\stockscan" });
     const storedForward = gateway.calls.filter((m) => m.method === "tools/call").find((m) => m.params.name === "store_memory");
     assert.equal(storedForward.params.name, "store_memory");
+  } finally {
+    await stopBridge(bridge);
+    await gateway.close();
+  }
+});
+
+test("stdio bridge defaults recall and store to the session working directory", async () => {
+  const gateway = await startMockGateway();
+  const bridge = startBridge(gateway.url, { MODELDOCK_MEMORY: "1" });
+  try {
+    await rpc(bridge, 1, "initialize", {
+      protocolVersion: "2025-06-18",
+      capabilities: {},
+      clientInfo: { name: "test", version: "1.0.0" },
+    });
+    notify(bridge, "notifications/initialized", {});
+
+    const called = await rpc(bridge, 2, "tools/call", {
+      name: "recall_memory",
+      arguments: { query: "baseline" },
+    });
+    const parsed = JSON.parse(called.result.content[0].text);
+    assert.equal(parsed.args.scope_dir, process.cwd(), "recall defaults to the session working directory");
+
+    const stored = await rpc(bridge, 3, "tools/call", {
+      name: "store_memory",
+      arguments: { content: "Remember the DIVO baseline.", kind: "baseline" },
+    });
+    const storedParsed = JSON.parse(stored.result.content[0].text);
+    assert.equal(storedParsed.args.scope_dir, process.cwd(), "store defaults to the session working directory");
+  } finally {
+    await stopBridge(bridge);
+    await gateway.close();
+  }
+});
+
+test("MODELDOCK_MEMORY_SCOPE injects the bucket scope and strict recall", async () => {
+  const gateway = await startMockGateway();
+  const bridge = startBridge(gateway.url, {
+    MODELDOCK_MEMORY: "1",
+    MODELDOCK_MEMORY_SCOPE: "D:\\bench\\deepswe",
+  });
+  try {
+    await rpc(bridge, 1, "initialize", {
+      protocolVersion: "2025-06-18",
+      capabilities: {},
+      clientInfo: { name: "test", version: "1.0.0" },
+    });
+    notify(bridge, "notifications/initialized", {});
+
+    const store = await rpc(bridge, 2, "tools/call", {
+      name: "store_memory",
+      arguments: { content: "benchmark fact" },
+    });
+    const storeParsed = JSON.parse(store.result.content[0].text);
+    assert.deepEqual(storeParsed.args, { content: "benchmark fact", scope_dir: "D:\\bench\\deepswe" });
+
+    const recall = await rpc(bridge, 3, "tools/call", {
+      name: "recall_memory",
+      arguments: { query: "benchmark fact" },
+    });
+    const recallParsed = JSON.parse(recall.result.content[0].text);
+    assert.deepEqual(recallParsed.args, {
+      query: "benchmark fact",
+      scope_dir: "D:\\bench\\deepswe",
+      scope_only: true,
+    });
   } finally {
     await stopBridge(bridge);
     await gateway.close();
