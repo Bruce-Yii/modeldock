@@ -44,12 +44,13 @@ if (command === "tools") {
   console.log(JSON.stringify(await callMcpTool("web_search_exa", args), null, 2));
 } else if (command === "recall") {
   const args = { query: rest[0] };
-  if (rest[1]) args.scope_dir = rest[1];
+  args.scope_dir = process.env.MODELDOCK_MEMORY_SCOPE || rest[1] || process.cwd();
+  if (process.env.MODELDOCK_MEMORY_SCOPE) args.scope_only = true;
   if (rest[2]) args.limit = Number(rest[2]);
   console.log(await callMcpTool("recall_memory", args));
 } else if (command === "store") {
   const args = { content: rest[0] };
-  if (rest[1]) args.scope_dir = rest[1];
+  args.scope_dir = process.env.MODELDOCK_MEMORY_SCOPE || rest[1] || process.cwd();
   if (rest[2]) args.kind = rest[2];
   console.log(JSON.stringify(await callMcpTool("store_memory", args), null, 2));
 } else if (command === "vision") {

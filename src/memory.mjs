@@ -289,9 +289,16 @@ export class MemoryStore {
     return result;
   }
 
-  // Permissive recall: BM25 over the FTS index, filtered by scope when a
-  // working directory is given. Units without a scope match everywhere.
-  search({ query, scopeDir = null, limit = 8 } = {}) {
+  // Permissive recall: BM25 over the FTS index. With a working directory the
+  // recall is layered - project-scoped hits come first, then global (unscoped)
+  // units fill the remaining slots, so project noise never drowns global
+  // preferences and a miss falls back upward. Without a scope (a direct /mcp
+  // call that carries no working-directory context) it stays a full recall.
+  // scopeOnly (used by the stdio bridge's MODELDOCK_MEMORY_SCOPE isolation
+  // mode) restricts recall to the project bucket and never falls back to
+  // global, so a disposable test memory can neither read nor pollute the
+  // shared vault.
+  search({ query, scopeDir = null, limit = 8, scopeOnly = false } = {}) {
     const terms = String(query || "").match(/[\p{L}\p{N}_]+/gu) || [];
     if (!terms.length) throw new Error("recall_memory requires a non-empty query");
     const match = terms.map((term) => `"${term.replace(/"/g, "")}"`).join(" AND ");
@@ -307,9 +314,20 @@ export class MemoryStore {
       `)
       .all(match, Math.max(limit * 10, 50));
     const cwd = normalizeScope(scopeDir);
-    const hits = rows
-      .filter((row) => !cwd || matchesScope(row.scope_paths, cwd))
-      .slice(0, limit);
+    if (!cwd) {
+      if (scopeOnly) return { count: 0, text: "MEMORY_RECALL no hits" };
+      const hits = rows.slice(0, limit);
+      return { count: hits.length, text: formatHits(hits) };
+    }
+    const projectHits = rows.filter(
+      (row) => String(row.scope_paths || "") && matchesScope(row.scope_paths, cwd),
+    );
+    if (scopeOnly) {
+      const hits = projectHits.slice(0, limit);
+      return { count: hits.length, text: formatHits(hits) };
+    }
+    const globalHits = rows.filter((row) => !String(row.scope_paths || ""));
+    const hits = [...projectHits, ...globalHits].slice(0, limit);
     return { count: hits.length, text: formatHits(hits) };
   }
 

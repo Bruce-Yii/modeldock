@@ -17,13 +17,30 @@ import { loadConfig } from "./config.mjs";
 const baseUrl = gatewayBaseUrl();
 const config = loadConfig();
 
+// Codex spawns this bridge from the session working directory, so process.cwd()
+// is the project the user is actually in. Defaulting scope_dir to it makes
+// stores land in the project bucket and recalls layer project-first without the
+// model having to pass the path explicitly.
+//
+// MODELDOCK_MEMORY_SCOPE (set e.g. by pier for benchmark containers) overrides
+// the scope entirely and turns on strict isolation: stores land in that one
+// bucket and recalls never fall back to global memory, so a disposable test
+// memory can never read or pollute the user's real vault.
+const sessionScope = process.env.MODELDOCK_MEMORY_SCOPE || process.cwd();
+const strictMemory = Boolean(process.env.MODELDOCK_MEMORY_SCOPE);
+const withSessionScope = (args) => (args.scope_dir ? args : { ...args, scope_dir: sessionScope });
+const recallScope = (args) => {
+  const scoped = withSessionScope(args);
+  return strictMemory && !scoped.scope_only ? { ...scoped, scope_only: true } : scoped;
+};
+
 const upstreams = {
   searchWeb: (args) => callMcpTool("web_search_exa", args, baseUrl),
   inspectVision: (args) => callMcpTool("vision_inspect", args, baseUrl),
   ...(config.memoryEnabled
     ? {
-        recallMemory: (args) => callMcpTool("recall_memory", args, baseUrl),
-        storeMemory: (args) => callMcpTool("store_memory", args, baseUrl),
+        recallMemory: (args) => callMcpTool("recall_memory", recallScope(args), baseUrl),
+        storeMemory: (args) => callMcpTool("store_memory", withSessionScope(args), baseUrl),
       }
     : {}),
 };

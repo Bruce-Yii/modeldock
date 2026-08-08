@@ -10,11 +10,23 @@ function errorResult(error) {
   return { isError: true, content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }] };
 }
 
-export function createMcpServer({ upstreams }) {
+// acceptScopeOnly is true only on gateway-side endpoints: the stdio bridge
+// forwards internal args after injecting them, so the gateway schema must keep
+// scope_only even though the model-facing tools/list never advertises it.
+export function createMcpServer({ upstreams, acceptScopeOnly = false }) {
   const server = new McpServer(
     { name: "modeldock-opencode-go", version: "0.1.0" },
     { capabilities: { tools: {}, resources: {} } },
   );
+
+  const recallInputSchema = z.object({
+    query: z.string().min(1).describe("What to recall, in your own words"),
+    scope_dir: z.string().optional().describe("Absolute working directory to scope the recall to; omit to use the session working directory (project first, then global)"),
+    ...(acceptScopeOnly
+      ? { scope_only: z.boolean().optional().describe("Only search the given scope, never fall back to global memory") }
+      : {}),
+    limit: z.number().int().min(1).max(20).optional().describe("Number of results; defaults to 8"),
+  });
 
       server.registerTool(
         "web_search_exa",
@@ -129,11 +141,7 @@ export function createMcpServer({ upstreams }) {
             title: "Recall Memory",
             description:
               "Search this project's persistent memory: past decisions, frozen baselines, user preferences and reusable knowledge written across sessions. Call this when the task depends on earlier work, specific parameters, or facts not present in the current conversation. Returns ranked snippets with their source file.",
-            inputSchema: z.object({
-              query: z.string().min(1).describe("What to recall, in your own words"),
-              scope_dir: z.string().optional().describe("Absolute working directory to scope the recall to; omit to search all memory"),
-              limit: z.number().int().min(1).max(20).optional().describe("Number of results; defaults to 8"),
-            }),
+            inputSchema: recallInputSchema,
             annotations: { readOnlyHint: true, openWorldHint: false },
           },
           async (args) => {
@@ -155,7 +163,7 @@ export function createMcpServer({ upstreams }) {
               "Persist a fact, decision, preference, correction, or baseline into this project's long-term memory vault so future sessions can recall it with recall_memory. Call this when something reusable happened in this conversation: a stable preference, a hard-won fix, a frozen baseline, a project fact, or a correction. Do not store one-off task details or transient state.",
             inputSchema: z.object({
               content: z.string().min(1).describe("What to remember, one short paragraph"),
-              scope_dir: z.string().optional().describe("Absolute working directory this memory applies to; omit to store globally"),
+              scope_dir: z.string().optional().describe("Absolute working directory this memory applies to; omit to use the session working directory"),
               kind: z
                 .enum(["decision", "preference", "baseline", "knowledge", "correction"])
                 .optional()
@@ -179,7 +187,7 @@ export function createMcpServer({ upstreams }) {
 
 export function createMcpNodeHandler({ upstreams, onError = () => {} }) {
   const handler = createMcpHandler(
-    () => createMcpServer({ upstreams }),
+    () => createMcpServer({ upstreams, acceptScopeOnly: true }),
     { legacy: "stateless", onerror: onError },
   );
   const nodeHandler = toNodeHandler(handler);

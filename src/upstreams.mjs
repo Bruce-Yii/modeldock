@@ -46,7 +46,12 @@ export function createUpstreams({ config, metrics, mediaStore, memoryStore = nul
   async function recallMemory(args) {
     const finish = metrics.begin("memory", { operation: "recall_memory", query: String(args.query || "").slice(0, 160) });
     try {
-      const result = memoryStore.search({ query: args.query, scopeDir: args.scope_dir, limit: args.limit || 8 });
+      const result = memoryStore.search({
+        query: args.query,
+        scopeDir: args.scope_dir,
+        limit: args.limit || 8,
+        scopeOnly: args.scope_only === true,
+      });
       finish({ ok: true, hits: result.count, outputBytes: Buffer.byteLength(result.text) });
       return result.text;
     } catch (error) {
