@@ -112,7 +112,7 @@ export function createUpstreams({ config, metrics, mediaStore, memoryStore = nul
   }
 
   const RESPONSES_MODELS = new Set(["gpt-5.6-luna", "grok-4.5", "mimo-v2.5", "kimi-k2.5", "kimi-k2.6", "kimi-k2.7-code"]);
-  const ZEN_FREE_BASE = "https://opencode.ai/zen/v1/chat/completions";
+  const ZEN_FREE_BASE = `${(config.zenBaseUrl || "https://opencode.ai/zen/v1").replace(/\/+$/, "")}/chat/completions`;
 
   function visionEndpointFor(model) {
     const provider = providerForModel(config, model);

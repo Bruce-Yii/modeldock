@@ -4,7 +4,7 @@ import { createServer } from "node:http";
 import { Readable } from "node:stream";
 import os from "node:os";
 import path from "node:path";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createApp, createServices } from "./server.mjs";
 import { OPENCODE_GO_PROFILE } from "./profiles.mjs";
 
@@ -405,4 +405,89 @@ test("gateway: remote compaction v1/v2 is synthesized for routed models", async 
   assert.equal(bareV1.status, 200);
   const bareV1Body = await bareV1.json();
   assert.ok(Array.isArray(bareV1Body.output));
+});
+
+test("gateway: nativeMerge=false hides native models from /v1/models but the relay still routes", async (t) => {
+  const seen = [];
+  const upstream = createServer(async (req, res) => {
+    seen.push({ model: (await jsonBody(req)).model });
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({
+      id: "resp_go",
+      output: [{ id: "msg", type: "message", role: "assistant", content: [{ type: "output_text", text: "ok" }] }],
+      usage: { input_tokens: 1, output_tokens: 1 },
+    }));
+  });
+  const port = await listen(upstream);
+  t.after(() => upstream.close());
+  const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-native-nomerge-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const nativeCatalogFile = path.join(dir, "native-catalog.json");
+  await writeFile(nativeCatalogFile, JSON.stringify({
+    captured_with: "0.1.0",
+    models: [{ slug: "gpt-5.6-luna", display_name: "GPT-5.6-Luna", visibility: "list", priority: 3 }],
+  }), "utf8");
+  const instance = await startApp({
+    goBaseUrl: `http://127.0.0.1:${port}`,
+    opencodeBaseUrl: `http://127.0.0.1:${port}`,
+    nativeCatalogFile,
+    nativeMerge: false,
+  });
+  t.after(instance.stop);
+
+  const models = await (await fetch(`${instance.base}/v1/models`)).json();
+  const slugs = models.models.map((model) => model.slug);
+  assert.ok(slugs.includes("deepseek-v4-flash"), "curated Go models stay published");
+  assert.ok(slugs.includes("gpt-5.6-luna@opencode-go"), "our qualified Luna stays published");
+  assert.ok(!slugs.includes("gpt-5.6-luna"), "the native GPT model is hidden for non-subscribers");
+
+  const relay = await fetch(`${instance.base}/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "deepseek-v4-flash",
+      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }],
+    }),
+  });
+  assert.equal(relay.status, 200, "the relay still works with the native merge off");
+  await relay.text();
+  assert.equal(seen[0].model, "deepseek-v4-flash", "the upstream receives the routed model");
+});
+
+test("gateway: trial mode serves only the free pair and relays zen-free models to the zen base", async (t) => {
+  const seen = [];
+  const upstream = createServer(async (req, res) => {
+    seen.push({ url: req.url, model: (await jsonBody(req)).model });
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({
+      id: "resp_free",
+      output: [{ id: "msg", type: "message", role: "assistant", content: [{ type: "output_text", text: "free ok" }] }],
+      usage: { input_tokens: 1, output_tokens: 1 },
+    }));
+  });
+  const port = await listen(upstream);
+  t.after(() => upstream.close());
+  const instance = await startApp({
+    goBaseUrl: `http://127.0.0.1:${port}`,
+    opencodeBaseUrl: `http://127.0.0.1:${port}`,
+    zenBaseUrl: `http://127.0.0.1:${port}/v1`,
+    trialMode: true,
+  });
+  t.after(instance.stop);
+
+  const models = await (await fetch(`${instance.base}/v1/models`)).json();
+  assert.deepEqual(models.models.map((model) => model.slug).sort(), ["deepseek-v4-flash-free", "mimo-v2.5-free"]);
+
+  const relay = await fetch(`${instance.base}/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "deepseek-v4-flash-free",
+      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "trial" }] }],
+    }),
+  });
+  assert.equal(relay.status, 200, "a zen-free model relays in trial mode");
+  await relay.text();
+  assert.equal(seen[0].model, "deepseek-v4-flash-free", "the zen base receives the free model");
+  assert.match(seen[0].url, /\/responses$/, "the free model goes over the responses wire");
 });

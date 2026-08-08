@@ -244,6 +244,9 @@ export function loadConfig() {
     opencodeBaseUrl: normalizedBaseUrl(process.env.MODELDOCK_UPSTREAM_BASE_URL || "https://opencode.ai/zen/go/v1"),
     goBaseUrl: normalizedBaseUrl(process.env.MODELDOCK_UPSTREAM_BASE_URL || "https://opencode.ai/zen/go/v1"),
     deepseekBaseUrl: normalizedBaseUrl(process.env.MODELDOCK_DEEPSEEK_BASE_URL || "https://api.deepseek.com"),
+    // Zen free tier (trial): the fixed free models route here instead of zen/go.
+    // Overridable so sandbox/CI can point trial at a mock upstream.
+    zenBaseUrl: normalizedBaseUrl(process.env.MODELDOCK_ZEN_BASE_URL || "https://opencode.ai/zen/v1"),
     goToken: discovered.token,
     goTokenSource: discovered.source,
     tokens,
