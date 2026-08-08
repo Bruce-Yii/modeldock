@@ -26,3 +26,4 @@ dist/
 
 # Internal docs: kept locally, not published
 AGENTS.md
+architecture.md
