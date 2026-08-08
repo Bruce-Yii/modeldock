@@ -37,4 +37,10 @@ if (-not $nodeExe) {
 # command starts with a quoted program path, so wrap the whole command in one extra
 # pair of quotes (the ""prog" args" form).
 $log = Join-Path $root "modeldock.log"
+# Rotate at startup, one previous generation (like codex-router's log-rotation):
+# the log is append-only for the life of the process, so a cap on growth can only
+# be applied between runs. 32 MB keeps roughly a month of daily use.
+if ((Test-Path -LiteralPath $log) -and ((Get-Item -LiteralPath $log).Length -gt 32MB)) {
+    Move-Item -LiteralPath $log -Destination "$log.1" -Force
+}
 Start-Process -FilePath "cmd.exe" -ArgumentList "/c", "`"`"$nodeExe`" `"$server`" >> `"$log`" 2>&1`"" -WorkingDirectory $root -WindowStyle Hidden
