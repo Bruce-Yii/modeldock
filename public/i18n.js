@@ -1,7 +1,7 @@
 // Interface translation dictionaries. UTF-8: this file is the one place where
 // non-ASCII text is expected, so translations read as themselves rather than as escapes.
 const I18N_EN = {
-  "app.subtitle": "Responses forwarding, Exa search and vision sharing in one local process.",
+  "app.subtitle": "Eyes, ears, a voice, web search, and memory for DeepSeek inside Codex - plus native GPT passthrough.",
   "autostart.off": "Off",
   "autostart.on": "On",
   "autostart.titleOff": "Start at login: off",
@@ -131,7 +131,7 @@ const I18N_EN = {
 };
 
 const I18N_ZH = {
-  "app.subtitle": "响应转发、Exa 搜索与视觉共享，集成在一个本地进程中。",
+  "app.subtitle": "在 Codex 里给 DeepSeek 装上眼睛、耳朵、声音、网络搜索和记忆——还支持原生 GPT 透传。",
   "autostart.off": "关",
   "autostart.on": "开",
   "autostart.titleOff": "登录时启动：关",
@@ -261,7 +261,7 @@ const I18N_ZH = {
 };
 
 const I18N_JA = {
-  "app.subtitle": "レスポンス転送、Exa 検索、ビジョン共有を 1 つのローカルプロセスに。",
+  "app.subtitle": "Codex 内で DeepSeek に目、耳、音声、ウェブ検索、メモリを - ネイティブ GPT パススルーも。",
   "autostart.off": "オフ",
   "autostart.on": "オン",
   "autostart.titleOff": "ログイン時に起動: オフ",
@@ -391,7 +391,7 @@ const I18N_JA = {
 };
 
 const I18N_FR = {
-  "app.subtitle": "Transfert des réponses, recherche Exa et partage de vision dans un seul processus local.",
+  "app.subtitle": "Donnez à DeepSeek des yeux, des oreilles, une voix, la recherche web et une mémoire dans Codex - plus le passage natif des modèles GPT.",
   "autostart.off": "Inactif",
   "autostart.on": "Actif",
   "autostart.titleOff": "Démarrage à la session : inactif",
@@ -521,7 +521,7 @@ const I18N_FR = {
 };
 
 const I18N_ES = {
-  "app.subtitle": "Reenvío de respuestas, búsqueda Exa y visión compartida en un solo proceso local.",
+  "app.subtitle": "Dale a DeepSeek ojos, oídos, voz, búsqueda web y memoria dentro de Codex - además del paso nativo de GPT.",
   "autostart.off": "Apagado",
   "autostart.on": "Activo",
   "autostart.titleOff": "Iniciar al arrancar sesión: apagado",

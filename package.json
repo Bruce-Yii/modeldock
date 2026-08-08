@@ -3,7 +3,7 @@
   "version": "0.1.9",
   "private": true,
   "type": "module",
-  "description": "A narrow Codex Responses gate for OpenCode Go with monitored local web and vision tool loops.",
+  "description": "Give DeepSeek eyes, ears, a voice, a web connection, and a memory inside Codex - a thin local Responses bridge for OpenCode Go and DeepSeek official, with native GPT passthrough and live token, latency, and trace observability.",
   "engines": {
     "node": ">=22"
   },
