@@ -211,11 +211,14 @@ function buildTar(entries) {
 
 test("mock install: download -> install -> run", async (t) => {
   const bundle = path.join(repoRoot, "dist", "modeldock.mjs");
+  const bridge = path.join(repoRoot, "dist", "mcp-standalone.mjs");
   assert.ok(existsSync(bundle), "dist/modeldock.mjs must be built before this test");
+  assert.ok(existsSync(bridge), "dist/mcp-standalone.mjs must be built before this test");
 
   // 1. Local HTTP server pretending to be a GitHub Release asset endpoint. It serves
   //    the real built bundle so the download path is exercised end to end.
   const asset = readFileSync(bundle);
+  const bridgeAsset = readFileSync(bridge);
   const assetServer = createServer((req, res) => {
     if (req.url === "/modeldock.mjs") {
       res.writeHead(200, {
@@ -223,6 +226,12 @@ test("mock install: download -> install -> run", async (t) => {
         "content-length": asset.length,
       });
       res.end(asset);
+    } else if (req.url === "/mcp-standalone.mjs") {
+      res.writeHead(200, {
+        "content-type": "application/octet-stream",
+        "content-length": bridgeAsset.length,
+      });
+      res.end(bridgeAsset);
     } else {
       res.writeHead(404, { "content-type": "text/plain" });
       res.end("not found");
@@ -256,6 +265,7 @@ test("mock install: download -> install -> run", async (t) => {
     ...process.env,
     MODELDOCK_ROOT: installDir,
     MODELDOCK_RELEASE_URL: releaseUrl,
+    MODELDOCK_BRIDGE_URL: `http://127.0.0.1:${assetPort}/mcp-standalone.mjs`,
     MODELDOCK_PORT: String(appPort),
     MODELDOCK_SKIP_OPEN: "1",
     // The installer starts a real gateway, which records port ownership on
@@ -274,6 +284,7 @@ test("mock install: download -> install -> run", async (t) => {
 
   // 4. Assert the layout the installer creates.
   const installedBundle = path.join(installDir, "dist", "modeldock.mjs");
+  assert.ok(existsSync(path.join(installDir, "dist", "mcp-standalone.mjs")), "dist/mcp-standalone.mjs should be downloaded");
   const launcher = path.join(installDir, "scripts", launcherName);
   assert.ok(existsSync(installedBundle), "dist/modeldock.mjs should be downloaded");
   assert.ok(existsSync(launcher), `${launcherName} launcher should be written`);
@@ -362,6 +373,7 @@ test("mock install: download -> install -> run", async (t) => {
 
 test("mock install: auto-download a bundled Node 22 LTS when none is suitable", async (t) => {
   const bundle = readFileSync(path.join(repoRoot, "dist", "modeldock.mjs"));
+  const fakeBridge = Buffer.from("// fake mcp bridge\n");
   const nodeVer = "22.4.0";
   const distName = "v" + nodeVer;
 
@@ -401,6 +413,9 @@ test("mock install: auto-download a bundled Node 22 LTS when none is suitable", 
     if (url === "/modeldock.mjs") {
       res.writeHead(200, { "content-type": "application/octet-stream", "content-length": bundle.length });
       res.end(bundle);
+    } else if (url === "/mcp-standalone.mjs") {
+      res.writeHead(200, { "content-type": "application/octet-stream", "content-length": fakeBridge.length });
+      res.end(fakeBridge);
     } else if (url === "/index.json") {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(indexJson);
@@ -435,6 +450,7 @@ test("mock install: auto-download a bundled Node 22 LTS when none is suitable", 
     ...process.env,
     MODELDOCK_ROOT: installDir,
     MODELDOCK_RELEASE_URL: `http://127.0.0.1:${serverPort}/modeldock.mjs`,
+    MODELDOCK_BRIDGE_URL: `http://127.0.0.1:${serverPort}/mcp-standalone.mjs`,
     MODELDOCK_NODE_BASE_URL: `http://127.0.0.1:${serverPort}`,
     MODELDOCK_FORCE_NODE_DOWNLOAD: "1",
     // The Windows fixture node.exe is a text file; executing it would make Windows
@@ -499,6 +515,7 @@ test("mock install: auto-download a bundled Node 22 LTS when none is suitable", 
 test("mock install: rejects a Node download whose SHA256 does not match", async (t) => {
   const nodeVer = "22.4.0";
   const distName = "v" + nodeVer;
+  const fakeBridge = Buffer.from("// fake mcp bridge\n");
   const zip = buildZip([{ name: `node-${distName}-win-x64/node.exe`, data: "fake\n" }]);
   const tgz = gzipSync(
     buildTar([
@@ -520,6 +537,9 @@ test("mock install: rejects a Node download whose SHA256 does not match", async 
       const bundle = readFileSync(path.join(repoRoot, "dist", "modeldock.mjs"));
       res.writeHead(200, { "content-type": "application/octet-stream", "content-length": bundle.length });
       res.end(bundle);
+    } else if (url === "/mcp-standalone.mjs") {
+      res.writeHead(200, { "content-type": "application/octet-stream", "content-length": fakeBridge.length });
+      res.end(fakeBridge);
     } else if (url === "/index.json") {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(indexJson);
@@ -551,6 +571,7 @@ test("mock install: rejects a Node download whose SHA256 does not match", async 
     ...process.env,
     MODELDOCK_ROOT: installDir,
     MODELDOCK_RELEASE_URL: `http://127.0.0.1:${serverPort}/modeldock.mjs`,
+    MODELDOCK_BRIDGE_URL: `http://127.0.0.1:${serverPort}/mcp-standalone.mjs`,
     MODELDOCK_NODE_BASE_URL: `http://127.0.0.1:${serverPort}`,
     MODELDOCK_FORCE_NODE_DOWNLOAD: "1",
     MODELDOCK_PORT: String(appPort),

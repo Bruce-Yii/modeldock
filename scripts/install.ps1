@@ -140,6 +140,11 @@ $bundle = Join-Path $root "dist\modeldock.mjs"
 Write-Host "  downloading latest release bundle..."
 Invoke-WebRequest -UseBasicParsing -Uri $releaseUrl -OutFile $bundle
 Write-Host ("  saved {0} ({1:N1} MB)" -f $bundle, ((Get-Item $bundle).Length / 1MB))
+$bridgeUrl = if ($env:MODELDOCK_BRIDGE_URL) { $env:MODELDOCK_BRIDGE_URL } else { "https://github.com/$repo/releases/latest/download/mcp-standalone.mjs" }
+$bridge = Join-Path $root "dist\mcp-standalone.mjs"
+Write-Host "  downloading MCP stdio bridge..."
+Invoke-WebRequest -UseBasicParsing -Uri $bridgeUrl -OutFile $bridge
+Write-Host ("  saved {0} ({1:N2} MB)" -f $bridge, ((Get-Item $bridge).Length / 1MB))
 
 # Hidden launcher (same content as the repo's scripts/start-hidden.ps1). Written by the
 # installer so a single-file download still gets autostart + self-update restarts.

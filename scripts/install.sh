@@ -145,6 +145,11 @@ BUNDLE="$ROOT/dist/modeldock.mjs"
 echo "  downloading latest release bundle..."
 curl -fL --progress-bar "$RELEASE_URL" -o "$BUNDLE"
 echo "  saved $BUNDLE"
+BRIDGE_URL="${MODELDOCK_BRIDGE_URL:-https://github.com/$REPO/releases/latest/download/mcp-standalone.mjs}"
+BRIDGE="$ROOT/dist/mcp-standalone.mjs"
+echo "  downloading MCP stdio bridge..."
+curl -fL --progress-bar "$BRIDGE_URL" -o "$BRIDGE"
+echo "  saved $BRIDGE"
 
 # Background launcher (same content as the repo's scripts/start-hidden.sh). Written by
 # the installer so a single-file download still gets autostart + self-update restarts.

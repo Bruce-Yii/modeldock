@@ -66,9 +66,7 @@ mkdirSync(path.dirname(outfile), { recursive: true });
 
 const version = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8")).version;
 
-const result = await build({
-  entryPoints: [path.join(root, "src", "server.mjs")],
-  outfile,
+const common = {
   bundle: true,
   platform: "node",
   target: "node22",
@@ -92,9 +90,19 @@ const result = await build({
   banner: {
     js: `import { createRequire as __modeldockCreateRequire } from "node:module";\nconst require = __modeldockCreateRequire(import.meta.url);`,
   },
-});
+};
 
-if (result.errors.length) process.exit(1);
+// Two bundles: the gateway (modeldock.mjs) and the stdio MCP bridge
+// (mcp-standalone.mjs) that Codex spawns for the managed mcp_servers entry.
+const entries = [
+  { name: "modeldock.mjs", entry: path.join(root, "src", "server.mjs") },
+  { name: "mcp-standalone.mjs", entry: path.join(root, "src", "mcp-standalone.mjs") },
+];
 
-const size = statSync(outfile).size;
-console.log(`built ${path.relative(root, outfile)} (${(size / 1024 / 1024).toFixed(1)} MB)`);
+for (const { name, entry } of entries) {
+  const out = path.join(root, "dist", name);
+  const result = await build({ ...common, entryPoints: [entry], outfile: out });
+  if (result.errors.length) process.exit(1);
+  const size = statSync(out).size;
+  console.log(`built ${path.relative(root, out)} (${(size / 1024 / 1024).toFixed(1)} MB)`);
+}
