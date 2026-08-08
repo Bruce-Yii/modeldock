@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import os from "node:os";
+import path from "node:path";
+import { mkdtempSync, rmSync } from "node:fs";
 import { startMcpServer } from "./mcp-server.mjs";
 
 function configStub() {
@@ -54,8 +57,44 @@ test("MCP sidecar lists web, vision, and speech tools", async () => {
     assert.ok(names.includes("vision_inspect"), `missing vision_inspect in ${names.join(",")}`);
     assert.ok(names.includes("speak"), `missing speak in ${names.join(",")}`);
     assert.ok(names.includes("hear"), `missing hear in ${names.join(",")}`);
+    assert.ok(!names.includes("recall_memory"), `recall_memory must be off by default in ${names.join(",")}`);
+    assert.ok(!names.includes("store_memory"), `store_memory must be off by default in ${names.join(",")}`);
   } finally {
     await instance.stop();
+  }
+});
+
+test("MCP sidecar registers recall_memory when memory is enabled", async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-mcp-memory-"));
+  const config = { ...configStub(), memoryEnabled: true, memoryDir: dir };
+  const instance = await startMcpServer(config, { port: 0 });
+  try {
+    const { status, parsed } = await rpc(instance.url, "tools/list");
+    assert.equal(status, 200);
+    const names = (parsed.result?.tools || []).map((tool) => tool.name);
+    assert.ok(names.includes("recall_memory"), `recall_memory missing from ${names.join(",")}`);
+    assert.ok(names.includes("store_memory"), `store_memory missing from ${names.join(",")}`);
+
+    const call = await rpc(instance.url, "tools/call", {
+      name: "recall_memory",
+      arguments: { query: "baseline" },
+    });
+    assert.equal(call.status, 200);
+    const text = call.parsed.result?.content?.[0]?.text || "";
+    assert.match(text, /MEMORY_RECALL/);
+
+    const store = await rpc(instance.url, "tools/call", {
+      name: "store_memory",
+      arguments: { content: "A test baseline for the vault.", kind: "baseline", scope_dir: "D:\\projects\\stockscan" },
+    });
+    assert.equal(store.status, 200);
+    const stored = JSON.parse(store.parsed.result?.content?.[0]?.text || "{}");
+    assert.equal(stored.stored, true);
+    assert.equal(stored.scope, "D:\\projects\\stockscan");
+  } finally {
+    await instance.stop();
+    instance.services.memoryStore?.close();
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 

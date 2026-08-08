@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ModelDock Memory</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #101418;
+    --panel: #161c22;
+    --line: #26303a;
+    --text: #d7dee6;
+    --muted: #8b98a5;
+    --accent: #4cc2a2;
+    --warn: #d9a35c;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 13px/1.5 ui-monospace, "Cascadia Mono", Consolas, monospace;
+  }
+  header {
+    padding: 18px 22px 10px;
+    border-bottom: 1px solid var(--line);
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+  }
+  header h1 { font-size: 16px; margin: 0; }
+  header .status { color: var(--muted); font-size: 12px; }
+  header .status.ok { color: var(--accent); }
+  main { padding: 18px 22px 40px; }
+  .strip {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+    gap: 8px;
+    margin-bottom: 22px;
+  }
+  .strip div {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 10px 12px;
+  }
+  .strip b { display: block; font-size: 18px; }
+  .strip span { color: var(--muted); font-size: 11px; text-transform: uppercase; }
+  h2 { font-size: 13px; margin: 24px 0 8px; text-transform: uppercase; letter-spacing: 0; color: var(--muted); }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  th, td {
+    text-align: left;
+    vertical-align: top;
+    padding: 7px 10px;
+    border-bottom: 1px solid var(--line);
+  }
+  th {
+    color: var(--muted);
+    font-weight: 600;
+    font-size: 11px;
+    text-transform: uppercase;
+  }
+  tr:last-child td { border-bottom: 0; }
+  td.time { white-space: nowrap; color: var(--muted); }
+  td.kind { color: var(--accent); white-space: nowrap; }
+  td.muted { color: var(--muted); }
+  td.warn { color: var(--warn); }
+  td.text { max-width: 520px; white-space: pre-wrap; }
+  .empty { color: var(--muted); padding: 10px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>ModelDock Memory</h1>
+  <span class="status" id="status">loading...</span>
+</header>
+<main>
+  <section id="counts" class="strip"></section>
+  <h2>Events</h2>
+  <div id="events"><span class="empty">loading...</span></div>
+  <h2>Content</h2>
+  <div id="content"><span class="empty">loading...</span></div>
+</main>
+<script>
+async function refresh() {
+  const status = document.getElementById("status");
+  try {
+    const res = await fetch("/api/memory/view");
+    const data = await res.json();
+    if (!data.enabled) {
+      status.textContent = "memory vault disabled (MODELDOCK_MEMORY=0)";
+      status.className = "status";
+      document.getElementById("counts").innerHTML = "";
+      document.getElementById("events").innerHTML = '<span class="empty">vault disabled</span>';
+      document.getElementById("content").innerHTML = '<span class="empty">vault disabled</span>';
+      return;
+    }
+    status.textContent = data.status.dbPath;
+    status.className = "status ok";
+    renderCounts(data.status);
+    renderEvents(data.events);
+    renderContent(data.content);
+  } catch (error) {
+    status.textContent = "gateway unreachable";
+    status.className = "status";
+  }
+}
+
+function renderCounts(status) {
+  const counts = [
+    ["units", status.content_units],
+    ["sources", status.sources],
+    ["items", status.source_items],
+    ["revisions", status.source_revisions],
+    ["events", status.events],
+  ];
+  document.getElementById("counts").innerHTML = counts
+    .map(([label, value]) => `<div><b>${value}</b><span>${label}</span></div>`)
+    .join("");
+}
+
+function renderEvents(events) {
+  const box = document.getElementById("events");
+  if (!events.length) {
+    box.innerHTML = '<span class="empty">no events yet</span>';
+    return;
+  }
+  box.innerHTML = "<table><thead><tr><th>time</th><th>kind</th><th>scope</th><th>detail</th></tr></thead><tbody>" +
+    events.map((event) => `<tr>
+      <td class="time">${new Date(event.created_at).toLocaleString()}</td>
+      <td class="kind">${escapeHtml(event.kind)}</td>
+      <td class="muted">${escapeHtml(event.scope || "global")}</td>
+      <td>${escapeHtml(JSON.stringify(event.detail))}</td>
+    </tr>`).join("") +
+    "</tbody></table>";
+}
+
+function renderContent(content) {
+  const box = document.getElementById("content");
+  if (!content.length) {
+    box.innerHTML = '<span class="empty">no content captured yet</span>';
+    return;
+  }
+  box.innerHTML = "<table><thead><tr><th>head</th><th>trust</th><th>state</th><th>scope</th><th>source</th><th>time</th><th>text</th></tr></thead><tbody>" +
+    content.map((unit) => `<tr>
+      <td class="kind">${escapeHtml(unit.head || "(untitled)")}</td>
+      <td>${escapeHtml(unit.trust_class)}</td>
+      <td class="${unit.memory_state === "superseded" ? "warn" : ""}">${escapeHtml(unit.memory_state)}</td>
+      <td class="muted">${escapeHtml(unit.scope_paths || "global")}</td>
+      <td class="muted">${escapeHtml(unit.source_adapter + "/" + unit.native_id)}</td>
+      <td class="time">${new Date(unit.created_at).toLocaleString()}</td>
+      <td class="text">${escapeHtml(unit.text)}</td>
+    </tr>`).join("") +
+    "</tbody></table>";
+}
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, (ch) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  })[ch]);
+}
+
+refresh();
+setInterval(refresh, 10_000);
+</script>
+</body>
+</html>

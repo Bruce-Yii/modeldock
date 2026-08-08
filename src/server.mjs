@@ -14,13 +14,14 @@ import { Metrics } from "./metrics.mjs";
 import { NATIVE_IMAGE_PATHS, relayNativeImage, relayResponses as relayGatewayResponses } from "./gateway.mjs";
 import { createUpstreams } from "./upstreams.mjs";
 import { createMcpNodeHandler } from "./mcp.mjs";
+import { memoryStoreFor } from "./memory.mjs";
 import { CodexConfigSwitcher } from "./config-switcher.mjs";
 import { createAutostart } from "./autostart.mjs";
 import { createUpdater } from "./update.mjs";
 import { clearOwnerFile, describeOwnerConflict, writeOwnerFile } from "./instance-owner.mjs";
 import { CALLER_PATH_PREFIX, callerBasePath, callerKeyEqual, loadOrCreateCallerKey } from "./caller-key.mjs";
 import { RouteAffinity } from "./router.mjs";
-import { bareModelId, profileOptions, profileById, providerForModel, publishedSlugFor, tokenFor } from "./profiles.mjs";
+import { bareModelId, profileOptions, profileById, providerForModel, publishedSlugFor, tokenFor, TRIAL_MAIN_MODEL, TRIAL_VISION_MODEL } from "./profiles.mjs";
 import staticFiles from "./static-inline.mjs";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -163,8 +164,16 @@ function enabledProviders(config) {
   });
 }
 
+// Trial mode narrows the dashboard options to the fixed free pair so the pickers
+// and route card cannot advertise paid models while the free experience runs.
+function visibleModelOptions(config, options) {
+  if (!config.trialMode) return options;
+  const trial = new Set([TRIAL_MAIN_MODEL, TRIAL_VISION_MODEL]);
+  return options.filter((entry) => trial.has(bareModelId(entry.id)));
+}
+
 function modelsPayload(services) {
-  const options = modelOptions(services.config, services.config.profileId);
+  const options = visibleModelOptions(services.config, modelOptions(services.config, services.config.profileId));
   const selected = services.modelSelection;
   const visionOptions = options.filter((entry) => entry.supportsVision);
   const visionProviders = providerOptions(services.config).filter((provider) => visionOptions.some((model) => model.provider === provider.id));
@@ -184,7 +193,7 @@ function modelProviderOf(options, modelId) {
 
 function statusPayload({ config, metrics, mediaStore, routeAffinity, modelSelection, autostart, updater }) {
   const selected = modelSelection || { mainModel: config.mainModel, visionModel: config.visionModel };
-  const options = modelOptions(config);
+  const options = visibleModelOptions(config, modelOptions(config));
   const visionOptions = options.filter((entry) => entry.supportsVision);
   const mainTokenReady = Boolean(tokenFor(config, selected.mainModel) || (config.tokens && Object.values(config.tokens).some(Boolean)));
   const mainProvider = providerForModel(config, selected.mainModel) || config.profileId;
@@ -206,6 +215,8 @@ function statusPayload({ config, metrics, mediaStore, routeAffinity, modelSelect
     ready: mainTokenReady,
     config: {
       ...publicConfig({ ...config, mainModel: selected.mainModel, visionModel: selected.visionModel }),
+      // Trial mode marker for the dashboard's OFF/TRIAL/ON mode picker.
+      trial: Boolean(config.trialMode),
       // Selection-aware routing facts for the route card and forwarding map: which
       // provider owns the selected main model, which base URL and wire style it hits.
       mainProvider,
@@ -584,12 +595,31 @@ export function createServices(config = loadConfig()) {
   });
   const modelSelection = { mainModel: mutableConfig.mainModel, visionModel: mutableConfig.visionModel };
   const services = {};
+  const memoryStore = memoryStoreFor(mutableConfig);
   const upstreams = createUpstreams({
     config: mutableConfig,
     metrics,
     mediaStore,
+    memoryStore,
     getVisionModel: () => modelSelection.visionModel,
   });
+  let memoryTimer = null;
+  if (memoryStore) {
+    const captureMemories = () => {
+      try {
+        const result = memoryStore.captureCodexMemories(mutableConfig.codexHome);
+        if (result?.error) console.log(`[gate] memory capture: ${result.error}`);
+      } catch (error) {
+        console.log(`[gate] memory capture failed: ${error.message}`);
+      }
+    };
+    captureMemories();
+    const memoryRefreshHours = Number(mutableConfig.memoryRefreshHours || 6);
+    if (memoryRefreshHours > 0) {
+      memoryTimer = setInterval(captureMemories, memoryRefreshHours * 3_600_000);
+      memoryTimer.unref();
+    }
+  }
   // The catalog file follows the same MODELDOCK_STATE_DIR redirect as owner
   // records (instance-owner.mjs), so a gateway started from a throwaway install
   // (mock-install tests) writes its own catalog instead of rewriting the real
@@ -678,7 +708,8 @@ export function createServices(config = loadConfig()) {
   return Object.assign(services, {
     config: mutableConfig, runtime, metrics, mediaStore, upstreams, configSwitcher,
     autostart, updater, routeAffinity, modelSelection, callerKey, nativeSlugs,
-    refreshModelCatalog, modelRefreshTimer,
+    memoryStore, memoryTimer,
+    refreshModelCatalog, writeCatalogFile, modelRefreshTimer,
   });
 }
 
@@ -778,6 +809,20 @@ export function createApp(services = createServices()) {
     return res.status(tokenReady ? 200 : 503).json({ ok: tokenReady });
   });
   app.get("/api/status", (req, res) => res.json(statusPayload(services)));
+  app.get("/api/memory/status", (req, res) => {
+    if (!services.memoryStore) return res.json({ enabled: false });
+    return res.json(services.memoryStore.status());
+  });
+  app.get("/api/memory/view", (req, res) => {
+    if (!services.memoryStore) return res.json({ enabled: false });
+    const limit = Math.min(Number(req.query.limit) || 100, 500);
+    return res.json({
+      enabled: true,
+      status: services.memoryStore.status(),
+      content: services.memoryStore.contentView(limit),
+      events: services.memoryStore.recentEvents(50),
+    });
+  });
   app.get("/api/speech", async (req, res) => {
     try {
       const { ttsStatus } = await import("./tts.mjs");
@@ -799,7 +844,7 @@ export function createApp(services = createServices()) {
   });
   app.get("/api/config", async (req, res) => {
     try {
-      return res.json(await configSwitcher.status());
+      return res.json({ ...(await configSwitcher.status()), trial: Boolean(config.trialMode) });
     } catch (error) {
       return res.status(500).json({ error: { type: "config_status_error", message: error.message } });
     }
@@ -823,14 +868,65 @@ export function createApp(services = createServices()) {
   app.post("/api/config/enable", mutateConfig, configAction("enable"));
   app.post("/api/config/disable", mutateConfig, configAction("disable"));
   app.post("/api/config/restart-ack", mutateConfig, configAction("acknowledgeRestart"));
+  // Three-way mode switch (OFF / TRIAL / ON). OFF and ON reuse the existing switch
+  // operations; TRIAL additionally locks the modelSelection to the zen-free pair and
+  // rewrites the .env so a restart keeps the trial configuration. The catalog file is
+  // refreshed immediately so the Codex App picker narrows to the free pair too.
+  app.post("/api/config/mode", mutateConfig, async (req, res) => {
+    const mode = String(req.body?.mode || "");
+    if (mode !== "off" && mode !== "trial" && mode !== "on") {
+      return res.status(400).json({ error: { type: "invalid_mode", message: "mode must be 'off', 'trial' or 'on'." } });
+    }
+    try {
+      const run = configMutationQueue.then(async () => {
+        let result;
+        if (mode === "off") {
+          result = await configSwitcher.disable();
+          config.trialMode = false;
+          writeEnvFile({ MODELDOCK_TRIAL: "0" }, config.envFile);
+        } else {
+          result = await configSwitcher.enable();
+          if (mode === "trial") {
+            config.trialMode = true;
+            services.modelSelection.mainModel = TRIAL_MAIN_MODEL;
+            services.modelSelection.visionModel = TRIAL_VISION_MODEL;
+            services.configSwitcher.model = TRIAL_MAIN_MODEL;
+            writeEnvFile({
+              MODELDOCK_TRIAL: "1",
+              MODELDOCK_MAIN_MODEL: TRIAL_MAIN_MODEL,
+              MODELDOCK_VISION_MODEL: TRIAL_VISION_MODEL,
+            }, config.envFile);
+          } else {
+            config.trialMode = false;
+            writeEnvFile({ MODELDOCK_TRIAL: "0" }, config.envFile);
+          }
+          services.writeCatalogFile();
+        }
+        recordConfigAction(metrics, `config_mode_${mode}`, { ok: true });
+        return { ...result, trial: Boolean(config.trialMode) };
+      });
+      configMutationQueue = run.catch(() => {});
+      return res.json(await run);
+    } catch (error) {
+      recordConfigAction(metrics, `config_mode_${mode}`, { ok: false, error: error.message });
+      const conflict = error.code === "STATE_INVALID";
+      return res.status(conflict ? 409 : 500).json({ error: { type: error.code || "config_switch_error", message: error.message } });
+    }
+  });
   app.get("/api/models", (req, res) => res.json(modelsPayload(services)));
   app.get("/api/profiles", (req, res) => res.json({ selected: config.profileId, options: profileOptions() }));
   app.post("/api/models", mutateConfig, (req, res) => {
     const current = services.modelSelection;
     let nextMain = req.body?.mainModel === undefined ? current.mainModel : req.body.mainModel;
-    const nextVision = req.body?.visionModel === undefined ? current.visionModel : req.body.visionModel;
+    let nextVision = req.body?.visionModel === undefined ? current.visionModel : req.body.visionModel;
     const nextProvider = req.body?.provider;
-    if (nextProvider !== undefined && nextProvider !== config.profileId) {
+    // Trial mode pins the free pair and the opencode-go provider; only the mode
+    // switch can move models while it is active.
+    if (config.trialMode) {
+      nextMain = TRIAL_MAIN_MODEL;
+      nextVision = TRIAL_VISION_MODEL;
+    }
+    if (!config.trialMode && nextProvider !== undefined && nextProvider !== config.profileId) {
       const known = profileOptions().some((entry) => entry.id === nextProvider);
       if (!known) return res.status(400).json({ error: { type: "invalid_provider", message: `Unknown provider: ${nextProvider}` } });
       config.profile = profileById(nextProvider);

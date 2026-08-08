@@ -7,6 +7,8 @@ import { fileURLToPath } from "node:url";
 import { readFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
 import { createServer } from "node:http";
 import { spawn, execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { gzipSync } from "node:zlib";
 import { ownerFilePath } from "../src/instance-owner.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -93,6 +95,118 @@ async function waitForPortFree(port, tries = 20) {
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
   return false;
+}
+
+function sha256(buf) {
+  return createHash("sha256").update(buf).digest("hex");
+}
+
+// Minimal ZIP writer (stored entries) so the Windows Node-download test can serve a
+// small fake node archive without depending on external tooling. Read by
+// PowerShell's Expand-Archive.
+function crc32(buf) {
+  let table = crc32.table;
+  if (!table) {
+    table = crc32.table = new Int32Array(256);
+    for (let n = 0; n < 256; n++) {
+      let c = n;
+      for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+      table[n] = c;
+    }
+  }
+  let crc = -1;
+  for (let i = 0; i < buf.length; i++) crc = (crc >>> 8) ^ table[(crc ^ buf[i]) & 0xff];
+  return (crc ^ -1) >>> 0;
+}
+
+function buildZip(entries) {
+  const parts = [];
+  const central = [];
+  let offset = 0;
+  for (const e of entries) {
+    const name = Buffer.from(e.name, "utf8");
+    const data = Buffer.from(e.data);
+    const crc = crc32(data);
+    const lfh = Buffer.alloc(30);
+    lfh.writeUInt32LE(0x04034b50, 0);
+    lfh.writeUInt16LE(20, 4); // version needed
+    lfh.writeUInt16LE(0, 6); // flags
+    lfh.writeUInt16LE(0, 8); // method: stored
+    lfh.writeUInt16LE(0, 10); // mtime
+    lfh.writeUInt16LE(0, 12); // mdate
+    lfh.writeUInt32LE(crc, 14);
+    lfh.writeUInt32LE(data.length, 18);
+    lfh.writeUInt32LE(data.length, 22);
+    lfh.writeUInt16LE(name.length, 26);
+    lfh.writeUInt16LE(0, 28); // extra
+    parts.push(lfh, name, data);
+    const ch = Buffer.alloc(46);
+    ch.writeUInt32LE(0x02014b50, 0);
+    ch.writeUInt16LE(20, 4); // version made by
+    ch.writeUInt16LE(20, 6); // version needed
+    ch.writeUInt16LE(0, 8); // flags
+    ch.writeUInt16LE(0, 10); // method
+    ch.writeUInt16LE(0, 12); // mtime
+    ch.writeUInt16LE(0, 14); // mdate
+    ch.writeUInt32LE(crc, 16);
+    ch.writeUInt32LE(data.length, 20);
+    ch.writeUInt32LE(data.length, 24);
+    ch.writeUInt16LE(name.length, 28);
+    ch.writeUInt16LE(0, 30); // extra len
+    ch.writeUInt16LE(0, 32); // comment len
+    ch.writeUInt16LE(0, 34); // disk
+    ch.writeUInt16LE(0, 36); // internal attrs
+    ch.writeUInt32LE(0, 38); // external attrs
+    ch.writeUInt32LE(offset, 42);
+    central.push(ch, name);
+    offset += lfh.length + name.length + data.length;
+  }
+  const cdStart = offset;
+  const cdSize = central.reduce((s, x) => s + x.length, 0);
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0);
+  eocd.writeUInt16LE(0, 4);
+  eocd.writeUInt16LE(0, 6);
+  eocd.writeUInt16LE(entries.length, 8);
+  eocd.writeUInt16LE(entries.length, 10);
+  eocd.writeUInt32LE(cdSize, 12);
+  eocd.writeUInt32LE(cdStart, 16);
+  eocd.writeUInt16LE(0, 20);
+  return Buffer.concat([...parts, ...central, eocd]);
+}
+
+// Minimal USTAR tar writer (for the POSIX Node-download test). Extracted by tar(1).
+function buildTar(entries) {
+  const blocks = [];
+  for (const e of entries) {
+    const name = Buffer.from(e.name, "utf8");
+    if (name.length > 100) throw new Error("tar name too long");
+    const data = e.type === "dir" ? Buffer.alloc(0) : Buffer.from(e.data);
+    const h = Buffer.alloc(512);
+    name.copy(h, 0);
+    h.write("0000755\0", 100); // mode
+    h.write("0000000\0", 108); // uid
+    h.write("0000000\0", 116); // gid
+    h.write(data.length.toString(8).padStart(11, "0") + "\0", 124); // size
+    h.write("00000000000\0", 136); // mtime
+    h.write("        ", 148); // checksum placeholder
+    h.write(e.type === "dir" ? "5" : "0", 156); // typeflag
+    h.write("ustar\0", 257, 6, "ascii");
+    h.write("00", 263, 2, "ascii");
+    h.write("root", 265, 32, "ascii");
+    h.write("root", 297, 32, "ascii");
+    let sum = 0;
+    for (const byte of h) sum += byte;
+    h.write(sum.toString(8).padStart(6, "0") + "\0 ", 148);
+    blocks.push(h);
+    if (data.length) {
+      blocks.push(data);
+      const pad = (512 - (data.length % 512)) % 512;
+      if (pad) blocks.push(Buffer.alloc(pad));
+    }
+  }
+  blocks.push(Buffer.alloc(1024)); // two zero blocks end the archive
+  return Buffer.concat(blocks);
 }
 
 test("mock install: download -> install -> run", async (t) => {
@@ -244,4 +358,203 @@ test("mock install: download -> install -> run", async (t) => {
   // 7. Stop the background gateway so cleanup can remove the temp install dir.
   killByPort(appPort);
   assert.ok(await waitForPortFree(appPort), "background gateway should stop");
+});
+
+test("mock install: auto-download a bundled Node 22 LTS when none is suitable", async (t) => {
+  const bundle = readFileSync(path.join(repoRoot, "dist", "modeldock.mjs"));
+  const nodeVer = "22.4.0";
+  const distName = "v" + nodeVer;
+
+  // Fake nodejs.org/dist server. The version index is ordered newest-first with a
+  // non-LTS v23 ahead of the v22 LTS entries, so resolution must pick v22.4.0.
+  const zipEntry = { name: `node-${distName}-win-x64/node.exe`, data: "fake node.exe for download test\n" };
+  const zip = buildZip([zipEntry]);
+  const nodeBin = "#!/bin/sh\nexec node \"$@\"\n";
+  const tgz = gzipSync(
+    buildTar([
+      { name: `node-${distName}-linux-x64/`, type: "dir" },
+      { name: `node-${distName}-linux-x64/bin/`, type: "dir" },
+      { name: `node-${distName}-linux-x64/bin/node`, type: "file", data: nodeBin },
+    ]),
+  );
+  const shasums =
+    [
+      `${sha256(zip)}  node-${distName}-win-x64.zip`,
+      `${sha256(tgz)}  node-${distName}-linux-x64.tar.gz`,
+      `${sha256(Buffer.from("decoy"))}  node-${distName}-darwin-x64.tar.gz`,
+    ].join("\n") + "\n";
+  const indexJson = JSON.stringify([
+    { version: "v23.1.0", lts: false, npm: "11.0.0" },
+    { version: "v22.4.0", lts: "Jod", npm: "10.8.0" },
+    { version: "v22.3.0", lts: "Jod", npm: "10.8.0" },
+  ]);
+  const server = createServer((req, res) => {
+    const url = req.url;
+    if (url === "/modeldock.mjs") {
+      res.writeHead(200, { "content-type": "application/octet-stream", "content-length": bundle.length });
+      res.end(bundle);
+    } else if (url === "/index.json") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(indexJson);
+    } else if (url === `/v${nodeVer}/SHASUMS256.txt`) {
+      res.writeHead(200, { "content-type": "text/plain" });
+      res.end(shasums);
+    } else if (url === `/v${nodeVer}/node-${distName}-win-x64.zip`) {
+      res.writeHead(200, { "content-type": "application/octet-stream" });
+      res.end(zip);
+    } else if (url === `/v${nodeVer}/node-${distName}-linux-x64.tar.gz`) {
+      res.writeHead(200, { "content-type": "application/gzip" });
+      res.end(tgz);
+    } else {
+      res.writeHead(404, { "content-type": "text/plain" });
+      res.end("not found");
+    }
+  });
+  const serverPort = await listen(server);
+  t.after(() => server.close());
+
+  const installDir = mkdtempSync(path.join(os.tmpdir(), "modeldock-mock-node-"));
+  const probe = createServer();
+  const appPort = await listen(probe);
+  await new Promise((resolve) => probe.close(resolve));
+  t.after(() => killByPort(appPort));
+  t.after(() => rmSync(installDir, { recursive: true, force: true }));
+
+  const env = {
+    ...process.env,
+    MODELDOCK_ROOT: installDir,
+    MODELDOCK_RELEASE_URL: `http://127.0.0.1:${serverPort}/modeldock.mjs`,
+    MODELDOCK_NODE_BASE_URL: `http://127.0.0.1:${serverPort}`,
+    MODELDOCK_FORCE_NODE_DOWNLOAD: "1",
+    // The Windows fixture node.exe is a text file; executing it would make Windows
+    // pop an "Unsupported 16-Bit Application" dialog and hang the test's launcher.
+    // Skip the start on Windows so only download/verify/extract/layout is asserted.
+    MODELDOCK_SKIP_START: isWindows ? "1" : "0",
+    MODELDOCK_PORT: String(appPort),
+    MODELDOCK_SKIP_OPEN: "1",
+    MODELDOCK_STATE_DIR: path.join(installDir, ".modeldock"),
+  };
+  const child = runInstaller(path.join(repoRoot, "scripts", installerScript), env);
+  let out = "";
+  let err = "";
+  child.stdout.on("data", (d) => (out += d));
+  child.stderr.on("data", (d) => (err += d));
+  const exitCode = await new Promise((resolve) => child.on("close", resolve));
+  assert.equal(exitCode, 0, `installer failed:\n${out}\n${err}`);
+
+  // The bundled node landed under <root>/node/v22.4.0 with the archive's content.
+  const bundledNode = isWindows
+    ? path.join(installDir, "node", `v${nodeVer}`, "node.exe")
+    : path.join(installDir, "node", `v${nodeVer}`, "bin", "node");
+  assert.ok(existsSync(bundledNode), `bundled node should be extracted at ${bundledNode}`);
+  assert.equal(
+    readFileSync(bundledNode, "utf8"),
+    isWindows ? zipEntry.data : nodeBin,
+    "extracted node content should match the archive",
+  );
+  assert.ok(existsSync(path.join(installDir, "dist", "modeldock.mjs")), "release bundle should still be downloaded");
+
+  // The launcher and restart script carry the bundled-first node resolution.
+  const launcher = readFileSync(path.join(installDir, "scripts", launcherName), "utf8");
+  const restart = readFileSync(path.join(installDir, "scripts", "restart.ps1"), "utf8");
+  assert.ok(
+    launcher.includes(isWindows ? 'Join-Path $root "node"' : '"$ROOT"/node/v*'),
+    "launcher should prefer the bundled node",
+  );
+  assert.ok(restart.includes('Join-Path $root "node"'), "restart.ps1 should prefer the bundled node");
+
+  // POSIX: the fixture node is a real executable wrapper, so the launcher can start
+  // the gateway with the bundled node end to end. Windows cannot run a text file as
+  // node.exe, so only the download/extract/layout path is asserted there.
+  if (!isWindows) {
+    let healthz;
+    for (let i = 0; i < 40 && !healthz; i++) {
+      try {
+        healthz = await fetchText(`http://127.0.0.1:${appPort}/healthz`);
+      } catch {
+        await new Promise((r) => setTimeout(r, 250));
+      }
+    }
+    assert.ok(
+      healthz && [200, 503].includes(healthz.status),
+      `gateway should come up via the bundled node\n${out}\n${err}`,
+    );
+  }
+
+  killByPort(appPort);
+  assert.ok(await waitForPortFree(appPort), "background gateway should stop");
+});
+
+test("mock install: rejects a Node download whose SHA256 does not match", async (t) => {
+  const nodeVer = "22.4.0";
+  const distName = "v" + nodeVer;
+  const zip = buildZip([{ name: `node-${distName}-win-x64/node.exe`, data: "fake\n" }]);
+  const tgz = gzipSync(
+    buildTar([
+      { name: `node-${distName}-linux-x64/`, type: "dir" },
+      { name: `node-${distName}-linux-x64/bin/`, type: "dir" },
+      { name: `node-${distName}-linux-x64/bin/node`, type: "file", data: "#!/bin/sh\n" },
+    ]),
+  );
+  const wrong = sha256(Buffer.from("not the archive"));
+  const shasums = [
+    `${wrong}  node-${distName}-win-x64.zip`,
+    `${wrong}  node-${distName}-linux-x64.tar.gz`,
+  ].join("\n") + "\n";
+  const indexJson = JSON.stringify([{ version: "v22.4.0", lts: "Jod", npm: "10.8.0" }]);
+  const server = createServer((req, res) => {
+    const url = req.url;
+    if (url === "/modeldock.mjs") {
+      const bundle = readFileSync(path.join(repoRoot, "dist", "modeldock.mjs"));
+      res.writeHead(200, { "content-type": "application/octet-stream", "content-length": bundle.length });
+      res.end(bundle);
+    } else if (url === "/index.json") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(indexJson);
+    } else if (url.endsWith("/SHASUMS256.txt")) {
+      res.writeHead(200, { "content-type": "text/plain" });
+      res.end(shasums);
+    } else if (url.endsWith(".zip")) {
+      res.writeHead(200, { "content-type": "application/octet-stream" });
+      res.end(zip);
+    } else if (url.endsWith(".tar.gz")) {
+      res.writeHead(200, { "content-type": "application/gzip" });
+      res.end(tgz);
+    } else {
+      res.writeHead(404, { "content-type": "text/plain" });
+      res.end("not found");
+    }
+  });
+  const serverPort = await listen(server);
+  t.after(() => server.close());
+
+  const installDir = mkdtempSync(path.join(os.tmpdir(), "modeldock-mock-badsha-"));
+  const probe = createServer();
+  const appPort = await listen(probe);
+  await new Promise((resolve) => probe.close(resolve));
+  t.after(() => killByPort(appPort));
+  t.after(() => rmSync(installDir, { recursive: true, force: true }));
+
+  const env = {
+    ...process.env,
+    MODELDOCK_ROOT: installDir,
+    MODELDOCK_RELEASE_URL: `http://127.0.0.1:${serverPort}/modeldock.mjs`,
+    MODELDOCK_NODE_BASE_URL: `http://127.0.0.1:${serverPort}`,
+    MODELDOCK_FORCE_NODE_DOWNLOAD: "1",
+    MODELDOCK_PORT: String(appPort),
+    MODELDOCK_SKIP_OPEN: "1",
+    MODELDOCK_STATE_DIR: path.join(installDir, ".modeldock"),
+  };
+  const child = runInstaller(path.join(repoRoot, "scripts", installerScript), env);
+  let out = "";
+  let err = "";
+  child.stdout.on("data", (d) => (out += d));
+  child.stderr.on("data", (d) => (err += d));
+  const exitCode = await new Promise((resolve) => child.on("close", resolve));
+  assert.notEqual(exitCode, 0, `a bad SHA256 should fail the install, got exit 0\n${out}\n${err}`);
+  assert.match(out + err, /SHA256 mismatch/, `installer should report the hash mismatch\n${out}\n${err}`);
+  assert.ok(
+    !existsSync(path.join(installDir, "node", `v${nodeVer}`)),
+    "no bundled node should be installed after a bad hash",
+  );
 });

@@ -30,6 +30,7 @@ export class Metrics extends EventEmitter {
     };
     this.web = emptyBucket();
     this.vision = { ...emptyBucket(), fallback: 0, byModel: {} };
+    this.memory = emptyBucket();
     this.recent = [];
   }
 

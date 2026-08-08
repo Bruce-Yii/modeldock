@@ -432,9 +432,14 @@ test("upstreamTargetFor routes zen free models to the zen/v1 responses endpoint"
   assert.equal(free.provider, "opencode-go");
   assert.equal(free.url, "https://opencode.ai/zen/v1/responses");
   assert.equal(free.token, "go-token");
+  assert.equal(free.free, true, "free models are flagged so failures carry trial guidance");
 
   const mimo = upstreamTargetFor(config, "mimo-v2.5-free");
   assert.equal(mimo.url, "https://opencode.ai/zen/v1/responses");
+  assert.equal(mimo.free, true);
+
+  const paid = upstreamTargetFor(config, "deepseek-v4-flash");
+  assert.equal(paid.free, false, "paid models keep the generic error hints");
 });
 
 test("routeGatewayRequest escalates current-turn images to the vision model", () => {

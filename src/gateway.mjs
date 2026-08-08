@@ -561,6 +561,9 @@ export function upstreamTargetFor(config, model) {
     model: upstreamModel,
     url: `${baseUrl.replace(/\/+$/, "")}/responses`,
     token: config.goToken || config.tokens?.["opencode-go"] || "",
+    // Zen free tier: failure copy should carry trial-mode guidance instead of the
+    // generic hint (see error-translation.mjs FREE_HINTS).
+    free: Boolean(entry?.free),
   };
 }
 
@@ -1034,7 +1037,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
     const parsed = JSON.parse(bytes.toString("utf8"));
     usage = extractResponseUsage(parsed);
     if (!upstream.ok) {
-      const translated = translateUpstreamError({ provider: target.provider, status: upstream.status, bodyText: redactBearer(bytes.toString("utf8")) });
+      const translated = translateUpstreamError({ provider: target.provider, status: upstream.status, bodyText: redactBearer(bytes.toString("utf8")), free: target.free });
       writeCompactFailureReport(
         compactFailureReport(
           { ...summarizeBody, model: upstreamModel },
@@ -1252,7 +1255,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       // Translate before forwarding: name the failing provider, surface the
       // innermost message, and classify quota exhaustion before the status
       // mapping so a quota 429 does not read as "retry shortly".
-      const translated = translateUpstreamError({ provider: target.provider, status: upstream.status, bodyText: redactBearer(raw) });
+      const translated = translateUpstreamError({ provider: target.provider, status: upstream.status, bodyText: redactBearer(raw), free: target.free });
       const body = JSON.stringify(translated.body);
       if (!res.headersSent) {
         res.statusCode = upstream.status;

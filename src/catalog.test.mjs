@@ -62,6 +62,12 @@ test("baseInstructionsFor includes the design-first workflow", () => {
   assert.match(instructions, /implement by translating structure, palette, and hierarchy/);
 });
 
+test("baseInstructionsFor includes the memory lookup guidance", () => {
+  const instructions = baseInstructionsFor(configStub());
+  assert.match(instructions, /MEMORY\.md/);
+  assert.match(instructions, /applies_to matches the current working directory/);
+});
+
 test("enabledProvidersFor includes the active profile and any provider with a token", () => {
   const ids = enabledProvidersFor(configStub());
   assert.deepEqual([...ids].sort(), ["opencode-go"]);
@@ -117,6 +123,75 @@ test("mergeNativeCatalog publishes picker-visible native models grouped with the
     assert.equal(native.provider, "openai", "native entries are tagged for provider grouping");
     assert.ok(!slugs.includes("gpt-5.4-mini"), "picker-hidden native model stays out of the catalog");
     assert.ok(!slugs.includes("codex-auto-review"), "hidden native models stay out of the catalog");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("catalogFor in trial mode publishes only the fixed free pair and never merges native", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-native-trial-"));
+  const file = path.join(dir, "native-catalog.json");
+  writeFileSync(file, JSON.stringify({
+    captured_with: "0.1.0",
+    models: [{ slug: "gpt-5.6-luna", display_name: "GPT-5.6-Luna", visibility: "list", priority: 3 }],
+  }), "utf8");
+  try {
+    const trial = catalogFor({
+      ...configStub(),
+      trialMode: true,
+      mainModel: "deepseek-v4-flash-free",
+      visionModel: "mimo-v2.5-free",
+      nativeCatalogFile: file,
+    });
+    assert.deepEqual(trial.models.map((entry) => entry.slug).sort(), ["deepseek-v4-flash-free", "mimo-v2.5-free"]);
+    assert.equal(trial.models[0].slug, "deepseek-v4-flash-free", "the fixed trial main model leads");
+    assert.ok(!trial.models.some((entry) => entry.slug === "gpt-5.6-luna"), "trial never merges native GPT models");
+
+    // The same native capture outside trial publishes the native model.
+    const normal = catalogFor({ ...configStub(), nativeCatalogFile: file });
+    assert.ok(normal.models.some((entry) => entry.slug === "gpt-5.6-luna"), "native model appears outside trial");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("catalogFor outside trial still publishes the free models alongside the paid ones", () => {
+  const catalog = catalogFor(configStub());
+  const slugs = catalog.models.map((entry) => entry.slug);
+  assert.ok(slugs.includes("deepseek-v4-flash-free"));
+  assert.ok(slugs.includes("mimo-v2.5-free"));
+});
+
+test("mergeNativeCatalog caps native reasoning levels to the published enum", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-native-test-"));
+  const file = path.join(dir, "native-catalog.json");
+  writeFileSync(file, JSON.stringify({
+    captured_with: "0.1.0",
+    models: [{
+      slug: "gpt-5.6-sol",
+      display_name: "GPT-5.6-Sol",
+      visibility: "list",
+      priority: 1,
+      default_reasoning_level: "max",
+      supported_reasoning_levels: [
+        { effort: "low", description: "Low" },
+        { effort: "high", description: "High" },
+        { effort: "max", description: "Max" },
+        { effort: "ultra", description: "Ultra" },
+      ],
+    }],
+  }), "utf8");
+  try {
+    const merged = mergeNativeCatalog(catalogFor(configStub()), { ...configStub(), nativeCatalogFile: file });
+    const entry = merged.models.find((model) => model.slug === "gpt-5.6-sol");
+    assert.ok(entry, "native entry is published");
+    assert.deepEqual(
+      entry.supported_reasoning_levels.map((level) => level.effort),
+      ["low", "high"],
+      "max/ultra are filtered to the enum the installed CLI accepts",
+    );
+    assert.equal(entry.default_reasoning_level, "low", "default clamps to an allowed effort");
+    assert.equal(entry.supports_reasoning_summaries, true, "required field is defaulted for older CLI parsers");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

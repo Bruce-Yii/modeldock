@@ -11,6 +11,12 @@ const AUTO_COMPACT_TOKEN_LIMIT = Math.floor(CONTEXT_WINDOW * AUTO_COMPACT_PERCEN
 
 export { CONTEXT_WINDOW, AUTO_COMPACT_PERCENT, AUTO_COMPACT_TOKEN_LIMIT };
 
+// The fixed model pair the Trial mode runs on. Both live in the opencode-go profile
+// (zen free endpoint, same OpenCode token); Trial is a mode over that profile, not a
+// new upstream, so these ids are the only thing Trial touches at runtime.
+export const TRIAL_MAIN_MODEL = "deepseek-v4-flash-free";
+export const TRIAL_VISION_MODEL = "mimo-v2.5-free";
+
 const DEEPSEEK_REASONING_LEVELS = [
   { effort: "none", description: "No reasoning; direct responses only" },
   { effort: "minimal", description: "Barely any reasoning; fastest replies" },
@@ -83,7 +89,7 @@ function catalogEntry({ slug, displayName, description, compHash, inputModalitie
   };
 }
 
-function modelCatalogDefaults({ mainModel, displayName, description, compHash, inputModalities, supportsSearchTool, baseInstructions, defaultReasoningLevel = "high", supportedReasoningLevels = [ { effort: "low", description: "Fast responses with lighter reasoning" }, { effort: "high", description: "Deeper reasoning for complex work" }, { effort: "xhigh", description: "Extra-deep reasoning for hard problems" } ], availableModels = [], autoRouteEntry = null }) {
+function modelCatalogDefaults({ mainModel, displayName, description, compHash, inputModalities, supportsSearchTool, baseInstructions, defaultReasoningLevel = "high", supportedReasoningLevels = [ { effort: "low", description: "Fast responses with lighter reasoning" }, { effort: "high", description: "Deeper reasoning for complex work" }, { effort: "xhigh", description: "Extra-deep reasoning for hard problems" } ], availableModels = [] }) {
   const base = { compHash, supportsSearchTool, baseInstructions, defaultReasoningLevel, supportedReasoningLevels };
   // The main model may be the published slug (gpt-5.6-luna@opencode-go); the profile
   // catalog stores bare ids, so resolve through bareModelId before looking it up.
@@ -111,17 +117,6 @@ function modelCatalogDefaults({ mainModel, displayName, description, compHash, i
   return {
     models: [
       catalogEntry({ ...base, slug: mainModel, displayName, description, inputModalities, priority: 1, contextWindow: contextWindowFor(mainModel) }),
-      // Synthetic entry: not a real upstream model, it is the gate's free-first routing
-      // mode. Only Codex sees it - the dashboard keeps showing whichever model is
-      // actually serving.
-      ...(autoRouteEntry ? [catalogEntry({
-        ...base,
-        slug: autoRouteEntry.id,
-        displayName: autoRouteEntry.label,
-        description: "Free model first; falls back to the paid one automatically when the free upstream fails.",
-        inputModalities: ["text"],
-        priority: 2,
-      })] : []),
       ...rest.map((model, index) => catalogEntry({
         ...base,
         slug: model.slug,
@@ -132,7 +127,7 @@ function modelCatalogDefaults({ mainModel, displayName, description, compHash, i
         inputModalities: model.supportsVision ? ["text", "image"] : ["text"],
         contextWindow: model.contextWindow,
         // 1 is the selected main model; the rest follow in provider order.
-        priority: index + (autoRouteEntry ? 3 : 2),
+        priority: index + 2,
       })),
     ],
   };

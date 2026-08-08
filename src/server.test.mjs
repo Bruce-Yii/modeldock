@@ -226,6 +226,55 @@ test("config API defaults off and performs reversible user-triggered switching",
   assert.equal(await readFile(configPath, "utf8"), original);
 });
 
+test("config mode endpoint switches OFF / TRIAL / ON and locks the free pair in trial", async (t) => {
+  const codexHome = await mkdtemp(path.join(os.tmpdir(), "modeldock-server-mode-"));
+  t.after(() => rm(codexHome, { recursive: true, force: true }));
+  const configPath = path.join(codexHome, "config.toml");
+  const original = 'model = "gpt-5.6-sol"\n';
+  await writeFile(configPath, original, "utf8");
+  const envFile = path.join(codexHome, "modeldock.env");
+  const instance = await startApp({ codexHome, envFile });
+  t.after(instance.stop);
+  const post = (body) => fetch(`${instance.base}/api/config/mode`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+  const invalid = await post({ mode: "bogus" });
+  assert.equal(invalid.status, 400);
+
+  const trial = await (await post({ mode: "trial" })).json();
+  assert.equal(trial.enabled, true);
+  assert.equal(trial.trial, true);
+  assert.equal(trial.restartRequired, true);
+  assert.equal(instance.services.modelSelection.mainModel, "deepseek-v4-flash-free");
+  assert.equal(instance.services.modelSelection.visionModel, "mimo-v2.5-free");
+  assert.match(await readFile(envFile, "utf8"), /MODELDOCK_TRIAL=1/);
+
+  const trialStatus = await (await fetch(`${instance.base}/api/status`)).json();
+  assert.equal(trialStatus.config.trial, true);
+  assert.deepEqual(trialStatus.models.options.map((model) => model.id).sort(), ["deepseek-v4-flash-free", "mimo-v2.5-free"]);
+
+  // /api/models cannot escape the trial pair while trial is active.
+  const locked = await (await fetch(`${instance.base}/api/models`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ mainModel: "gpt-5.6-luna@opencode-go", visionModel: "kimi-k2.5" }),
+  })).json();
+  assert.deepEqual(locked.selected, { mainModel: "deepseek-v4-flash-free", visionModel: "mimo-v2.5-free" });
+
+  const on = await (await post({ mode: "on" })).json();
+  assert.equal(on.enabled, true);
+  assert.equal(on.trial, false);
+  assert.match(await readFile(envFile, "utf8"), /MODELDOCK_TRIAL=0/);
+
+  const off = await (await post({ mode: "off" })).json();
+  assert.equal(off.enabled, false);
+  assert.equal(off.trial, false);
+  assert.equal(await readFile(configPath, "utf8"), original, "off restores the original Codex config");
+});
+
 test("api/events streams an initial snapshot", async (t) => {
   const instance = await startApp();
   t.after(instance.stop);

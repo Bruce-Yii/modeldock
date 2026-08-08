@@ -12,12 +12,20 @@
 import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 import { createMcpServer } from "./mcp.mjs";
 import { callMcpTool, gatewayBaseUrl } from "./mcp-client.mjs";
+import { loadConfig } from "./config.mjs";
 
 const baseUrl = gatewayBaseUrl();
+const config = loadConfig();
 
 const upstreams = {
   searchWeb: (args) => callMcpTool("web_search_exa", args, baseUrl),
   inspectVision: (args) => callMcpTool("vision_inspect", args, baseUrl),
+  ...(config.memoryEnabled
+    ? {
+        recallMemory: (args) => callMcpTool("recall_memory", args, baseUrl),
+        storeMemory: (args) => callMcpTool("store_memory", args, baseUrl),
+      }
+    : {}),
 };
 
 const server = createMcpServer({ upstreams });

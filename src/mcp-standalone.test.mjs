@@ -38,9 +38,9 @@ function startMockGateway() {
   });
 }
 
-function startBridge(gatewayUrl) {
+function startBridge(gatewayUrl, extraEnv = {}) {
   const child = spawn(process.execPath, [STANDALONE], {
-    env: { ...process.env, MODELDOCK_GATEWAY_URL: gatewayUrl },
+    env: { ...process.env, MODELDOCK_GATEWAY_URL: gatewayUrl, MODELDOCK_MEMORY: "0", ...extraEnv },
     stdio: ["pipe", "pipe", "pipe"],
   });
   let stderr = "";
@@ -99,6 +99,47 @@ test("stdio bridge lists the four tools locally without a gateway round trip", a
     const names = listed.result.tools.map((tool) => tool.name);
     assert.deepEqual(names.sort(), ["hear", "speak", "vision_inspect", "web_search_exa"]);
     assert.equal(gateway.calls.some((m) => m.method === "tools/list"), false, "tools/list is served locally");
+  } finally {
+    await stopBridge(bridge);
+    await gateway.close();
+  }
+});
+
+test("stdio bridge exposes recall_memory when memory is enabled and forwards calls", async () => {
+  const gateway = await startMockGateway();
+  const bridge = startBridge(gateway.url, { MODELDOCK_MEMORY: "1" });
+  try {
+    await rpc(bridge, 1, "initialize", {
+      protocolVersion: "2025-06-18",
+      capabilities: {},
+      clientInfo: { name: "test", version: "1.0.0" },
+    });
+    notify(bridge, "notifications/initialized", {});
+    const listed = await rpc(bridge, 2, "tools/list", {});
+    const names = listed.result.tools.map((tool) => tool.name);
+    assert.ok(names.includes("recall_memory"), `recall_memory missing from ${names.join(",")}`);
+    assert.ok(names.includes("store_memory"), `store_memory missing from ${names.join(",")}`);
+
+    const called = await rpc(bridge, 3, "tools/call", {
+      name: "recall_memory",
+      arguments: { query: "qcm baseline", scope_dir: "D:\\projects\\stockscan", limit: 5 },
+    });
+    const parsed = JSON.parse(called.result.content[0].text);
+    assert.equal(parsed.forwarded, "recall_memory");
+    assert.deepEqual(parsed.args, { query: "qcm baseline", scope_dir: "D:\\projects\\stockscan", limit: 5 });
+    const forward = gateway.calls.find((m) => m.method === "tools/call");
+    assert.equal(forward.params.name, "recall_memory");
+    assert.deepEqual(forward.params.arguments, { query: "qcm baseline", scope_dir: "D:\\projects\\stockscan", limit: 5 });
+
+    const stored = await rpc(bridge, 4, "tools/call", {
+      name: "store_memory",
+      arguments: { content: "Remember the DIVO baseline.", kind: "baseline", scope_dir: "D:\\projects\\stockscan" },
+    });
+    const storedParsed = JSON.parse(stored.result.content[0].text);
+    assert.equal(storedParsed.forwarded, "store_memory");
+    assert.deepEqual(storedParsed.args, { content: "Remember the DIVO baseline.", kind: "baseline", scope_dir: "D:\\projects\\stockscan" });
+    const storedForward = gateway.calls.filter((m) => m.method === "tools/call").find((m) => m.params.name === "store_memory");
+    assert.equal(storedForward.params.name, "store_memory");
   } finally {
     await stopBridge(bridge);
     await gateway.close();

@@ -65,22 +65,33 @@ const CLASS_HINTS = {
   upstream_unavailable: "The upstream provider is unavailable; retry shortly.",
 };
 
+// Trial-mode guidance appended in place of the generic hint when the request was
+// routed to a zen free model. Trial users always have an OpenCode account (the
+// gateway needs the token), so the registration link is only the last-resort tail
+// of the auth hint; the quota/busy hints point at the rolling window and ON mode.
+const FREE_HINTS = {
+  quota_exhausted: "The zen free endpoint has no quota left; wait for the 5h rolling window or switch to ON mode for a paid provider.",
+  auth_failed: "Check the OpenCode token in Settings; no OpenCode account yet? Register free: https://opencode.ai/go?ref=P2133HRY5J",
+  rate_limited: "The zen free endpoint is rate limiting; retry shortly or switch to ON mode for a paid provider.",
+  upstream_unavailable: "The zen free endpoint is temporarily unavailable; retry shortly or switch to ON mode for a paid provider.",
+};
+
 // Produce the JSON body the gateway forwards to Codex in place of the raw
 // upstream body. Codex renders error.message, so the cleaned detail leads and
 // the hint (when any) follows. The upstream provider is named because Codex
 // only sees "ModelDock" otherwise, and a provider outage reads like a gateway
 // bug.
-export function translateUpstreamError({ provider, status, bodyText }) {
+export function translateUpstreamError({ provider, status, bodyText, free = false }) {
   const { message, type } = parseUpstreamError(bodyText);
   const detail = String(message || "").trim().slice(0, DETAIL_LIMIT) || `Upstream returned ${status}`;
   const classification = classifyUpstreamError(status, detail, type);
-  const hint = CLASS_HINTS[classification];
+  const hint = free ? FREE_HINTS[classification] || CLASS_HINTS[classification] : CLASS_HINTS[classification];
   return {
     classification,
     body: {
       error: {
         type: classification,
-        message: `[${provider}] ${detail}${hint ? ` — ${hint}` : ""}`,
+        message: `[${provider}] ${detail}${hint ? ` - ${hint}` : ""}`,
       },
     },
   };

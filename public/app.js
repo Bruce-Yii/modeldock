@@ -628,7 +628,7 @@ function renderModelOptions(data) {
       visionProviderSelect.append(option);
     }
     visionProviderSelect.value = selectedVisionProvider;
-    visionProviderSelect.disabled = modelBusy;
+    visionProviderSelect.disabled = modelBusy || currentMode === "trial" || Boolean(data.config?.trial);
   }
   const visionFilter = (model) => model.supportsVision && model.provider === (visionProviderSelect?.value || selectedVisionProvider);
   for (const [id, filter, value, sortBy] of [["vision-model-select", visionFilter, selected.visionModel, "balanceScore"]]) {
@@ -647,7 +647,7 @@ function renderModelOptions(data) {
       select.append(option);
     }
     select.value = filtered.some((model) => model.id === value) ? value : (filtered[0]?.id || previous);
-    select.disabled = modelBusy;
+    select.disabled = modelBusy || currentMode === "trial" || Boolean(data.config?.trial);
   }
 }
 
@@ -764,19 +764,22 @@ function awaitRestartThenReload() {
 
 let switchBusy = false;
 let switchState = null;
+let currentMode = "off";
+
+function renderModeSegments(mode) {
+  currentMode = mode;
+  document.querySelectorAll(".mode-segment").forEach((segment) => {
+    segment.disabled = switchBusy;
+    segment.classList.toggle("active", segment.dataset.mode === mode);
+  });
+}
 
 function renderConfigSwitch(data) {
   switchState = data;
-  const toggle = $("proxy-toggle");
-  toggle.checked = Boolean(data.enabled);
-  toggle.disabled = switchBusy;
-  set("switch-label", data.enabled ? t("switch.on") : t("switch.off"));
-  set(
-    "switch-description",
-    data.enabled
-      ? t("switch.descEnabled")
-      : t("switch.descDisabled"),
-  );
+  const mode = data.enabled ? (data.trial ? "trial" : "on") : "off";
+  renderModeSegments(mode);
+  set("switch-description", mode === "trial" ? t("switch.descTrial") : (data.enabled ? t("switch.descEnabled") : t("switch.descDisabled")));
+  set("switch-default", `${t("switch.mode")} - ${t("switch." + mode)}`);
   const message = $("switch-message");
   message.className = "";
   if (data.stateError) {
@@ -796,27 +799,27 @@ async function pollConfig() {
   renderConfigSwitch(await response.json());
 }
 
-async function configAction(action) {
+async function setMode(mode) {
   switchBusy = true;
-  $("proxy-toggle").disabled = true;
+  renderModeSegments(currentMode);
   set("switch-message", t("switch.updating"));
   try {
-    const response = await fetch(`/api/config/${action}`, {
+    const response = await fetch("/api/config/mode", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: "{}",
+      body: JSON.stringify({ mode }),
     });
     const body = await response.json();
-    if (!response.ok) throw new Error(body.error?.message || `Config update ${response.status}`);
+    if (!response.ok) throw new Error(body.error?.message || `Mode update ${response.status}`);
     renderConfigSwitch(body);
   } catch (error) {
     const message = $("switch-message");
     message.textContent = error.message;
     message.className = "error";
-    if (switchState) $("proxy-toggle").checked = Boolean(switchState.enabled);
+    renderModeSegments(switchState ? (switchState.enabled ? (switchState.trial ? "trial" : "on") : "off") : "off");
   } finally {
     switchBusy = false;
-    $("proxy-toggle").disabled = false;
+    renderModeSegments(currentMode);
   }
 }
 
@@ -858,16 +861,18 @@ pollConfig().catch((error) => {
 setInterval(() => poll().catch(() => {}), 15_000);
 setInterval(() => pollConfig().catch(() => {}), 15_000);
 
-$("proxy-toggle").addEventListener("change", async (event) => {
-  const enabling = event.target.checked;
-  const prompt = enabling
-    ? t("confirm.enable")
-    : t("confirm.disable");
-  if (!window.confirm(prompt)) {
-    event.target.checked = !enabling;
-    return;
-  }
-  await configAction(enabling ? "enable" : "disable");
+document.querySelectorAll(".mode-segment").forEach((segment) => {
+  segment.addEventListener("click", async () => {
+    if (switchBusy) return;
+    const mode = segment.dataset.mode;
+    if (mode === currentMode) return;
+    const enabling = mode !== "off";
+    if (enabling !== (currentMode !== "off")) {
+      const prompt = enabling ? t("confirm.enable") : t("confirm.disable");
+      if (!window.confirm(prompt)) return;
+    }
+    await setMode(mode);
+  });
 });
 
 $("settings-autostart-toggle").addEventListener("change", (event) => {
@@ -882,7 +887,20 @@ $("vision-provider-select").addEventListener("change", () => {
   if (options.length) modelSelect.value = options[0].value;
 });
 
-$("restart-ack").addEventListener("click", () => configAction("restart-ack"));
+$("restart-ack").addEventListener("click", async () => {
+  try {
+    const response = await fetch("/api/config/restart-ack", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.error?.message || `Config update ${response.status}`);
+    renderConfigSwitch(body);
+  } catch (error) {
+    window.alert(error.message);
+  }
+});
 $("trace-detail-close").addEventListener("click", () => { $("trace-detail").hidden = true; });
 
 const ttsInstallBtn = $("speech-tts-install");

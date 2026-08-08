@@ -7,7 +7,9 @@
 #   curl -fsSL https://raw.githubusercontent.com/architectds/modeldock/main/scripts/install.sh | sh
 #
 # What it does:
-#   1. Check Node >= 22; if missing, print instructions and exit.
+#   1. Use Node >= 22 (a bundled copy under ~/.modeldock/node wins, then PATH). If
+#      none is found, download the latest Node 22 LTS tarball from nodejs.org, verify
+#      its SHA256 and unpack it under ~/.modeldock/node so the install is self-contained.
 #   2. Lay out the install dir at ~/.modeldock: dist/modeldock.mjs (downloaded from the
 #      newest GitHub Release) + scripts/start-hidden.sh (background launcher used by the
 #      dashboard's start-at-login toggle and the one-click updater).
@@ -20,6 +22,11 @@
 #   MODELDOCK_REPO          GitHub repo                   (default: architectds/modeldock)
 #   MODELDOCK_RELEASE_URL   direct asset URL (overrides MODELDOCK_REPO)
 #   MODELDOCK_PORT          dashboard port                (default: 4097)
+#   MODELDOCK_NODE_PATH     absolute path to a node executable to prefer
+#   MODELDOCK_FORCE_NODE_DOWNLOAD  set to "1" to always (re)install the bundled node
+#   MODELDOCK_NODE_VERSION  pin a Node version, e.g. "22.14.0" (default: latest 22 LTS)
+#   MODELDOCK_NODE_BASE_URL mirror of https://nodejs.org/dist (tests/mirrors)
+#   MODELDOCK_SKIP_START    set to "1" to lay out files without starting the gateway
 #   MODELDOCK_SKIP_OPEN     set to "1" to not open a browser
 
 set -eu
@@ -29,22 +36,107 @@ PORT="${MODELDOCK_PORT:-4097}"
 ROOT="${MODELDOCK_ROOT:-$HOME/.modeldock}"
 RELEASE_URL="${MODELDOCK_RELEASE_URL:-https://github.com/$REPO/releases/latest/download/modeldock.mjs}"
 SKIP_OPEN="${MODELDOCK_SKIP_OPEN:-0}"
+SKIP_START="${MODELDOCK_SKIP_START:-0}"
 
 echo "ModelDock installer"
 
-# 1. Node >= 22
-NODE_MAJOR=""
-if command -v node >/dev/null 2>&1; then
-  NODE_MAJOR=$(node --version | sed -n 's/^v\([0-9]*\).*/\1/p')
+# 1. Node >= 22. Prefer an explicit path, then a bundled Node (installed here on a
+#    previous run, or by the download step below), then a PATH node. When nothing
+#    suitable exists, download the latest Node 22 LTS tarball, verify its SHA256 and
+#    unpack it under "$ROOT/node" - the launcher and restart script resolve the same
+#    bundled-first way, so the installed layout stays self-contained.
+NODE_BIN=""
+NODE_SYSTEM_VERSION=""
+if [ -n "${MODELDOCK_NODE_PATH:-}" ] && [ -x "$MODELDOCK_NODE_PATH" ]; then
+  NODE_BIN="$MODELDOCK_NODE_PATH"
 fi
-if [ -z "$NODE_MAJOR" ] || [ "$NODE_MAJOR" -lt 22 ]; then
+if [ -z "$NODE_BIN" ]; then
+  for d in "$ROOT"/node/v*; do
+    [ -d "$d" ] || continue
+    [ -x "$d/bin/node" ] || continue
+    NODE_BIN="$d/bin/node"
+  done
+fi
+if [ -z "$NODE_BIN" ] && command -v node >/dev/null 2>&1; then
+  NODE_MAJOR="$(node --version | sed -n 's/^v\([0-9]*\).*/\1/p')"
+  if [ -n "$NODE_MAJOR" ] && [ "$NODE_MAJOR" -ge 22 ]; then
+    NODE_SYSTEM_VERSION="$(node --version)"
+    NODE_BIN="$(command -v node)"
+  fi
+fi
+if [ "${MODELDOCK_FORCE_NODE_DOWNLOAD:-0}" = "1" ]; then
+  NODE_BIN=""
+fi
+if [ -z "$NODE_BIN" ]; then
+  NODE_BASE="${MODELDOCK_NODE_BASE_URL:-https://nodejs.org/dist}"
+  NODE_VER="${MODELDOCK_NODE_VERSION:-}"
+  if [ -z "$NODE_VER" ]; then
+    echo "  resolving latest Node 22 LTS..."
+    NODE_VER="$(curl -fsSL --max-time 30 "$NODE_BASE/index.json" 2>/dev/null | tr '{' '\n' | grep '"version":"v22\.' | grep '"lts":"' | sed -n 's/.*"version":"\(v22\.[0-9]*\.[0-9]*\)".*/\1/p' | head -n 1 || true)"
+  fi
+  case "$NODE_VER" in
+    v[0-9]*.[0-9]*.[0-9]*) ;;
+    ?*) NODE_VER="v$NODE_VER" ;;
+  esac
+  case "$NODE_VER" in
+    v[0-9]*.[0-9]*.[0-9]*) ;;
+    *) echo "ERROR: invalid Node version: ${NODE_VER:-<empty>} (set MODELDOCK_NODE_VERSION to pin one)" >&2; exit 1 ;;
+  esac
+  case "$(uname -s)" in
+    Darwin) NODE_OS="darwin" ;;
+    *) NODE_OS="linux" ;;
+  esac
+  case "$(uname -m)" in
+    aarch64|arm64) NODE_ARCH="arm64" ;;
+    *) NODE_ARCH="x64" ;;
+  esac
+  TARBALL="node-$NODE_VER-$NODE_OS-$NODE_ARCH.tar.gz"
+  STAGE="$ROOT/node/.tmp-$NODE_VER"
+  TARGET="$ROOT/node/$NODE_VER"
+  # Preserve the exit status: a plain cleanup trap would make a failing
+  # `exit 1` return 0 under dash (the trap's own status becomes the shell's).
+  trap 'rc=$?; [ -n "${STAGE:-}" ] && rm -rf "$STAGE"; exit $rc' EXIT
+  mkdir -p "$STAGE"
+  echo "  downloading $TARBALL..."
+  curl -fL --progress-bar "$NODE_BASE/$NODE_VER/$TARBALL" -o "$STAGE/$TARBALL"
+  EXPECTED="$(curl -fsSL --max-time 30 "$NODE_BASE/$NODE_VER/SHASUMS256.txt" | grep " $TARBALL$" | awk '{print $1}')"
+  if [ -z "$EXPECTED" ]; then
+    echo "ERROR: SHA256 for $TARBALL not found in SHASUMS256.txt" >&2
+    exit 1
+  fi
+  if command -v shasum >/dev/null 2>&1; then
+    ACTUAL="$(shasum -a 256 "$STAGE/$TARBALL" | awk '{print $1}')"
+  else
+    ACTUAL="$(sha256sum "$STAGE/$TARBALL" | awk '{print $1}')"
+  fi
+  if [ "$ACTUAL" != "$EXPECTED" ]; then
+    echo "ERROR: SHA256 mismatch for $TARBALL" >&2
+    exit 1
+  fi
+  echo "  extracting..."
+  tar -xzf "$STAGE/$TARBALL" -C "$STAGE"
+  rm -rf "$TARGET"
+  mv "$STAGE/node-$NODE_VER-$NODE_OS-$NODE_ARCH" "$TARGET"
+  rm -rf "$STAGE"
+  NODE_BIN="$TARGET/bin/node"
+  if [ ! -x "$NODE_BIN" ]; then
+    echo "ERROR: extracted archive is missing bin/node" >&2
+    exit 1
+  fi
+  echo "  bundled node $NODE_VER installed at $TARGET"
+fi
+if [ -z "$NODE_BIN" ] || [ ! -x "$NODE_BIN" ]; then
   echo ""
-  echo "Node.js 22 or newer is required but was not found."
+  echo "Node.js 22 or newer is required but could not be installed automatically."
   echo "Install the LTS version from https://nodejs.org (or: brew install node),"
   echo "reopen your terminal, then run this installer again."
   exit 1
 fi
-echo "  node $(node --version) - OK"
+if [ -n "$NODE_SYSTEM_VERSION" ]; then
+  echo "  node $NODE_SYSTEM_VERSION - OK"
+else
+  echo "  node $NODE_BIN - OK"
+fi
 
 # 2. Install layout
 mkdir -p "$ROOT/dist" "$ROOT/scripts"
@@ -59,6 +151,9 @@ echo "  saved $BUNDLE"
 LAUNCHER="$ROOT/scripts/start-hidden.sh"
 cat > "$LAUNCHER" <<'EOF'
 #!/bin/sh
+# Start the ModelDock gateway in the background with no attached terminal and the
+# package root as the working directory. Used by the dashboard and for manual
+# background starts on macOS/Linux.
 set -e
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 if [ -f "$ROOT/dist/modeldock.mjs" ]; then
@@ -76,7 +171,27 @@ if curl -s -o /dev/null --max-time 2 "http://127.0.0.1:$PORT/healthz"; then
 fi
 NODE_BIN="${MODELDOCK_NODE_PATH:-}"
 if [ -z "$NODE_BIN" ] || [ ! -x "$NODE_BIN" ]; then
-  NODE_BIN="$(command -v node)"
+  # Bundled Node installed by install.sh (or a previous run) wins over PATH so the
+  # installed layout stays self-contained; pick the highest version if several exist.
+  BEST_BIN=""
+  BEST_V=""
+  for d in "$ROOT"/node/v*; do
+    [ -d "$d" ] && [ -x "$d/bin/node" ] || continue
+    v="$(basename "$d" | sed 's/^v//')"
+    if [ -z "$BEST_V" ] || [ "$(printf '%s\n%s\n' "$v" "$BEST_V" | sort -t. -k1,1n -k2,2n -k3,3n | tail -n 1)" = "$v" ]; then
+      BEST_BIN="$d/bin/node"
+      BEST_V="$v"
+    fi
+  done
+  if [ -n "$BEST_BIN" ]; then
+    NODE_BIN="$BEST_BIN"
+  else
+    NODE_BIN="$(command -v node)"
+  fi
+fi
+if [ -z "$NODE_BIN" ] || [ ! -x "$NODE_BIN" ]; then
+  echo "ERROR: node not found; install Node 22+ or re-run the ModelDock installer" >&2
+  exit 1
 fi
 cd "$ROOT"
 # Log instead of discarding: a background start that dies (bad node, port in use,
@@ -98,7 +213,7 @@ cat > "$RESTART" <<'EOF'
 # What it does:
 #   1. Reads MODELDOCK_PORT from <modeldock>\.env (default 4097).
 #   2. Stops the process listening on that port (if any).
-#   3. Starts a fresh detached node process from the project root.
+#   3. Starts a fresh detached `node src/server.mjs` from the project root.
 #   4. Waits for /healthz and reports the result.
 
 $ErrorActionPreference = "Stop"
@@ -159,9 +274,24 @@ New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 $stdout = Join-Path $logDir "gateway.log"
 $stderr = Join-Path $logDir "gateway.err.log"
 
-$nodeExe = (Get-Command node -ErrorAction SilentlyContinue).Source
+# Prefer an explicit path, then a bundled Node under <root>\node (the installer
+# downloads Node 22 LTS there when none is on PATH), then PATH.
+$nodeExe = $null
+if ($env:MODELDOCK_NODE_PATH -and (Test-Path -LiteralPath $env:MODELDOCK_NODE_PATH)) { $nodeExe = $env:MODELDOCK_NODE_PATH }
 if (-not $nodeExe) {
-  Write-Output "ERROR: node.exe not found on PATH"
+  $bestDir = @(Get-ChildItem -LiteralPath (Join-Path $root "node") -Directory -ErrorAction SilentlyContinue |
+      Where-Object { $_.Name -match "^v\d+\.\d+\.\d+$" } |
+      Sort-Object @{ Expression = {
+              if ($_.Name -match "^v(\d+)\.(\d+)\.(\d+)$") { [long]$Matches[1] * 1000000 + [long]$Matches[2] * 1000 + [long]$Matches[3] } else { -1 }
+          }; Descending = $true } |
+      Select-Object -First 1)
+  if ($bestDir -and (Test-Path -LiteralPath (Join-Path $bestDir.FullName "node.exe"))) {
+    $nodeExe = Join-Path $bestDir.FullName "node.exe"
+  }
+}
+if (-not $nodeExe) { $nodeExe = (Get-Command node -ErrorAction SilentlyContinue).Source }
+if (-not $nodeExe) {
+  Write-Output "ERROR: node.exe not found; install Node 22+ or re-run the ModelDock installer"
   exit 1
 }
 
@@ -263,8 +393,12 @@ case "$choice" in 1) restart_gateway ;; 2) restore_native ;; q|Q|"") exit 0 ;; *
 EOF
 chmod +x "$RECOVER"
 
-# 3. Start (unless already running) and point at the dashboard
-if curl -s -o /dev/null --max-time 2 "http://127.0.0.1:$PORT/healthz"; then
+# 3. Start (unless already running) and point at the dashboard.
+#    MODELDOCK_SKIP_START=1 skips the launch (used by the install mock test, which
+#    feeds the installer a fake node that may not be executable).
+if [ "$SKIP_START" = "1" ]; then
+  echo "  MODELDOCK_SKIP_START=1 - not starting the gateway."
+elif curl -s -o /dev/null --max-time 2 "http://127.0.0.1:$PORT/healthz"; then
   echo "  ModelDock is already running on port $PORT - keeping it."
 else
   echo "  starting ModelDock in the background..."

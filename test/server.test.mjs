@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
+import { mkdtempSync, rmSync } from "node:fs";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { codexModelCatalog, createApp, createServices } from "../src/server.mjs";
 import { loadConfig } from "../src/config.mjs";
@@ -30,7 +31,9 @@ test("publishes a complete Codex model catalog schema", () => {
 });
 
 test("serves both local MCP tools over Streamable HTTP", async (t) => {
-  const config = { ...loadConfig(), goToken: "test-token" };
+  // Keep the tool surface hermetic: the memory vault is opt-in, so the default
+  // list is exactly the four media/web tools regardless of the local .env.
+  const config = { ...loadConfig(), goToken: "test-token", memoryEnabled: false };
   const instance = createApp(createServices(config));
   const server = instance.app.listen(0, "127.0.0.1");
   await new Promise((resolve) => server.once("listening", resolve));
@@ -44,4 +47,33 @@ test("serves both local MCP tools over Streamable HTTP", async (t) => {
   t.after(() => client.close());
   const result = await client.listTools();
   assert.deepEqual(result.tools.map((tool) => tool.name).sort(), ["hear", "speak", "vision_inspect", "web_search_exa"]);
+});
+
+test("serves the memory view when the vault is enabled", async (t) => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-server-memory-"));
+  const config = {
+    ...loadConfig(),
+    goToken: "test-token",
+    memoryEnabled: true,
+    memoryDir: dir,
+    memoryRefreshHours: 0,
+    codexHome: path.join(dir, "codex"),
+  };
+  const instance = createApp(createServices(config));
+  const server = instance.app.listen(0, "127.0.0.1");
+  await new Promise((resolve) => server.once("listening", resolve));
+  t.after(async () => {
+    await instance.close();
+    server.close();
+    instance.services.memoryStore?.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const res = await fetch(`http://127.0.0.1:${server.address().port}/api/memory/view`);
+  assert.equal(res.status, 200);
+  const data = await res.json();
+  assert.equal(data.enabled, true);
+  assert.ok(Array.isArray(data.content));
+  assert.ok(Array.isArray(data.events));
+  assert.equal(data.status.dbPath, path.join(dir, "memory.db"));
 });

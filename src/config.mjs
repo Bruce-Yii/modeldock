@@ -250,6 +250,10 @@ export function loadConfig() {
     mainModel,
     visionModel,
     visionFallbackModel,
+    // Trial mode: the fixed zen-free model pair (deepseek-v4-flash-free /
+    // mimo-v2.5-free) on the opencode-go profile with a free-only catalog and
+    // trial-specific upstream error copy. Managed by /api/config/mode.
+    trialMode: process.env.MODELDOCK_TRIAL === "1",
     mcpTransport,
     visionTimeoutMs: integer("MODELDOCK_VISION_TIMEOUT_MS", 90_000, { min: 1_000, max: 300_000 }),
     mediaTtlMs: integer("MODELDOCK_MEDIA_TTL_MS", 3_600_000, { min: 60_000 }),
@@ -258,6 +262,13 @@ export function loadConfig() {
     mediaDir: process.env.MODELDOCK_MEDIA_DIR
       ? path.resolve(process.env.MODELDOCK_MEDIA_DIR)
       : path.join(os.homedir(), ".modeldock", "media"),
+    // Persistent memory vault (recall_memory tool). Off by default: the gateway
+    // stays thin until MODELDOCK_MEMORY=1 opts into capture + index + recall.
+    memoryEnabled: ["1", "true", "on", "yes"].includes(String(process.env.MODELDOCK_MEMORY || "").toLowerCase()),
+    memoryDir: process.env.MODELDOCK_MEMORY_DIR
+      ? path.resolve(process.env.MODELDOCK_MEMORY_DIR)
+      : path.join(os.homedir(), ".modeldock", "memory"),
+    memoryRefreshHours: Number(process.env.MODELDOCK_MEMORY_REFRESH_HOURS || 6),
     exaMcpUrl: normalizedBaseUrl(process.env.EXA_MCP_URL || "https://mcp.exa.ai/mcp"),
     exaApiKey: process.env.EXA_API_KEY || "",
     recentLimit: integer("MODELDOCK_RECENT_LIMIT", 50, { min: 10, max: 500 }),

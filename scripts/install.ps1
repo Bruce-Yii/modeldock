@@ -6,7 +6,9 @@
 #   powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/architectds/modeldock/main/scripts/install.ps1 | iex"
 #
 # What it does:
-#   1. Check Node >= 22; if missing, open nodejs.org and exit with instructions.
+#   1. Use Node >= 22 (a bundled copy under <root>\node wins, then PATH). If none
+#      is found, download the latest Node 22 LTS zip from nodejs.org, verify its
+#      SHA256 and unpack it under <root>\node so the install is self-contained.
 #   2. Lay out the install dir at ~\.modeldock: dist\modeldock.mjs (downloaded from the
 #      newest GitHub Release) + scripts\start-hidden.ps1 (hidden launcher used by the
 #      dashboard's start-at-login toggle and the one-click updater).
@@ -18,6 +20,11 @@
 #   MODELDOCK_REPO          GitHub repo                   (default: architectds/modeldock)
 #   MODELDOCK_RELEASE_URL   direct asset URL (overrides MODELDOCK_REPO)
 #   MODELDOCK_PORT          dashboard port                (default: 4097)
+#   MODELDOCK_NODE_PATH     absolute path to a node executable to prefer
+#   MODELDOCK_FORCE_NODE_DOWNLOAD  set to "1" to always (re)install the bundled node
+#   MODELDOCK_NODE_VERSION  pin a Node version, e.g. "22.14.0" (default: latest 22 LTS)
+#   MODELDOCK_NODE_BASE_URL mirror of https://nodejs.org/dist (tests/mirrors)
+#   MODELDOCK_SKIP_START    set to "1" to lay out files without starting the gateway
 #   MODELDOCK_SKIP_OPEN     set to "1" to not open a browser
 
 $ErrorActionPreference = "Stop"
@@ -26,24 +33,99 @@ $port = if ($env:MODELDOCK_PORT) { [int]$env:MODELDOCK_PORT } else { 4097 }
 $root = if ($env:MODELDOCK_ROOT) { $env:MODELDOCK_ROOT } else { Join-Path $env:USERPROFILE ".modeldock" }
 $releaseUrl = if ($env:MODELDOCK_RELEASE_URL) { $env:MODELDOCK_RELEASE_URL } else { "https://github.com/$repo/releases/latest/download/modeldock.mjs" }
 $skipOpen = ($env:MODELDOCK_SKIP_OPEN -eq "1")
+$skipStart = ($env:MODELDOCK_SKIP_START -eq "1")
+$ProgressPreference = "SilentlyContinue"
 
 Write-Host "ModelDock installer" -ForegroundColor Cyan
 
-# 1. Node >= 22
-$nodeOk = $false
-try {
-    $nodeVersion = (& node --version) 2>$null
-    if ($nodeVersion -match "^v(\d+)\.") { $nodeOk = [int]$Matches[1] -ge 22 }
-} catch {}
-if (-not $nodeOk) {
+# 1. Node >= 22. Prefer an explicit path, then a bundled Node (installed here on a
+#    previous run, or by the download step below), then a PATH node. When nothing
+#    suitable exists, download the latest Node 22 LTS zip, verify its SHA256 and
+#    unpack it under <root>\node - the launcher and restart script resolve the same
+#    bundled-first way, so the installed layout stays self-contained.
+$nodeExe = $null
+$systemNodeVersion = $null
+if ($env:MODELDOCK_NODE_PATH -and (Test-Path -LiteralPath $env:MODELDOCK_NODE_PATH)) { $nodeExe = $env:MODELDOCK_NODE_PATH }
+if (-not $nodeExe) {
+    $bestDir = @(Get-ChildItem -LiteralPath (Join-Path $root "node") -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match "^v\d+\.\d+\.\d+$" } |
+        Sort-Object @{ Expression = {
+                if ($_.Name -match "^v(\d+)\.(\d+)\.(\d+)$") { [long]$Matches[1] * 1000000 + [long]$Matches[2] * 1000 + [long]$Matches[3] } else { -1 }
+            }; Descending = $true } |
+        Select-Object -First 1)
+    if ($bestDir -and (Test-Path -LiteralPath (Join-Path $bestDir.FullName "node.exe"))) {
+        $nodeExe = Join-Path $bestDir.FullName "node.exe"
+    }
+}
+if (-not $nodeExe) {
+    try {
+        $v = (& node --version) 2>$null
+        if ($v -match "^v(\d+)\." -and [int]$Matches[1] -ge 22) {
+            $systemNodeVersion = $v
+            $nodeExe = (Get-Command node -ErrorAction SilentlyContinue).Source
+        }
+    } catch {}
+}
+if ($env:MODELDOCK_FORCE_NODE_DOWNLOAD -eq "1") { $nodeExe = $null }
+if (-not $nodeExe) {
+    try {
+        $nodeBase = if ($env:MODELDOCK_NODE_BASE_URL) { $env:MODELDOCK_NODE_BASE_URL } else { "https://nodejs.org/dist" }
+        $nodeVer = $env:MODELDOCK_NODE_VERSION
+        if ($nodeVer -and -not $nodeVer.StartsWith("v")) { $nodeVer = "v" + $nodeVer }
+        if (-not $nodeVer) {
+            Write-Host "  resolving latest Node 22 LTS..."
+            $index = Invoke-RestMethod -Uri "$nodeBase/index.json" -TimeoutSec 30
+            foreach ($entry in $index) {
+                if ($entry.lts -and $entry.version -match "^v22\.\d+\.\d+$") { $nodeVer = $entry.version; break }
+            }
+        }
+        if (-not $nodeVer -or $nodeVer -notmatch "^v\d+\.\d+\.\d+$") {
+            throw "Could not resolve a Node 22 LTS version from $nodeBase/index.json (set MODELDOCK_NODE_VERSION to pin one)"
+        }
+        $arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "x64" }
+        $zipName = "node-$nodeVer-win-$arch.zip"
+        $stageDir = Join-Path $root "node\.tmp-$nodeVer"
+        $targetDir = Join-Path $root "node\$nodeVer"
+        New-Item -ItemType Directory -Force $stageDir | Out-Null
+        try {
+            Write-Host ("  downloading {0} ..." -f $zipName)
+            Invoke-WebRequest -UseBasicParsing -Uri "$nodeBase/$nodeVer/$zipName" -OutFile (Join-Path $stageDir $zipName)
+            Write-Host "  verifying SHA256..."
+            $shas = (Invoke-WebRequest -UseBasicParsing -Uri "$nodeBase/$nodeVer/SHASUMS256.txt" -TimeoutSec 30).Content
+            $expected = $null
+            foreach ($line in ($shas -split "`r?`n")) {
+                if ($line -match "^([0-9a-fA-F]{64})\s+\*?$([regex]::Escape($zipName))\s*$") { $expected = $Matches[1]; break }
+            }
+            if (-not $expected) { throw "SHA256 for $zipName not found in SHASUMS256.txt" }
+            $actual = (Get-FileHash -LiteralPath (Join-Path $stageDir $zipName) -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -ne $expected.ToLowerInvariant()) { throw "SHA256 mismatch for $zipName (expected $expected)" }
+            Write-Host "  extracting..."
+            Expand-Archive -LiteralPath (Join-Path $stageDir $zipName) -DestinationPath $stageDir -Force
+            $extracted = Join-Path $stageDir "node-$nodeVer-win-$arch"
+            if (-not (Test-Path -LiteralPath (Join-Path $extracted "node.exe"))) { throw "Extracted archive is missing node.exe" }
+            if (Test-Path -LiteralPath $targetDir) { Remove-Item -LiteralPath $targetDir -Recurse -Force }
+            Move-Item -LiteralPath $extracted -Destination $targetDir
+            $nodeExe = Join-Path $targetDir "node.exe"
+            Write-Host ("  bundled node {0} installed at {1}" -f $nodeVer, $targetDir)
+        } finally {
+            Remove-Item -LiteralPath $stageDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    } catch {
+        Write-Host ""
+        Write-Host ("Could not download Node automatically: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+        $nodeExe = $null
+    }
+}
+if (-not $nodeExe -or -not (Test-Path -LiteralPath $nodeExe)) {
     Write-Host ""
-    Write-Host "Node.js 22 or newer is required but was not found." -ForegroundColor Yellow
+    Write-Host "Node.js 22 or newer is required but could not be installed automatically." -ForegroundColor Yellow
     Write-Host "Install the LTS version from https://nodejs.org , reopen your terminal,"
     Write-Host "then run this installer again."
-    Start-Process "https://nodejs.org"
+    if (-not $skipOpen) { Start-Process "https://nodejs.org" }
     exit 1
 }
-Write-Host "  node $nodeVersion - OK"
+if ($systemNodeVersion) { Write-Host "  node $systemNodeVersion - OK" }
+else { Write-Host "  node $nodeExe - OK" }
 
 # 2. Install layout
 New-Item -ItemType Directory -Force (Join-Path $root "dist") | Out-Null
@@ -58,13 +140,46 @@ Write-Host ("  saved {0} ({1:N1} MB)" -f $bundle, ((Get-Item $bundle).Length / 1
 # installer so a single-file download still gets autostart + self-update restarts.
 $launcher = Join-Path $root "scripts\start-hidden.ps1"
 @'
+# Start the ModelDock gateway hidden (no console window) with the package root as the
+# working directory. Used by the autostart Run key entry and by dashboard.bat.
+# Prefers the built single-file bundle (dist/modeldock.mjs); falls back to the source
+# entry in a git checkout.
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 $bundle = Join-Path $root "dist\modeldock.mjs"
 $server = Join-Path $root "src\server.mjs"
 if (Test-Path -LiteralPath $bundle) { $server = $bundle }
+
+# Prefer an explicit path, then a bundled Node under <root>\node (the installer
+# downloads Node 22 LTS there when none is on PATH), then PATH.
+$nodeExe = $null
+if ($env:MODELDOCK_NODE_PATH -and (Test-Path -LiteralPath $env:MODELDOCK_NODE_PATH)) { $nodeExe = $env:MODELDOCK_NODE_PATH }
+if (-not $nodeExe) {
+    $bestDir = @(Get-ChildItem -LiteralPath (Join-Path $root "node") -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match "^v\d+\.\d+\.\d+$" } |
+        Sort-Object @{ Expression = {
+                if ($_.Name -match "^v(\d+)\.(\d+)\.(\d+)$") { [long]$Matches[1] * 1000000 + [long]$Matches[2] * 1000 + [long]$Matches[3] } else { -1 }
+            }; Descending = $true } |
+        Select-Object -First 1)
+    if ($bestDir -and (Test-Path -LiteralPath (Join-Path $bestDir.FullName "node.exe"))) {
+        $nodeExe = Join-Path $bestDir.FullName "node.exe"
+    }
+}
+if (-not $nodeExe) { $nodeExe = (Get-Command node -ErrorAction SilentlyContinue).Source }
+if (-not $nodeExe) {
+    Write-Output "ERROR: node.exe not found; install Node 22+ or re-run the ModelDock installer"
+    exit 1
+}
+
+# Log instead of discarding: a hidden start that dies (node missing, port taken, bad
+# bundle) is otherwise completely silent. cmd.exe does the redirection so Start-Process
+# stays on the ShellExecute path - its -RedirectStandard* parameters switch to
+# CreateProcess with handle inheritance, which leaves the caller's pipes open and hangs
+# any parent waiting for them to close. cmd /c strips the first/last quote when the
+# command starts with a quoted program path, so wrap the whole command in one extra
+# pair of quotes (the ""prog" args" form).
 $log = Join-Path $root "modeldock.log"
-Start-Process -FilePath "cmd.exe" -ArgumentList "/c", "node `"$server`" >> `"$log`" 2>&1" -WorkingDirectory $root -WindowStyle Hidden
+Start-Process -FilePath "cmd.exe" -ArgumentList "/c", "`"`"$nodeExe`" `"$server`" >> `"$log`" 2>&1`"" -WorkingDirectory $root -WindowStyle Hidden
 '@ | Out-File -FilePath $launcher -Encoding ascii
 
 # Restart script (same content as the repo's scripts/restart.ps1). Written by the
@@ -80,7 +195,7 @@ $restart = Join-Path $root "scripts\restart.ps1"
 # What it does:
 #   1. Reads MODELDOCK_PORT from <modeldock>\.env (default 4097).
 #   2. Stops the process listening on that port (if any).
-#   3. Starts a fresh detached node process from the project root.
+#   3. Starts a fresh detached `node src/server.mjs` from the project root.
 #   4. Waits for /healthz and reports the result.
 
 $ErrorActionPreference = "Stop"
@@ -141,9 +256,24 @@ New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 $stdout = Join-Path $logDir "gateway.log"
 $stderr = Join-Path $logDir "gateway.err.log"
 
-$nodeExe = (Get-Command node -ErrorAction SilentlyContinue).Source
+# Prefer an explicit path, then a bundled Node under <root>\node (the installer
+# downloads Node 22 LTS there when none is on PATH), then PATH.
+$nodeExe = $null
+if ($env:MODELDOCK_NODE_PATH -and (Test-Path -LiteralPath $env:MODELDOCK_NODE_PATH)) { $nodeExe = $env:MODELDOCK_NODE_PATH }
 if (-not $nodeExe) {
-  Write-Output "ERROR: node.exe not found on PATH"
+  $bestDir = @(Get-ChildItem -LiteralPath (Join-Path $root "node") -Directory -ErrorAction SilentlyContinue |
+      Where-Object { $_.Name -match "^v\d+\.\d+\.\d+$" } |
+      Sort-Object @{ Expression = {
+              if ($_.Name -match "^v(\d+)\.(\d+)\.(\d+)$") { [long]$Matches[1] * 1000000 + [long]$Matches[2] * 1000 + [long]$Matches[3] } else { -1 }
+          }; Descending = $true } |
+      Select-Object -First 1)
+  if ($bestDir -and (Test-Path -LiteralPath (Join-Path $bestDir.FullName "node.exe"))) {
+    $nodeExe = Join-Path $bestDir.FullName "node.exe"
+  }
+}
+if (-not $nodeExe) { $nodeExe = (Get-Command node -ErrorAction SilentlyContinue).Source }
+if (-not $nodeExe) {
+  Write-Output "ERROR: node.exe not found; install Node 22+ or re-run the ModelDock installer"
   exit 1
 }
 
@@ -226,21 +356,27 @@ try {
 } catch { Write-Error $_.Exception.Message; exit 1 }
 '@ | Out-File -FilePath $recover -Encoding ascii
 
-# 3. Start (unless already running) and open the dashboard
-$running = $false
-try {
-    $response = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$port/healthz" -TimeoutSec 2
-    $running = $true
-} catch {
-    # /healthz answers 503 until a token is configured - that still means running
-    if ($_.Exception.Response) { $running = $true }
-}
-if ($running) {
-    Write-Host "  ModelDock is already running on port $port - keeping it."
+# 3. Start (unless already running) and open the dashboard. MODELDOCK_SKIP_START=1
+#    skips the launch entirely (used by the install mock test, which feeds the
+#    installer a fake node.exe that Windows cannot execute).
+if ($skipStart) {
+    Write-Host "  MODELDOCK_SKIP_START=1 - not starting the gateway."
 } else {
-    Write-Host "  starting ModelDock in the background..."
-    & powershell -NoProfile -ExecutionPolicy Bypass -File $launcher
-    Start-Sleep -Seconds 3
+    $running = $false
+    try {
+        $response = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$port/healthz" -TimeoutSec 2
+        $running = $true
+    } catch {
+        # /healthz answers 503 until a token is configured - that still means running
+        if ($_.Exception.Response) { $running = $true }
+    }
+    if ($running) {
+        Write-Host "  ModelDock is already running on port $port - keeping it."
+    } else {
+        Write-Host "  starting ModelDock in the background..."
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $launcher
+        Start-Sleep -Seconds 3
+    }
 }
 
 Write-Host ""

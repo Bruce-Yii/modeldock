@@ -39,3 +39,21 @@ test("translateUpstreamError names the provider and appends the right hint", () 
   const empty = translateUpstreamError({ provider: "opencode-go", status: 500, bodyText: "" });
   assert.match(empty.body.error.message, /Upstream returned 500/);
 });
+
+test("free upstream errors carry trial-mode guidance instead of the generic hint", () => {
+  const quota = translateUpstreamError({ provider: "opencode-go", status: 503, bodyText: '{"error":{"message":"free quota exhausted"}}', free: true });
+  assert.equal(quota.classification, "quota_exhausted");
+  assert.match(quota.body.error.message, /zen free endpoint/);
+  assert.match(quota.body.error.message, /5h rolling window/);
+  assert.match(quota.body.error.message, /ON mode/);
+
+  const auth = translateUpstreamError({ provider: "opencode-go", status: 401, bodyText: '{"error":{"message":"invalid token"}}', free: true });
+  assert.equal(auth.classification, "auth_failed");
+  assert.match(auth.body.error.message, /OpenCode token/);
+  assert.match(auth.body.error.message, /opencode\.ai\/go\?ref=/);
+
+  // The same provider and status without the free flag keeps the generic hint.
+  const plain = translateUpstreamError({ provider: "opencode-go", status: 503, bodyText: '{"error":{"message":"boom"}}' });
+  assert.match(plain.body.error.message, /unavailable; retry shortly/);
+  assert.doesNotMatch(plain.body.error.message, /zen free endpoint/);
+});

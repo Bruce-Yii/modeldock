@@ -42,7 +42,36 @@ export function parseMcpTextResult(body) {
   return "";
 }
 
-export function createUpstreams({ config, metrics, mediaStore, getVisionModel = () => config.visionModel }) {
+export function createUpstreams({ config, metrics, mediaStore, memoryStore = null, getVisionModel = () => config.visionModel }) {
+  async function recallMemory(args) {
+    const finish = metrics.begin("memory", { operation: "recall_memory", query: String(args.query || "").slice(0, 160) });
+    try {
+      const result = memoryStore.search({ query: args.query, scopeDir: args.scope_dir, limit: args.limit || 8 });
+      finish({ ok: true, hits: result.count, outputBytes: Buffer.byteLength(result.text) });
+      return result.text;
+    } catch (error) {
+      finish({ ok: false, error: error.message });
+      throw error;
+    }
+  }
+
+  async function storeMemory(args) {
+    const finish = metrics.begin("memory", { operation: "store_memory", kind: String(args.kind || "knowledge") });
+    try {
+      const result = memoryStore.storeMemory({
+        content: args.content,
+        scopeDir: args.scope_dir,
+        kind: args.kind,
+        key: args.key,
+      });
+      finish({ ok: true, stored: !result.skipped, revision: result.revision, units: result.units || 0 });
+      return result;
+    } catch (error) {
+      finish({ ok: false, error: error.message });
+      throw error;
+    }
+  }
+
   async function searchWeb(args) {
     const finish = metrics.begin("web", { operation: "web_search_exa", query: args.query.slice(0, 160) });
     const endpoint = new URL(config.exaMcpUrl);
@@ -206,5 +235,5 @@ export function createUpstreams({ config, metrics, mediaStore, getVisionModel = 
     throw new Error(message);
   }
 
-  return { searchWeb, inspectVision };
+  return { searchWeb, inspectVision, ...(memoryStore ? { recallMemory, storeMemory } : {}) };
 }

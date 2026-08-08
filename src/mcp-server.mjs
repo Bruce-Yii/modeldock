@@ -4,6 +4,7 @@ import { MediaStore } from "./media-store.mjs";
 import { Metrics } from "./metrics.mjs";
 import { createMcpNodeHandler } from "./mcp.mjs";
 import { createUpstreams } from "./upstreams.mjs";
+import { memoryStoreFor } from "./memory.mjs";
 
 function urlHost(host) {
   return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
@@ -26,10 +27,12 @@ export async function startMcpServer(config = loadConfig(), {
     maxEntries: config.mediaMaxEntries,
     stateDir: config.mediaDir,
   });
+  const memoryStore = injectedUpstreams ? null : memoryStoreFor(config);
   const upstreams = injectedUpstreams || createUpstreams({
     config,
     metrics,
     mediaStore,
+    memoryStore,
     getVisionModel: () => config.visionModel,
     getSessionSeed: () => null,
   });
@@ -66,7 +69,7 @@ export async function startMcpServer(config = loadConfig(), {
   return {
     app,
     server,
-    services: { config, metrics, mediaStore, upstreams },
+    services: { config, metrics, mediaStore, upstreams, memoryStore },
     url: `http://${urlHost(config.host)}:${actualPort}`,
     async stop() {
       await new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));

@@ -40,11 +40,11 @@
             <div class="control-title"><h2 data-i18n="switch.title">Use other API in Codex</h2><span id="switch-default" class="default-pill" data-i18n="switch.defaultPill">DEFAULT · OFF</span></div>
             <p id="switch-description">Codex is using its own configuration. Enabling backs it up and selects the local ModelDock provider.</p>
           </div>
-          <label class="toggle" for="proxy-toggle">
-            <input id="proxy-toggle" type="checkbox" role="switch" aria-label="Use other API in Codex" />
-            <span class="toggle-track"><i></i></span>
-            <b id="switch-label">Off</b>
-          </label>
+          <div class="mode-picker" role="radiogroup" aria-label="Codex mode">
+            <button type="button" class="mode-segment" data-mode="off" data-i18n="switch.off">Off</button>
+            <button type="button" class="mode-segment" data-mode="trial" data-i18n="switch.trial">Trial</button>
+            <button type="button" class="mode-segment" data-mode="on" data-i18n="switch.on">On</button>
+          </div>
         </div>
         <div class="control-defaults" aria-label="API Bridge defaults">
           <div>

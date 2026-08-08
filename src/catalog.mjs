@@ -1,6 +1,6 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { profileById } from "./profiles.mjs";
+import { bareModelId, profileById, TRIAL_MAIN_MODEL, TRIAL_VISION_MODEL } from "./profiles.mjs";
 import { readNativeCatalog } from "./native-catalog.mjs";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -14,6 +14,8 @@ export function baseInstructionsFor(config) {
     "IMPORTANT: To perform any action (read a file, run a command, search, edit, inspect an image), you MUST emit a function_call for the appropriate tool in THIS turn. Never describe an action in text and expect it to be performed. Never say 'let me read X' or 'I will do X' - emit the tool call now. If a previous turn's tool result was missing, re-emit the call.",
     "Vision guidance (MANDATORY): you are a TEXT-ONLY model and CANNOT see images, so you must NEVER analyze image bytes yourself (no pixel reading, brightness, decoding, System.Drawing, or file checks on screenshots - they are useless and waste turns). Whenever a task involves screenshots, rendering, UI, charts, or any visual output, you MUST take a screenshot and call vision_inspect with its local path plus a specific question, then act on the text description it returns. view_image is only for showing the human the file. If you are about to verify a visual result, call vision_inspect instead of inspecting the file directly.",
     "Design-first workflow (MANDATORY for frontend/UI work): before coding any frontend surface (web page, dashboard, game UI, component, landing page, mobile UI, data-viz page), run image_gen first (1-3 direction images, brief-style prompt with purpose, layout, color mood, style keywords, and an avoid-list), read the output with vision_inspect (describe layout, colors, text hierarchy, component styles, spacing rhythm), write a one-paragraph review, then implement by translating structure, palette, and hierarchy into the project's framework. image_gen output is a reference, never a final artifact; never claim you saw the image; do not copy icons, copy, or artwork from the draft. Skip for tiny changes; skip image_gen when the user already provided a design - read it with vision_inspect instead.",
+    "Before starting a task, check ~/.codex/memories/MEMORY.md (or $CODEX_HOME/memories/MEMORY.md) for memory groups whose applies_to matches the current working directory, and reuse them when relevant.",
+    "Use the recall_memory tool when a task depends on earlier decisions, baselines, or facts from past sessions; call store_memory to persist a reusable decision, frozen baseline, or stable preference so it survives the current conversation.",
     `Restarting the gateway: if you need to restart the ModelDock service (e.g. after config or model changes), run: powershell -ExecutionPolicy Bypass -File "${restartScript}". It stops the process on the configured port, starts a fresh detached instance, and prints 'gateway healthy' when /healthz passes; wait for that line before continuing.`,
   ].join(" ");
 }
@@ -44,6 +46,13 @@ export function catalogFor(config) {
     return enabledProviderIds.has(owner)
       && !(modelEntry?.endpoint === "chat" || modelEntry?.status === "unavailable");
   });
+  // Trial mode publishes exactly the fixed free pair and never merges the native
+  // GPT catalog: the free experience must not advertise paid models.
+  if (config.trialMode) {
+    const trialIds = new Set([TRIAL_MAIN_MODEL, TRIAL_VISION_MODEL]);
+    const trialModels = models.filter((entry) => trialIds.has(bareModelId(entry.slug)));
+    return { ...catalog, models: orderCatalogByProvider(trialModels) };
+  }
   const merged = mergeNativeCatalog({ ...catalog, models }, config);
   return { ...merged, models: orderCatalogByProvider(merged.models) };
 }
@@ -65,9 +74,35 @@ export function mergeNativeCatalog(catalog, config) {
     model?.slug
     && model.visibility === "list"
     && !published.has(model.slug)
-  )).map(nativeEntryForCatalog);
+  )).map((model) => nativeEntryForCatalog(sanitizeNativeReasoningLevels(model)));
   if (!extra.length) return catalog;
   return { ...catalog, models: [...(catalog.models || []), ...extra] };
+}
+
+// The Codex CLI (0.130.x) rejects reasoning efforts above `xhigh` when parsing
+// model_catalog_json, but newer bundled native catalogs advertise `max` and
+// `ultra`. Filter merged native entries down to the enum every published Codex
+// build accepts so both the App picker and CLI tooling parse the file.
+const ALLOWED_REASONING_LEVELS = new Set(["none", "minimal", "low", "medium", "high", "xhigh"]);
+
+function sanitizeNativeReasoningLevels(model) {
+  if (!model || typeof model !== "object") return model;
+  const levels = Array.isArray(model.supported_reasoning_levels)
+    ? model.supported_reasoning_levels.filter((level) => ALLOWED_REASONING_LEVELS.has(level?.effort))
+    : model.supported_reasoning_levels;
+  const defaultLevel = ALLOWED_REASONING_LEVELS.has(model.default_reasoning_level)
+    ? model.default_reasoning_level
+    : Array.isArray(levels) && levels.length > 0
+      ? levels[0].effort
+      : "medium";
+  return {
+    ...model,
+    supported_reasoning_levels: levels,
+    default_reasoning_level: defaultLevel,
+    // Older CLI builds (0.130.x) require this field on every catalog model;
+    // native GPT models all support reasoning summaries.
+    supports_reasoning_summaries: model.supports_reasoning_summaries ?? true,
+  };
 }
 
 // Provider labels in picker order. The Codex picker orders catalog entries by
