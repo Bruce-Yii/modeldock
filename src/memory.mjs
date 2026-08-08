@@ -301,18 +301,25 @@ export class MemoryStore {
   search({ query, scopeDir = null, limit = 8, scopeOnly = false } = {}) {
     const terms = String(query || "").match(/[\p{L}\p{N}_]+/gu) || [];
     if (!terms.length) throw new Error("recall_memory requires a non-empty query");
-    const match = terms.map((term) => `"${term.replace(/"/g, "")}"`).join(" AND ");
-    const rows = this.db
-      .prepare(`
-        SELECT u.id, u.head, u.text, u.trust_class, u.memory_state, u.locator, u.scope_paths,
-               bm25(content_fts) AS score
-        FROM content_fts f JOIN content_units u ON u.id = f.id
-        WHERE content_fts MATCH ?
-          AND u.memory_state = 'captured'
-        ORDER BY score DESC
-        LIMIT ?
-      `)
-      .all(match, Math.max(limit * 10, 50));
+    const quote = (term) => `"${term.replace(/"/g, "")}"`;
+    const exact = terms.map(quote).join(" AND ");
+    const loose = terms.map(quote).join(" OR ");
+    const sql = `
+      SELECT u.id, u.head, u.text, u.trust_class, u.memory_state, u.locator, u.scope_paths,
+             bm25(content_fts) AS score
+      FROM content_fts f JOIN content_units u ON u.id = f.id
+      WHERE content_fts MATCH ?
+        AND u.memory_state = 'captured'
+      ORDER BY score DESC
+      LIMIT ?
+    `;
+    const limitRows = Math.max(limit * 10, 50);
+    // Strict AND first for precision; a query phrased with extra words that are
+    // not in the index (e.g. "deepswe best practices" against a note that only
+    // says "deepswe") must not empty the recall, so fall back to permissive OR.
+    // bm25 keeps rows matching more terms on top.
+    let rows = this.db.prepare(sql).all(exact, limitRows);
+    if (!rows.length) rows = this.db.prepare(sql).all(loose, limitRows);
     const cwd = normalizeScope(scopeDir);
     if (!cwd) {
       if (scopeOnly) return { count: 0, text: "MEMORY_RECALL no hits" };

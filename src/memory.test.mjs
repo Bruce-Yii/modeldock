@@ -178,6 +178,28 @@ test("search layers project hits first and falls back to global", () => {
   }
 });
 
+test("recall falls back to permissive OR when the strict AND misses", () => {
+  const { dir } = memoryDir();
+  const store = new MemoryStore({ dbPath: path.join(dir, "memory.db") });
+  try {
+    store.storeMemory({
+      content: "The benchmark harness proves ModelDock tools amplify DeepSeek on DeepSWE.",
+      kind: "knowledge",
+    });
+
+    const hits = store.search({ query: "deepswe best practices" });
+    assert.ok(hits.count >= 1, "extra query words must not empty the recall");
+    assert.match(hits.text, /DeepSWE/);
+
+    const scoped = store.search({ query: "deepswe best practices", scopeDir: "D:\\projects\\stockscan" });
+    assert.ok(scoped.count >= 1, "the OR fallback still reaches unscoped global rows from a project scope");
+    assert.match(scoped.text, /DeepSWE/);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("storeMemory dedupes identical content and supersedes via a stable key", () => {
   const { dir } = memoryDir();
   const store = new MemoryStore({ dbPath: path.join(dir, "memory.db") });
