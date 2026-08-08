@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Writable } from "node:stream";
+import os from "node:os";
+import path from "node:path";
+import { mkdtempSync, rmSync } from "node:fs";
 import {
   RouteAffinity,
   applyToolPolicy,
@@ -1162,6 +1165,58 @@ test("relayResponses counts the request body bytes as transfer-in", async () => 
     assert.equal(transformOptions[0].streaming, true);
   } finally {
     globalThis.fetch = originalFetch;
+  }
+});
+
+test("relayCompaction reports the failure telemetry when the upstream rejects the summarize call", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const finishes = [];
+  const stateDir = mkdtempSync(path.join(os.tmpdir(), "modeldock-compact-state-"));
+  const previousStateDir = process.env.MODELDOCK_STATE_DIR;
+  process.env.MODELDOCK_STATE_DIR = stateDir;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(
+    JSON.stringify({ error: { message: "invalid_api_key", type: "invalid_request_error" } }),
+    { status: 401, headers: { "content-type": "application/json" } },
+  );
+  try {
+    const result = await relayCompaction(
+      {
+        model: "deepseek-v4-flash",
+        stream: false,
+        input: [
+          { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
+          { type: "compaction_trigger" },
+        ],
+      },
+      res,
+      {
+        ...compactServices(),
+        metrics: {
+          begin: () => (telemetry) => finishes.push(telemetry),
+          recordResponseUsage: () => {},
+        },
+      },
+      {},
+      true,
+    );
+    assert.equal(result.ok, false);
+    assert.equal(result.httpStatus, 401, "the upstream 401 is reported, not a swallowed 502");
+    assert.equal(finishes.length, 1, "the failure finish fires exactly once");
+    assert.equal(finishes[0].httpStatus, 401);
+    assert.deepEqual(
+      finishes[0].requestShape.itemTypes,
+      { message: 1, compaction_trigger: 1 },
+      "the request shape rides the failure telemetry",
+    );
+    const body = JSON.parse(Buffer.concat(sink.chunks).toString("utf8"));
+    assert.equal(body.error.type, "auth_failed", "the 401 is translated into the auth_failed class");
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (previousStateDir === undefined) delete process.env.MODELDOCK_STATE_DIR;
+    else process.env.MODELDOCK_STATE_DIR = previousStateDir;
+    rmSync(stateDir, { recursive: true, force: true });
   }
 });
 

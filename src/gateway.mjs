@@ -1198,7 +1198,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
         httpStatus: upstream.status,
         upstream: target.provider,
         error: translated.body.error.message.slice(0, 400),
-        requestShape: describeInputShape(normalizedPayload.input),
+        requestShape: describeInputShape(payload.input),
       });
       metrics?.recordResponseTransform?.({
         blocked: { tool_search: 0, web_search: 0 },
