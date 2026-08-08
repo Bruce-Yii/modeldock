@@ -1,7 +1,8 @@
 # Model Dock For Codex
 
-Give DeepSeek eyes, ears, a voice, and a web connection - through a thin
-Responses bridge for OpenCode Go and DeepSeek official.
+Give DeepSeek eyes, ears, a voice, a web connection, and a memory inside
+Codex - a thin local Responses bridge for OpenCode Go and DeepSeek official,
+with native GPT passthrough and live token, latency, and trace observability.
 
 <p align="center">
   English ·
@@ -140,8 +141,9 @@ legal, financial, or professional advice.
 
 ## 中文
 
-给 DeepSeek 装上眼睛、耳朵、声音和网络搜索能力——通过一个薄薄的
-Responses 桥接层连接 OpenCode Go 与 DeepSeek 官方 API。
+在 Codex 里给 DeepSeek 装上眼睛、耳朵、声音、网络搜索和记忆——通过一个
+轻量本地 Responses 桥接层连接 OpenCode Go 与 DeepSeek 官方 API，支持原生
+GPT 透传，并带实时 token、延迟与调用链路观测。
 
 DeepSeek V4 Flash 又快又便宜，但它看不见、听不到、不会说话，Responses
 端点也没有内置搜索——确切地说，它所经过的 OpenCode Go Responses 端点没有
