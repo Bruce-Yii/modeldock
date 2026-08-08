@@ -185,8 +185,9 @@ export function createUpstreams({ config, metrics, mediaStore, memoryStore = nul
 
     const loaded = [];
     const refs = [];
+    const skipped = [];
     const pushRef = (ref) => { if (ref) { refs.push(ref); return ref; } return null; };
-    const loadPath = (filePath, label) => {
+    const loadPath = (filePath) => {
       if (!filePath) return null;
       const absolute = isAbsolute(filePath) ? filePath : resolve(filePath);
       if (!existsSync(absolute)) throw new Error(`Image path not found: ${absolute}`);
@@ -200,23 +201,29 @@ export function createUpstreams({ config, metrics, mediaStore, memoryStore = nul
     };
 
     if (path) {
-      const dataUrl = loadPath(path, "path");
-      const ref = pushRef(mediaStore.put(dataUrl));
-      loaded.push({ ref, imageUrl: dataUrl });
+      try {
+        const dataUrl = loadPath(path);
+        const ref = pushRef(mediaStore.put(dataUrl));
+        loaded.push({ ref, imageUrl: dataUrl });
+      } catch (error) {
+        skipped.push(error.message);
+      }
     }
     if (image_ref) {
       pushRef(image_ref);
       const item = mediaStore.get(image_ref);
-      if (!item) throw new Error(`Unknown or expired image_ref: ${image_ref}`);
-      loaded.push(item);
+      if (item) loaded.push(item);
+      else skipped.push(`Unknown or expired image_ref: ${image_ref}`);
     }
     if (compare_image_ref) {
       pushRef(compare_image_ref);
       const item = mediaStore.get(compare_image_ref);
-      if (!item) throw new Error(`Unknown or expired image_ref: ${compare_image_ref}`);
-      loaded.push(item);
+      if (item) loaded.push(item);
+      else skipped.push(`Unknown or expired image_ref: ${compare_image_ref}`);
     }
-    if (!loaded.length) throw new Error("vision_inspect requires path, image_ref, or compare_image_ref");
+    if (!loaded.length) {
+      throw new Error(skipped.length ? `vision_inspect: every image failed to load - ${skipped.join(" | ")}` : "vision_inspect requires path, image_ref, or compare_image_ref");
+    }
 
     const images = loaded;
     const finish = metrics.begin("vision", { operation: "vision_inspect", mode, imageRefs: refs });
@@ -231,6 +238,7 @@ export function createUpstreams({ config, metrics, mediaStore, memoryStore = nul
     ].join("\n");
     const models = [...new Set([getVisionModel(), config.visionFallbackModel].filter(Boolean))];
     const failures = [];
+    const note = skipped.length ? { skippedImages: skipped } : {};
 
     for (let index = 0; index < models.length; index += 1) {
       const model = models[index];
@@ -238,8 +246,8 @@ export function createUpstreams({ config, metrics, mediaStore, memoryStore = nul
       const cached = visionCache.get(cacheKey);
       if (cached !== undefined) {
         metrics.recordVisionModel(model, false);
-        finish({ ok: true, model, fallbackUsed: false, inputImages: images.length, cached: true });
-        return { model, fallbackUsed: false, mode, imageRefs: refs, answer: cached, cached: true };
+        finish({ ok: true, model, fallbackUsed: false, inputImages: images.length, skipped: skipped.length, cached: true });
+        return { model, fallbackUsed: false, mode, imageRefs: refs, answer: cached, cached: true, ...note };
       }
       try {
         const result = await callVisionModel(model, images, prompt);
@@ -247,8 +255,8 @@ export function createUpstreams({ config, metrics, mediaStore, memoryStore = nul
         const fallbackUsed = index > 0;
         visionCache.set(cacheKey, answer);
         metrics.recordVisionModel(model, fallbackUsed);
-        finish({ ok: true, model, fallbackUsed, inputImages: images.length, cached: false });
-        return { model, fallbackUsed, mode, imageRefs: refs, answer, usage: result.usage, cached: false };
+        finish({ ok: true, model, fallbackUsed, inputImages: images.length, skipped: skipped.length, cached: false });
+        return { model, fallbackUsed, mode, imageRefs: refs, answer, usage: result.usage, cached: false, ...note };
       } catch (error) {
         failures.push(`${model}: ${error.message}`);
       }

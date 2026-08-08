@@ -274,3 +274,80 @@ test("inspectVision rejects a missing path and a missing ref", async (t) => {
   await assert.rejects(() => upstreams.inspectVision({ question: "q" }), /requires path, image_ref, or compare_image_ref/);
   await assert.rejects(() => upstreams.inspectVision({ image_ref: "img_missing", question: "q" }), /Unknown or expired image_ref/);
 });
+
+test("inspectVision degrades one bad image instead of failing the whole turn", async (t) => {
+  const { writeFileSync, mkdtempSync, rmSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { tmpdir } = await import("node:os");
+  const dir = mkdtempSync(join(tmpdir(), "modeldock-vision-mixed-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const pngPath = join(dir, "ok.png");
+  writeFileSync(pngPath, Buffer.from("89504e470d0a1a0a", "hex"));
+
+  let sentBody = null;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    sentBody = JSON.parse(options.body);
+    return new Response(JSON.stringify({ id: "resp_v", choices: [{ message: { role: "assistant", content: "## Summary\nThe good chart." } }] }), { status: 200 });
+  };
+
+  const MediaStore = (await import("./media-store.mjs")).MediaStore;
+  const store = new MediaStore({ ttlMs: 60_000, maxBytes: 10 * 1024 * 1024, maxEntries: 8 });
+  const upstreams = createUpstreams({
+    config: {
+      exaMcpUrl: "https://mcp.exa.ai/mcp",
+      exaApiKey: "",
+      goToken: "t",
+      goBaseUrl: "https://go.example.com/v1",
+      visionTimeoutMs: 90_000,
+      visionModel: "mimo-v2.5-free",
+      visionFallbackModel: "minimax-m3",
+    },
+    metrics: new (await import("./metrics.mjs")).Metrics({ recentLimit: 10 }),
+    mediaStore: store,
+    visionCache: new (await import("./vision-cache.mjs")).createVisionCache(),
+  });
+  try {
+    const result = await upstreams.inspectVision({
+      path: pngPath,
+      image_ref: "img_expired",
+      question: "What does it show?",
+      mode: "chart",
+    });
+    assert.equal(result.answer, "## Summary\nThe good chart.", "the turn survives with the readable image");
+    assert.equal(result.imageRefs.length, 2, "both refs are still reported (including the expired one)");
+    assert.equal(sentBody.messages[0].content.filter((c) => c.type === "image_url").length, 1, "only the readable image reaches the vision model");
+    assert.equal(result.skippedImages.length, 1, "the caller is told which image was skipped");
+    assert.match(result.skippedImages[0], /img_expired/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("inspectVision reports a combined failure message when every image is bad", async (t) => {
+  const { mkdtempSync, rmSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { tmpdir } = await import("node:os");
+  const dir = mkdtempSync(join(tmpdir(), "modeldock-vision-allbad-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const MediaStore = (await import("./media-store.mjs")).MediaStore;
+  const store = new MediaStore({ ttlMs: 60_000, maxBytes: 10 * 1024 * 1024, maxEntries: 8 });
+  const upstreams = createUpstreams({
+    config: {
+      exaMcpUrl: "https://mcp.exa.ai/mcp",
+      exaApiKey: "",
+      goToken: "t",
+      goBaseUrl: "https://go.example.com/v1",
+      visionTimeoutMs: 90_000,
+      visionModel: "mimo-v2.5-free",
+      visionFallbackModel: "minimax-m3",
+    },
+    metrics: new (await import("./metrics.mjs")).Metrics({ recentLimit: 10 }),
+    mediaStore: store,
+  });
+  await assert.rejects(
+    () => upstreams.inspectVision({ path: join(dir, "nope.png"), image_ref: "img_expired", question: "q" }),
+    /every image failed to load/,
+    "when every image is unreadable the call fails loudly with each reason",
+  );
+});
