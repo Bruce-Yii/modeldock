@@ -187,6 +187,24 @@ function discoverCodexGoToken(codexHome) {
   return { token: "", source: "missing" };
 }
 
+// Does the Codex home directory carry a ChatGPT/Codex sign-in (auth.json)?
+// ModelDock never holds native credentials itself: it forwards whatever headers
+// the Codex client sends, so a missing sign-in means every published native GPT
+// model answers 401. Detecting the sign-in here lets the published catalog skip
+// the native merge for logged-out users instead of advertising dead models.
+// A refresh token is treated as a sign-in too (Codex refreshes it silently).
+export function hasChatGptLogin(codexHome) {
+  try {
+    const authFile = path.join(codexHome, "auth.json");
+    if (!existsSync(authFile)) return false;
+    const parsed = JSON.parse(readFileSync(authFile, "utf8"));
+    const tokens = parsed?.tokens || {};
+    return Boolean(tokens.access_token || tokens.refresh_token || parsed?.OPENAI_API_KEY);
+  } catch {
+    return false;
+  }
+}
+
 export function loadConfig() {
   applyEnvFile(envFileFor());
   const host = process.env.MODELDOCK_HOST || "127.0.0.1";
@@ -225,9 +243,16 @@ export function loadConfig() {
   // GPT to fall back on, so both keep the free vision model unless explicitly
   // overridden via MODELDOCK_VISION_MODEL.
   const trialMode = process.env.MODELDOCK_TRIAL === "1";
-  const nativeMerge = !["0", "false", "off"].includes(
-    String(process.env.MODELDOCK_NATIVE_MERGE || "").toLowerCase(),
-  );
+  // Wizard-managed native-GPT merge: off for users without a ChatGPT/Codex
+  // subscription so the picker never advertises models that 401 on request.
+  // Defaults to the signed-in state when the env key is unset: a detected
+  // ~/.codex/auth.json keeps the merge (subscriber behavior unchanged), no
+  // sign-in means the native GPT models stay out of the published catalog.
+  const nativeMerge = (() => {
+    const raw = String(process.env.MODELDOCK_NATIVE_MERGE || "").toLowerCase();
+    if (raw) return !["0", "false", "off"].includes(raw);
+    return hasChatGptLogin(codexHome);
+  })();
   const defaultVisionModel = trialMode || !nativeMerge ? "mimo-v2.5-free" : "gpt-5.6-luna";
   const visionModel = modelRef(process.env.MODELDOCK_VISION_MODEL || defaultVisionModel);
   const visionFallbackModel = modelRef(process.env.MODELDOCK_VISION_FALLBACK_MODEL || "minimax-m3");
@@ -270,7 +295,7 @@ export function loadConfig() {
     trialMode,
     // Wizard-managed native-GPT merge: off for users without a ChatGPT/Codex
     // subscription so the picker never advertises models that 401 on request.
-    // Defaults to on (current behavior) when the env key is unset.
+    // Defaults to the signed-in state when the env key is unset (see above).
     nativeMerge,
     mcpTransport,
     visionTimeoutMs: integer("MODELDOCK_VISION_TIMEOUT_MS", 90_000, { min: 1_000, max: 300_000 }),
