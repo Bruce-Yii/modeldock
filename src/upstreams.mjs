@@ -1,4 +1,6 @@
 import { bareModelId, providerForModel, tokenFor, profileById } from "./profiles.mjs";
+import { VISION_EVIDENCE_INSTRUCTIONS, VISION_EVIDENCE_MAX_CHARS } from "./vision-evidence.mjs";
+import { visionCacheKey, visionEvidenceCache } from "./vision-cache.mjs";
 function upstreamUrl(baseUrl, path) {
   return `${baseUrl.replace(/\/$/, "")}/${path.replace(/^\//, "")}`;
 }
@@ -42,7 +44,7 @@ export function parseMcpTextResult(body) {
   return "";
 }
 
-export function createUpstreams({ config, metrics, mediaStore, memoryStore = null, getVisionModel = () => config.visionModel }) {
+export function createUpstreams({ config, metrics, mediaStore, memoryStore = null, getVisionModel = () => config.visionModel, visionCache = visionEvidenceCache }) {
   async function recallMemory(args) {
     const finish = metrics.begin("memory", { operation: "recall_memory", query: String(args.query || "").slice(0, 160) });
     try {
@@ -218,22 +220,35 @@ export function createUpstreams({ config, metrics, mediaStore, memoryStore = nul
 
     const images = loaded;
     const finish = metrics.begin("vision", { operation: "vision_inspect", mode, imageRefs: refs });
+    // Evidence contract: a text-only model relies on this transcription alone,
+    // so the vision model must report structure and uncertainty verbatim instead
+    // of inventing details. Cached per image set + question so multi-turn
+    // sessions re-reading the same screenshot pay the vision model once.
     const prompt = [
       `Vision task mode: ${mode}.`,
-      question,
-      "Return a concise, evidence-based answer. Preserve exact visible text and numbers. Do not expose chain-of-thought.",
+      VISION_EVIDENCE_INSTRUCTIONS,
+      `Question: ${question || "(none - transcribe the image)"}`,
     ].join("\n");
     const models = [...new Set([getVisionModel(), config.visionFallbackModel].filter(Boolean))];
     const failures = [];
 
     for (let index = 0; index < models.length; index += 1) {
       const model = models[index];
+      const cacheKey = visionCacheKey({ images: images.map((item) => item.imageUrl), prompt, model });
+      const cached = visionCache.get(cacheKey);
+      if (cached !== undefined) {
+        metrics.recordVisionModel(model, false);
+        finish({ ok: true, model, fallbackUsed: false, inputImages: images.length, cached: true });
+        return { model, fallbackUsed: false, mode, imageRefs: refs, answer: cached, cached: true };
+      }
       try {
         const result = await callVisionModel(model, images, prompt);
+        const answer = result.answer.slice(0, VISION_EVIDENCE_MAX_CHARS);
         const fallbackUsed = index > 0;
+        visionCache.set(cacheKey, answer);
         metrics.recordVisionModel(model, fallbackUsed);
-        finish({ ok: true, model, fallbackUsed, inputImages: images.length });
-        return { model, fallbackUsed, mode, imageRefs: refs, answer: result.answer, usage: result.usage };
+        finish({ ok: true, model, fallbackUsed, inputImages: images.length, cached: false });
+        return { model, fallbackUsed, mode, imageRefs: refs, answer, usage: result.usage, cached: false };
       } catch (error) {
         failures.push(`${model}: ${error.message}`);
       }

@@ -501,7 +501,15 @@ async function evaluateVision(modelId, config) {
   let deterministicScore = 0;
   let maxDeterministic = 0;
   for (const task of TASKS) {
-    const imageUrl = `data:image/png;base64,${loadTaskImage(task)}`;
+    const taskImage = loadTaskImage(task);
+    if (!taskImage) {
+      // The assets/vision set is missing in this checkout: report the task as
+      // unattempted instead of sending a broken data URL to the vision model.
+      results.push({ task: task.id, difficulty: task.difficulty, passed: false, skipped: true });
+      maxDeterministic += 1;
+      continue;
+    }
+    const imageUrl = `data:image/png;base64,${taskImage}`;
     const answer = await callVisionModel(modelId, config, imageUrl, task.question, 48);
     const score = answer.error ? 0 : scoreTask(task, answer.text);
     deterministicScore += score;
