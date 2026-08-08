@@ -391,6 +391,8 @@
   }
 
   function closeSettingsDialog() {
+    const host = document.getElementById("modeldock-wizard");
+    if (!host || host.hidden) return;
     const dialog = document.getElementById("settings-dialog");
     if (dialog && typeof dialog.close === "function") dialog.close();
     else if (dialog) dialog.removeAttribute("open");
