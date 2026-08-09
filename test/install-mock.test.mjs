@@ -300,7 +300,9 @@ function deleteWinRegistryKey(keyPath) {
 
 function readWinRunValue(keyPath, name) {
   try {
-    const buf = execFileSync("reg.exe", ["query", keyPath, "/v", name], { encoding: "buffer" });
+    // The failing query is expected (key absent); keep reg.exe's stderr off the
+    // console or the PowerShell host renders it as an error record every run.
+    const buf = execFileSync("reg.exe", ["query", keyPath, "/v", name], { encoding: "buffer", stdio: ["ignore", "pipe", "ignore"] });
     for (const encoding of ["utf16le", "utf8"]) {
       const text = buf.toString(encoding).replace(/\u0000/g, "");
       const match = text.match(/REG_SZ\s+(.+?)(?:\r?\n|$)/);
@@ -627,6 +629,13 @@ test("mock install lifecycle: first start, second start routes, login relaunch",
     existsSync(path.join(installDir, "scripts", isWindows ? "recover.ps1" : "recover.sh")),
     "manual recovery script should be written",
   );
+  if (isWindows) {
+    assert.match(
+      readFileSync(path.join(installDir, "scripts", "recover.ps1"), "utf8"),
+      /Repair-Autostart/,
+      "embedded recovery script should carry the autostart repair",
+    );
+  }
   assert.equal(readFileSync(installedBundle).length, asset.length, "bundle byte-identical");
 
   // 5. The installer already started the gateway in the background on $port. Hit
@@ -1044,4 +1053,50 @@ test("uninstall preserves the memory vault and never kills a foreign listener", 
   assert.ok(!existsSync(path.join(stateDir, "caller-key")), "runtime state files should be cleared");
   assert.ok(!existsSync(path.join(stateDir, "autostart-initialized")), "the autostart mark should be cleared");
   assert.match(out + err, /preserved/i, "uninstall should say the memory vault is preserved");
+});
+
+test("recover menu repairs a lost autostart Run key", async (t) => {
+  if (!isWindows) {
+    t.skip("autostart repair is Windows-only");
+    return;
+  }
+  const root = mkdtempSync(path.join(os.tmpdir(), "modeldock-recover-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const keyPath = `HKCU\\Software\\ModelDockTests\\recover-${randomUUID()}`;
+  t.after(() => deleteWinRegistryKey(keyPath));
+  mkdirSync(path.join(root, "scripts"), { recursive: true });
+  writeFileSync(path.join(root, "scripts", "recover.ps1"), readFileSync(path.join(repoRoot, "scripts", "recover.ps1"), "utf8"));
+  writeFileSync(path.join(root, "scripts", "restart.ps1"), "exit 0\n");
+  writeFileSync(path.join(root, "scripts", "start-hidden.ps1"), "# launcher stub\n");
+  const mark = path.join(root, "autostart-initialized");
+  const env = {
+    ...process.env,
+    MODELDOCK_AUTOSTART_KEY: keyPath,
+    MODELDOCK_AUTOSTART_NAME: "ModelDock",
+    MODELDOCK_STATE_DIR: root,
+  };
+  const runRecover = () =>
+    execFileSync(
+      "powershell",
+      ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(root, "scripts", "recover.ps1")],
+      { env, input: "1\n", encoding: "utf8" },
+    );
+
+  writeFileSync(mark, "2026-01-01\n");
+  const repaired = runRecover();
+  assert.match(repaired, /re-enabled|OK/, "recover should report the autostart state");
+  const value = readWinRunValue(keyPath, "ModelDock");
+  // Ancestors may render as 8.3 short names (CHENBA~1) while the Run value
+  // records the long path PowerShell resolved; the mkdtemp dir's own name is
+  // stable, so match on basename + suffix like the catalog assertions above.
+  assert.ok(
+    value && value.includes(path.basename(root)) && value.includes("scripts\\start-hidden.ps1"),
+    "a lost Run key should be re-created pointing at the installed launcher",
+  );
+
+  deleteWinRegistryKey(keyPath);
+  rmSync(mark, { force: true });
+  const untouched = runRecover();
+  assert.ok(!untouched.includes("re-enabled"), "no decision mark means no decision; recover must not enable autostart");
+  assert.equal(readWinRunValue(keyPath, "ModelDock"), null, "no Run key should be written without a decision mark");
 });

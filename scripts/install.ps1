@@ -326,7 +326,43 @@ if (Test-Path -LiteralPath $envFile) {
   $parsed = 0
   if ($line -and [int]::TryParse(($line.Line -replace '^MODELDOCK_PORT=', ''), [ref]$parsed) -and $parsed -gt 0) { $port = $parsed }
 }
+
+# Start-at-login repair: when the autostart decision mark exists but the Run key
+# is gone (registry cleanup, earlier toggle-off that deleted the key), re-write
+# the login entry before restarting the gateway. A missing mark means no decision
+# was ever recorded, so an explicit off is never silently overridden.
+$autostartKeyName = if ($env:MODELDOCK_AUTOSTART_KEY) { $env:MODELDOCK_AUTOSTART_KEY } else { "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" }
+$autostartValueName = if ($env:MODELDOCK_AUTOSTART_NAME) { $env:MODELDOCK_AUTOSTART_NAME } else { "ModelDock" }
+$autostartStateDir = if ($env:MODELDOCK_STATE_DIR) { $env:MODELDOCK_STATE_DIR } else { $root }
+$autostartMark = Join-Path $autostartStateDir "autostart-initialized"
+
+function Repair-Autostart {
+  if (-not (Test-Path -LiteralPath $autostartMark)) { return }
+  $subKey = $autostartKeyName
+  if ($subKey -like "HKEY_CURRENT_USER\*") { $subKey = $subKey.Substring("HKEY_CURRENT_USER\".Length) }
+  elseif ($subKey -like "HKCU\*") { $subKey = $subKey.Substring("HKCU\".Length) }
+  $runKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($subKey)
+  try {
+    if ($runKey -and ($null -ne $runKey.GetValue($autostartValueName, $null))) {
+      Write-Output "  start at login: OK"
+      return
+    }
+  } finally { if ($runKey) { $runKey.Close() } }
+  $launcher = Join-Path $root "scripts\start-hidden.ps1"
+  if (-not (Test-Path -LiteralPath $launcher)) {
+    Write-Warning "  start at login: launcher missing ($launcher); not repairing"
+    return
+  }
+  $runKey = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($subKey)
+  try {
+    $runCommand = "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$launcher`""
+    $runKey.SetValue($autostartValueName, $runCommand, [Microsoft.Win32.RegistryValueKind]::String)
+    Write-Output "  start at login was missing - re-enabled"
+  } finally { if ($runKey) { $runKey.Close() } }
+}
+
 function Restart-Gateway {
+  Repair-Autostart
   & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root "scripts\restart.ps1")
   if ($LASTEXITCODE -ne 0) { throw "gateway restart failed" }
 }
