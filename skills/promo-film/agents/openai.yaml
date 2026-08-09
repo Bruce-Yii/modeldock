@@ -1,4 +1,0 @@
-interface:
-  display_name: "Promo Film"
-  short_description: "Build narrated promo films (1080p MP4) from a product concept."
-  default_prompt: "Make a promo video for my product. Follow the promo-film skill: script and narration first, then scenes, assets, render, and QA."
