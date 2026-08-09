@@ -824,3 +824,30 @@ test("settings save rejects placeholder tokens before any upstream probe", async
     globalThis.fetch = originalFetch;
   }
 });
+
+test("settings rejects malformed provider tokens without touching the env file", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-settings-token-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const envFile = path.join(dir, "modeldock.env");
+  const instance = await startApp({ envFile });
+  t.after(instance.stop);
+
+  const bad = await fetch(`${instance.base}/api/settings`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ deepseekApiKey: "not-a-deepseek-key" }),
+  });
+  assert.equal(bad.status, 400, "a non-sk- DeepSeek key is rejected");
+  const badBody = await bad.json();
+  assert.equal(badBody.error.type, "invalid_deepseek_api_key");
+  assert.match(badBody.error.message, /sk-/);
+  await assert.rejects(readFile(envFile, "utf8"), (error) => error.code === "ENOENT", "the env file stays untouched");
+
+  const quoted = await fetch(`${instance.base}/api/settings`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ opencodeGoToken: 'tok"en' }),
+  });
+  assert.equal(quoted.status, 400, "a quoted token is rejected");
+  await assert.rejects(readFile(envFile, "utf8"), (error) => error.code === "ENOENT");
+});
