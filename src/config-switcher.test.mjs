@@ -278,3 +278,33 @@ model_catalog_json = "C:/Users/x/codex-router/merged-models.json"
   await assert.rejects(() => switcher.enable(), (error) => error.code === "EXTERNAL_MANAGED");
   assert.equal(await readFile(configPath, "utf8"), routerManaged, "the conflicting config is left untouched");
 });
+
+test("enable refuses a config with duplicated TOML keys and leaves the file untouched", async (t) => {
+  const codexHome = await mkdtemp(path.join(os.tmpdir(), "modeldock-duplicate-key-"));
+  t.after(() => rm(codexHome, { recursive: true, force: true }));
+  const configPath = path.join(codexHome, "config.toml");
+  const duplicated = 'model = "gpt-5.6-sol"\nmodel = "gpt-5.6-codex"\n';
+  await writeFile(configPath, duplicated, "utf8");
+  const switcher = new CodexConfigSwitcher({ codexHome, baseUrl: "http://127.0.0.1:4097/v1", model: "deepseek-v4-flash" });
+  await assert.rejects(
+    () => switcher.enable(),
+    (error) => error.code === "DUPLICATE_TOML_KEY" && /duplicate key\(s\): model/.test(error.message),
+  );
+  assert.equal(await readFile(configPath, "utf8"), duplicated, "the broken config is left untouched");
+  await assert.rejects(() => access(path.join(codexHome, "modeldock", "config-manifest.jsonl")), (error) => error.code === "ENOENT", "no manifest entry for the aborted write");
+});
+
+test("enable and disable append audit entries to the config manifest", async (t) => {
+  const { codexHome, configPath, switcher } = await fixture(t);
+  await switcher.enable();
+  await switcher.disable();
+  const manifestPath = path.join(codexHome, "modeldock", "config-manifest.jsonl");
+  const lines = (await readFile(manifestPath, "utf8")).trim().split("\n");
+  assert.equal(lines.length, 2, "one entry per operation");
+  const [enabled, disabled] = lines.map((line) => JSON.parse(line));
+  assert.equal(enabled.operation, "enable");
+  assert.equal(disabled.operation, "disable");
+  assert.ok(enabled.backupPath && enabled.originalHash && enabled.managedHash, "the enable entry records backup and hashes");
+  assert.ok(enabled.at <= disabled.at, "entries are append-ordered");
+  assert.match(await readFile(configPath, "utf8"), /^model = "gpt-5.6-sol"/m, "disable restores the original config");
+});

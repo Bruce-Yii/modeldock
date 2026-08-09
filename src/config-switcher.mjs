@@ -1,6 +1,7 @@
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { copyFile, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { appendConfigManifest, assertConfigWriteSafe } from "./toml-guard.mjs";
 
 function sha256(text) {
   return createHash("sha256").update(text).digest("hex");
@@ -334,6 +335,10 @@ export class CodexConfigSwitcher {
         { code: "EXTERNAL_MANAGED" },
       );
     }
+    // Duplicate-key guard: a duplicated TOML key would make Codex refuse to
+    // start, and writing over a broken config would bake the broken state in.
+    // Abort before touching anything (the user's config stays untouched).
+    if (originalExisted) assertConfigWriteSafe(original);
 
     const backupPath = path.join(this.codexHome, `config.toml.modeldock-backup-${timestamp()}-${randomUUID().slice(0, 8)}`);
     if (originalExisted) await copyFile(this.configPath, backupPath);
@@ -348,6 +353,10 @@ export class CodexConfigSwitcher {
       mcpArgs: this.mcpArgs,
       mcpEnv: this.mcpEnv,
     });
+    // Defensive: the writer must never emit duplicates either (setTopLevel
+    // dedupes `model`, the managed block owns its keys, but a future edit could
+    // regress). Abort before the disk write.
+    assertConfigWriteSafe(managed);
     try {
       await writeFile(this.configPath, managed, { encoding: "utf8", mode: 0o600 });
       await this.#writeState({
@@ -361,6 +370,14 @@ export class CodexConfigSwitcher {
         changedAt: new Date().toISOString(),
         onboarded: state.onboarded,
         onboardedAt: state.onboardedAt,
+      });
+      await appendConfigManifest(this.stateDir, {
+        operation: "enable",
+        configPath: this.configPath,
+        backupPath,
+        originalExisted,
+        originalHash: sha256(original),
+        managedHash: sha256(managed),
       });
     } catch (error) {
       if (originalExisted) await writeFile(this.configPath, original, { encoding: "utf8", mode: 0o600 });
@@ -389,6 +406,7 @@ export class CodexConfigSwitcher {
     try {
       if (routeActive && state.originalExisted) {
         const restored = sha256(current) === state.managedHash ? backup : mergeRestoredCodexConfig(current, backup);
+        assertConfigWriteSafe(restored);
         await writeFile(this.configPath, restored, { encoding: "utf8", mode: 0o600 });
       } else if (routeActive) await unlink(this.configPath);
       await this.#writeState({
@@ -399,6 +417,12 @@ export class CodexConfigSwitcher {
         changedAt: new Date().toISOString(),
         onboarded: state.onboarded,
         onboardedAt: state.onboardedAt,
+      });
+      await appendConfigManifest(this.stateDir, {
+        operation: "disable",
+        configPath: this.configPath,
+        lastBackupPath: state.backupPath,
+        restoredFromBackup: sha256(current) === state.managedHash,
       });
     } catch (error) {
       await writeFile(this.configPath, current, { encoding: "utf8", mode: 0o600 });

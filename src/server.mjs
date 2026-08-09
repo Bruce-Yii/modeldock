@@ -20,6 +20,7 @@ import { createAutostart } from "./autostart.mjs";
 import { createUpdater } from "./update.mjs";
 import { clearOwnerFile, describeOwnerConflict, writeOwnerFile } from "./instance-owner.mjs";
 import { CALLER_PATH_PREFIX, callerBasePath, callerKeyEqual, loadOrCreateCallerKey } from "./caller-key.mjs";
+import { validateProviderToken } from "./token-validate.mjs";
 import { RouteAffinity } from "./router.mjs";
 import { PROVIDER_SEPARATOR, applyCustomProfile, bareModelId, profileOptions, profileById, providerForModel, publishedSlugFor, tokenFor, TRIAL_MAIN_MODEL, TRIAL_VISION_MODEL } from "./profiles.mjs";
 import { CustomEndpointError, listEndpointModels, normalizeBaseUrl, probeCustomResponses } from "./custom-endpoint.mjs";
@@ -501,7 +502,15 @@ async function evaluateVision(modelId, config) {
   let deterministicScore = 0;
   let maxDeterministic = 0;
   for (const task of TASKS) {
-    const imageUrl = `data:image/png;base64,${loadTaskImage(task)}`;
+    const taskImage = loadTaskImage(task);
+    if (!taskImage) {
+      // The assets/vision set is missing in this checkout: report the task as
+      // unattempted instead of sending a broken data URL to the vision model.
+      results.push({ task: task.id, difficulty: task.difficulty, passed: false, skipped: true });
+      maxDeterministic += 1;
+      continue;
+    }
+    const imageUrl = `data:image/png;base64,${taskImage}`;
     const answer = await callVisionModel(modelId, config, imageUrl, task.question, 48);
     const score = answer.error ? 0 : scoreTask(task, answer.text);
     deterministicScore += score;
@@ -1056,6 +1065,9 @@ export function createApp(services = createServices()) {
     const providers = [];
     let failedProvider = null;
     try {
+      // Config objects built by tests (and any future non-loadConfig wiring)
+      // may lack the tokens map; the settings write must still work.
+      config.tokens = config.tokens || {};
       if (body.opencodeGoToken) {
         const token = String(body.opencodeGoToken).trim();
         providers.push("opencode-go");
@@ -1069,12 +1081,22 @@ export function createApp(services = createServices()) {
       if (body.deepseekApiKey) {
         const token = String(body.deepseekApiKey).trim();
         providers.push("deepseek-official");
+        const checked = validateProviderToken("deepseek-official", token);
+        if (!checked.ok) throw Object.assign(new Error(checked.error), { code: "invalid_deepseek_api_key" });
         if (isPlaceholderToken(token)) {
           const error = new Error("A valid DeepSeek API key is required.");
           error.code = "invalid_deepseek_api_key";
           throw error;
         }
-        updates.DEEPSEEK_API_KEY = token;
+        updates.DEEPSEEK_API_KEY = checked.value;
+      }
+      if (body.exaApiKey) {
+        const checked = validateProviderToken("exa", body.exaApiKey);
+        if (!checked.ok) throw Object.assign(new Error(checked.error), { code: "invalid_exa_api_key" });
+        // Deferred into the shared updates write: EXA_API_KEY must land in the
+        // same atomic writeEnvFile call as the provider tokens, so a rejected
+        // provider probe never leaves a partially-updated .env behind.
+        updates.EXA_API_KEY = checked.value;
       }
       if (Object.keys(updates).length) {
         for (const [envKey, provider, label] of [
@@ -1095,6 +1117,7 @@ export function createApp(services = createServices()) {
         writeEnvFile(updates, config.envFile);
         config.tokens["opencode-go"] = updates.OPENCODE_GO_TOKEN || config.tokens["opencode-go"];
         config.tokens["deepseek-official"] = updates.DEEPSEEK_API_KEY || config.tokens["deepseek-official"];
+        if (updates.EXA_API_KEY) config.exaApiKey = updates.EXA_API_KEY;
       }
       recordSettingsEvent({ providers, ok: true, filePath: config.settingsEventsFile });
       recordConfigAction(metrics, "settings_update", { ok: true });
