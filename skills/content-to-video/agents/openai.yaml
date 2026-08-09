@@ -1,0 +1,4 @@
+interface:
+  display_name: "Content to Video"
+  short_description: "Turn any content into a finished, high-quality MP4 video."
+  default_prompt: "Make a video from this content. Use the content-to-video skill: classify the content type, pick the right pipeline and format, then plan, narrate, build scenes, render, and QA."

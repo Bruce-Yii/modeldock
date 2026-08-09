@@ -65,6 +65,9 @@ curl -fsSL https://raw.githubusercontent.com/architectds/modeldock/main/scripts/
 The installer checks Node.js >= 22, downloads Model Dock For Codex to
 `~/.modeldock`, starts it in the background, and opens the dashboard. Paste your
 [opencode.ai](https://opencode.ai/auth) token in the Settings dialog that opens.
+It also installs the `content-to-video` skill into Codex's skills directory
+(`~/.codex/skills/content-to-video`), so the video capability is available as
+soon as Codex restarts.
 
 ## Connect Codex
 

@@ -55,13 +55,15 @@ function writeFakeMacTools(binDir) {
 
 // Env shared by the install.sh sandbox. `fakeBin` must already exist and be
 // executable on the POSIX side before install.sh runs.
-function sandboxEnv({ root, fakeBin, launchctlLog, releaseUrl, bridgeUrl, port }) {
+function sandboxEnv({ root, fakeBin, launchctlLog, releaseUrl, bridgeUrl, skillBaseUrl, port }) {
   return {
     MODELDOCK_ROOT: root,
     MODELDOCK_STATE_DIR: `${root}/.modeldock`,
     MODELDOCK_AUTOSTART_PLIST_DIR: `${root}/LaunchAgents`,
     MODELDOCK_RELEASE_URL: releaseUrl,
     MODELDOCK_BRIDGE_URL: bridgeUrl,
+    MODELDOCK_SKILL_BASE_URL: skillBaseUrl,
+    MODELDOCK_CODEX_HOME: `${root}/codex-home`,
     MODELDOCK_SKIP_OPEN: "1",
     MODELDOCK_PORT: String(port),
     MODELDOCK_NODE_PATH: `${fakeBin}/node`,
@@ -78,15 +80,23 @@ test("install.sh macOS branch: plist, launchctl, marker (WSL or direct)", async 
 
   const bundle = readFileSync(path.join(repoRoot, "dist", "modeldock.mjs"));
   const bridge = readFileSync(path.join(repoRoot, "dist", "mcp-standalone.mjs"));
+  const skillRoot = path.join(repoRoot, "skills", "content-to-video");
   const assetServer = createServer((req, res) => {
-    const asset = req.url === "/modeldock.mjs" ? bundle : req.url === "/mcp-standalone.mjs" ? bridge : null;
-    if (!asset) {
+    let data = null;
+    if (req.url === "/modeldock.mjs") data = bundle;
+    else if (req.url === "/mcp-standalone.mjs") data = bridge;
+    else if (req.url.startsWith("/skills/content-to-video/")) {
+      const rel = req.url.slice("/skills/content-to-video/".length).split("/");
+      const file = path.join(skillRoot, ...rel);
+      if (existsSync(file)) data = readFileSync(file);
+    }
+    if (!data) {
       res.writeHead(404);
       res.end("not found");
       return;
     }
-    res.writeHead(200, { "content-type": "application/octet-stream", "content-length": asset.length });
-    res.end(asset);
+    res.writeHead(200, { "content-type": "application/octet-stream", "content-length": data.length });
+    res.end(data);
   });
   const assetPort = await listen(assetServer);
   t.after(() => assetServer.close());
@@ -99,6 +109,7 @@ test("install.sh macOS branch: plist, launchctl, marker (WSL or direct)", async 
   const installer = path.join(repoRoot, "scripts", "install.sh");
   const releaseUrl = `http://127.0.0.1:${assetPort}/modeldock.mjs`;
   const bridgeUrl = `http://127.0.0.1:${assetPort}/mcp-standalone.mjs`;
+  const skillBaseUrl = `http://127.0.0.1:${assetPort}/skills/content-to-video`;
   const probe = createServer();
   const appPort = await listen(probe);
   await new Promise((resolve) => probe.close(resolve));
@@ -121,6 +132,7 @@ test("install.sh macOS branch: plist, launchctl, marker (WSL or direct)", async 
       launchctlLog: wslLaunchctlLog,
       releaseUrl,
       bridgeUrl,
+      skillBaseUrl,
       port: appPort,
     });
     const lines = [
@@ -138,7 +150,7 @@ test("install.sh macOS branch: plist, launchctl, marker (WSL or direct)", async 
   } else {
     const env = {
       ...process.env,
-      ...sandboxEnv({ root: installDir, fakeBin, launchctlLog, releaseUrl, bridgeUrl, port: appPort }),
+      ...sandboxEnv({ root: installDir, fakeBin, launchctlLog, releaseUrl, bridgeUrl, skillBaseUrl, port: appPort }),
     };
     const child = spawn("sh", [installer], { env, stdio: ["ignore", "pipe", "pipe"] });
     child.stdout.on("data", (d) => (out += d));
@@ -170,5 +182,12 @@ test("install.sh macOS branch: plist, launchctl, marker (WSL or direct)", async 
     path.join(installDir, "scripts", "recover.sh"),
   ]) {
     assert.ok(existsSync(file), `${path.basename(file)} should be laid out by the installer`);
+  }
+  // The content-to-video skill should be mirrored into the Codex skills dir.
+  for (const rel of ["SKILL.md", "references/sound-design.md", "scripts/classify.mjs"]) {
+    assert.ok(
+      existsSync(path.join(installDir, "codex-home", "skills", "content-to-video", rel)),
+      `content-to-video skill file should be installed (${rel})`,
+    );
   }
 });
