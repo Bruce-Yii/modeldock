@@ -44,4 +44,11 @@ fi
 cd "$ROOT"
 # Log instead of discarding: a background start that dies (bad node, port in use,
 # missing file) is otherwise completely silent for the user.
-nohup "$NODE_BIN" "$SERVER" >>"$ROOT/modeldock.log" 2>&1 &
+LOG="$ROOT/modeldock.log"
+# Rotate at startup, one previous generation (like codex-router's log-rotation):
+# the log is append-only for the life of the process, so a cap on growth can only
+# be applied between runs. 32 MB keeps roughly a month of daily use.
+if [ -f "$LOG" ] && [ "$(wc -c < "$LOG")" -gt 33554432 ]; then
+  mv -f "$LOG" "$LOG.1"
+fi
+nohup "$NODE_BIN" "$SERVER" >>"$LOG" 2>&1 &

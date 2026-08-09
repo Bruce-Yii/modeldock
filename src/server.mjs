@@ -786,16 +786,22 @@ export function createApp(services = createServices()) {
   });
   app.post([...NATIVE_IMAGE_PATHS].map((item) => `${CALLER_PATH_PREFIX}/:key${item}`), requireCallerKey, nativeImageRelay);
   // Bare paths stay for compatibility with configs written before the caller key
-  // existed. MODELDOCK_REQUIRE_CALLER_KEY=1 turns them off once the switch has
-  // been re-enabled and Codex uses the keyed URL.
+  // existed. Enforcement is ON by default: a hostile local web page can POST to
+  // loopback without reading ~/.modeldock, so an unkeyed path would let it burn
+  // the upstream tokens this process holds. MODELDOCK_REQUIRE_CALLER_KEY=0 (or
+  // off/false) re-opens the bare paths for legacy configs.
+  const callerKeyEnforced = () => {
+    const raw = String(process.env.MODELDOCK_REQUIRE_CALLER_KEY || "").toLowerCase();
+    return raw === "" || !["0", "false", "off"].includes(raw);
+  };
   const bareRelay = (req, res) => {
-    if (process.env.MODELDOCK_REQUIRE_CALLER_KEY === "1") {
+    if (callerKeyEnforced()) {
       return res.status(401).json({ error: { type: "caller_key_required", message: "This gateway requires the keyed base URL; re-enable the Codex switch." } });
     }
     return relayGatewayRequest(req, res, services);
   };
   const bareNativeImageRelay = (req, res) => {
-    if (process.env.MODELDOCK_REQUIRE_CALLER_KEY === "1") {
+    if (callerKeyEnforced()) {
       return res.status(401).json({ error: { type: "caller_key_required", message: "This gateway requires the keyed base URL; re-enable the Codex switch." } });
     }
     return nativeImageRelay(req, res);
