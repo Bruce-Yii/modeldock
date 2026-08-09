@@ -20,7 +20,7 @@ native GPT passthrough and live token, latency, and trace observability.
 </p>
 
 <p align="center">
-  <img src="assets/model_picker.png" alt="ModelDock models in the Codex model picker" width="100%" />
+  <img src="assets/model-picker-banner.png" alt="Native model + DeepSeek in the Codex model picker" width="70%" />
 </p>
 
 ## Why Model Dock For Codex
