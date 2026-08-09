@@ -555,6 +555,7 @@ test("pipeGatewayStream forwards bytes verbatim and feeds the tee", async () => 
   const sink = collectStream();
   const res = responseStub(sink);
   const teeChunks = [];
+  let firstResponseCount = 0;
   const tee = createUsageTee(() => {});
   const originalPush = tee.push.bind(tee);
   tee.push = (chunk) => {
@@ -568,11 +569,12 @@ test("pipeGatewayStream forwards bytes verbatim and feeds the tee", async () => 
       controller.close();
     },
   });
-  await pipeGatewayStream(body, res, tee);
+  await pipeGatewayStream(body, res, tee, () => { firstResponseCount += 1; });
   const forwarded = Buffer.concat(sink.chunks).toString("utf8");
   assert.match(forwarded, /response\.output_text\.delta/);
   assert.match(forwarded, /keepalive/);
   assert.equal(Buffer.concat(teeChunks).toString("utf8"), forwarded);
+  assert.equal(firstResponseCount, 1);
 });
 
 test("pipeGatewayStream settles when the client disconnects mid-stream", async () => {

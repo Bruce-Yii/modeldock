@@ -19,6 +19,18 @@ test("begin increments total and active, finish ok records success", () => {
   assert.equal(metrics.recent[0].status, "ok");
 });
 
+test("markFirstResponse records time to the first upstream response separately", () => {
+  const metrics = makeMetrics();
+  const finish = metrics.begin("responses", {});
+  finish.markFirstResponse();
+  const first = metrics.recent[0].firstResponseLatencyMs;
+  assert.ok(Number.isInteger(first));
+  finish.markFirstResponse();
+  assert.equal(metrics.recent[0].firstResponseLatencyMs, first);
+  finish({ ok: true });
+  assert.ok(metrics.recent[0].latencyMs >= first);
+});
+
 test("finish without ok flag counts as success (contract: ok !== false)", () => {
   const metrics = makeMetrics();
   const finish = metrics.begin("web", {});

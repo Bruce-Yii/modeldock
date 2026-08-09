@@ -644,7 +644,7 @@ function usageFromEvent(event) {
 // emits "close" without "finish" or "error"; without that handler the promise
 // never settles and the request stays counted as in-flight forever, with the
 // upstream body still being read.
-export async function pipeGatewayStream(upstreamBody, res, tee) {
+export async function pipeGatewayStream(upstreamBody, res, tee, onFirstResponse) {
   if (!upstreamBody) {
     res.end();
     return 0;
@@ -652,6 +652,7 @@ export async function pipeGatewayStream(upstreamBody, res, tee) {
   let bytes = 0;
   await new Promise((resolve, reject) => {
     const stream = Readable.fromWeb(upstreamBody);
+    let firstResponseMarked = false;
     let settled = false;
     const settle = (error) => {
       if (settled) return;
@@ -660,6 +661,10 @@ export async function pipeGatewayStream(upstreamBody, res, tee) {
       else resolve();
     };
     stream.on("data", (chunk) => {
+      if (!firstResponseMarked) {
+        firstResponseMarked = true;
+        onFirstResponse?.();
+      }
       tee?.push(chunk);
       bytes += chunk.byteLength || Buffer.byteLength(chunk);
     });
@@ -698,7 +703,7 @@ export function freeResponseFailure(parsed) {
 // free-tier guidance. Non-free traffic and upstream failures are untouched -
 // only a response.completed block starts the hold. The tee still receives every
 // chunk so usage extraction keeps working.
-export async function pipeFreeStream(upstreamBody, res, tee, failedMessage) {
+export async function pipeFreeStream(upstreamBody, res, tee, failedMessage, onFirstResponse) {
   if (!upstreamBody) {
     res.end();
     return { bytes: 0, empty: false, usage: undefined };
@@ -770,6 +775,7 @@ export async function pipeFreeStream(upstreamBody, res, tee, failedMessage) {
   };
   await new Promise((resolve, reject) => {
     const stream = Readable.fromWeb(upstreamBody);
+    let firstResponseMarked = false;
     outStream = stream;
     let settled = false;
     const settle = (error) => {
@@ -779,6 +785,10 @@ export async function pipeFreeStream(upstreamBody, res, tee, failedMessage) {
       else resolve();
     };
     stream.on("data", (chunk) => {
+      if (!firstResponseMarked) {
+        firstResponseMarked = true;
+        onFirstResponse?.();
+      }
       tee?.push(chunk);
       push(chunk);
       bytes += chunk.byteLength || Buffer.byteLength(chunk);
@@ -838,6 +848,7 @@ export async function relayNativeResponses(payload, res, services, { signal } = 
     upstream: "openai",
     routeReason: "native_passthrough",
   });
+  const markFirstResponse = () => finish?.markFirstResponse?.();
   const startedAt = Date.now();
   let usage;
   const tee = createUsageTee((event) => {
@@ -853,6 +864,7 @@ export async function relayNativeResponses(payload, res, services, { signal } = 
     });
     const upstreamBytes = Buffer.byteLength(JSON.stringify(native));
     if (!upstream.ok) {
+      markFirstResponse();
       const raw = await upstream.text();
       if (!res.headersSent) {
         res.statusCode = upstream.status;
@@ -888,7 +900,8 @@ export async function relayNativeResponses(payload, res, services, { signal } = 
       res.setHeader("Cache-Control", "no-cache, no-transform");
       res.flushHeaders();
     }
-    const bytesOut = await pipeGatewayStream(upstream.body, res, tee);
+    const bytesOut = await pipeGatewayStream(upstream.body, res, tee, markFirstResponse);
+    markFirstResponse();
     finish?.({
       ok: true,
       httpStatus: upstream.status,
@@ -1378,6 +1391,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     upstream: target.provider,
     routeReason: route.reason,
   });
+  const markFirstResponse = () => finish?.markFirstResponse?.();
   const startedAt = Date.now();
   let usage;
   let bytesOut = 0;
@@ -1399,6 +1413,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     });
     const upstreamBytes = Buffer.byteLength(JSON.stringify(normalizedPayload));
     if (!upstream.ok) {
+      markFirstResponse();
       if (config.debug?.dumpDir) {
         dumpRequestBody(config.debug.dumpDir, { ...normalizedPayload, model: upstreamModel });
       }
@@ -1491,13 +1506,14 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       res.flushHeaders();
     }
     if (target.free && normalizedPayload.stream === true) {
-      const result = await pipeFreeStream(upstreamBody, res, tee, freeEmptyError?.body.error.message);
+      const result = await pipeFreeStream(upstreamBody, res, tee, freeEmptyError?.body.error.message, markFirstResponse);
       bytesOut = result.bytes;
       freeEmpty = result.empty;
       if (result.usage) usage = result.usage;
     } else {
-      bytesOut = await pipeGatewayStream(upstreamBody, res, tee);
+      bytesOut = await pipeGatewayStream(upstreamBody, res, tee, markFirstResponse);
     }
+    markFirstResponse();
     if (completedResponse && routeAffinity) {
       routeAffinity.registerResponse(completedResponse, route.model);
     }

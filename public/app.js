@@ -123,20 +123,34 @@ let wavePoints = [];
 function renderContextWave(recent) {
   const canvas = $("context-wave");
   if (!canvas) return;
+  const responseLatencies = recent
+    .filter((item) => item.kind === "responses" && Number.isFinite(Number(item.firstResponseLatencyMs)))
+    .sort((a, b) => (a.finishedAt || a.startedAt || 0) - (b.finishedAt || b.startedAt || 0));
   const seen = new Set(waveHistory.map((point) => point.id));
   for (const item of recent) {
     // Only sample completed responses. In-flight (active) records carry no usage
     // yet and would otherwise pin the newest sample at 0; skipping them here means
     // a record is first added when it finishes with a real input-token count.
     if (item.kind !== "responses" || item.status !== "ok" || seen.has(item.id)) continue;
-    waveHistory.push({ id: item.id, t: item.startedAt || 0, v: Number(item.inputTokens) || 0 });
+    waveHistory.push({
+      id: item.id,
+      t: item.startedAt || 0,
+      v: Number(item.inputTokens) || 0,
+      firstResponseLatencyMs: Number(item.firstResponseLatencyMs) || 0,
+    });
   }
   waveHistory.sort((a, b) => a.t - b.t);
   if (waveHistory.length > WAVE_MAX_POINTS) waveHistory.splice(0, waveHistory.length - WAVE_MAX_POINTS);
   const last = waveHistory.length ? waveHistory[waveHistory.length - 1].v : 0;
+  const lastLatency = responseLatencies.length
+    ? Number(responseLatencies[responseLatencies.length - 1].firstResponseLatencyMs)
+    : waveHistory.length
+      ? waveHistory[waveHistory.length - 1].firstResponseLatencyMs
+      : 0;
   wavePeakState.peak = waveHistory.reduce((max, point) => Math.max(max, point.v), 0);
   set("wave-last", number(last));
   set("wave-peak", number(wavePeakState.peak));
+  set("context-latency", duration(lastLatency));
   set("wave-count", number(waveHistory.length));
   drawWave(canvas, waveHistory, wavePeakState.peak, waveHoverState.hover, WAVE_AMBER, wavePoints);
 }

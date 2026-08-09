@@ -51,7 +51,14 @@ export class Metrics extends EventEmitter {
     this.emit("change");
 
     let finished = false;
-    return (result = {}) => {
+    let firstResponseMarked = false;
+    const markFirstResponse = () => {
+      if (firstResponseMarked) return;
+      firstResponseMarked = true;
+      record.firstResponseLatencyMs = Math.max(0, Date.now() - record.startedAt);
+      this.emit("change");
+    };
+    const finish = (result = {}) => {
       if (finished) return;
       finished = true;
       const latencyMs = Date.now() - record.startedAt;
@@ -63,6 +70,8 @@ export class Metrics extends EventEmitter {
       Object.assign(record, result, { latencyMs, status: ok ? "ok" : "error", finishedAt: Date.now() });
       this.emit("change");
     };
+    finish.markFirstResponse = markFirstResponse;
+    return finish;
   }
 
   recordResponseTransform(report, { bytesIn = 0, streaming = false, routeReason } = {}) {
