@@ -1068,7 +1068,6 @@ export function createApp(services = createServices()) {
       // Config objects built by tests (and any future non-loadConfig wiring)
       // may lack the tokens map; the settings write must still work.
       config.tokens = config.tokens || {};
-      const targetFile = config.envFile || envFileFor();
       if (body.opencodeGoToken) {
         const token = String(body.opencodeGoToken).trim();
         providers.push("opencode-go");
@@ -1094,8 +1093,10 @@ export function createApp(services = createServices()) {
       if (body.exaApiKey) {
         const checked = validateProviderToken("exa", body.exaApiKey);
         if (!checked.ok) throw Object.assign(new Error(checked.error), { code: "invalid_exa_api_key" });
-        writeEnvFile({ EXA_API_KEY: checked.value }, targetFile);
-        config.exaApiKey = checked.value;
+        // Deferred into the shared updates write: EXA_API_KEY must land in the
+        // same atomic writeEnvFile call as the provider tokens, so a rejected
+        // provider probe never leaves a partially-updated .env behind.
+        updates.EXA_API_KEY = checked.value;
       }
       if (Object.keys(updates).length) {
         for (const [envKey, provider, label] of [
@@ -1116,6 +1117,7 @@ export function createApp(services = createServices()) {
         writeEnvFile(updates, config.envFile);
         config.tokens["opencode-go"] = updates.OPENCODE_GO_TOKEN || config.tokens["opencode-go"];
         config.tokens["deepseek-official"] = updates.DEEPSEEK_API_KEY || config.tokens["deepseek-official"];
+        if (updates.EXA_API_KEY) config.exaApiKey = updates.EXA_API_KEY;
       }
       recordSettingsEvent({ providers, ok: true, filePath: config.settingsEventsFile });
       recordConfigAction(metrics, "settings_update", { ok: true });

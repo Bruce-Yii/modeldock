@@ -792,6 +792,52 @@ test("settings save rejects a token the upstream rejects without writing", async
   }
 });
 
+test("settings save rejects a failed provider probe without persisting exa", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-settings-exa-atomic-"));
+  const envFile = path.join(dir, ".env");
+  const eventsFile = path.join(dir, "settings-events.jsonl");
+  const instance = await startApp({
+    envFile,
+    settingsEventsFile: eventsFile,
+    codexCatalogFile: path.join(dir, "codex-model-catalog.json"),
+  });
+  t.after(async () => {
+    await instance.stop();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async (url, options) => {
+      if (String(url) === "https://api.deepseek.com/v1/responses") {
+        return { ok: false, status: 401, json: async () => ({}) };
+      }
+      return originalFetch(url, options);
+    };
+
+    const response = await fetch(`${instance.base}/api/settings`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        exaApiKey: "exa_valid_shape_123",
+        deepseekApiKey: "sk-well-formed-but-rejected-123456",
+      }),
+    });
+    assert.equal(response.status, 400);
+    const body = await response.json();
+    assert.equal(body.error.type, "token_rejected_deepseek-official");
+
+    // A rejected provider probe must leave the .env byte-clean: the exa key
+    // that passed validation is deferred into the same atomic write and must
+    // not have been persisted on its own.
+    const env = await readFile(envFile, "utf8").catch(() => "");
+    assert.doesNotMatch(env, /EXA_API_KEY=/);
+    assert.doesNotMatch(env, /DEEPSEEK_API_KEY=/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("settings save rejects placeholder tokens before any upstream probe", async (t) => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-settings-placeholder-"));
   const instance = await startApp({

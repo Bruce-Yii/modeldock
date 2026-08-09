@@ -8,13 +8,13 @@ export function validateProviderToken(provider, value) {
   if (!raw) {
     return { ok: false, error: "The token is empty." };
   }
-  if (/["']/.test(raw)) {
-    return { ok: false, error: "The token must not contain quotes." };
+  if (/[\s"']/.test(raw)) {
+    return { ok: false, error: "The token must not contain quotes or spaces." };
   }
   if (provider === "deepseek-official" && !raw.startsWith("sk-")) {
     return { ok: false, error: "A DeepSeek API key must start with sk- (create one at https://platform.deepseek.com/api_keys)." };
   }
-  if (provider === "exa" && !/^exa_[A-Za-z0-9]+$/.test(raw)) {
+  if (provider === "exa" && !/^exa_[A-Za-z0-9_-]+$/.test(raw)) {
     return { ok: false, error: "An Exa API key must look like exa_<token>." };
   }
   return { ok: true, value: raw };
