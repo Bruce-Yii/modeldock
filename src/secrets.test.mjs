@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -10,7 +10,7 @@ import {
   dpapiSupported,
   PREFIX,
 } from "./secrets.mjs";
-import { migrateEnvSecrets, parseEnvFile } from "./config.mjs";
+import { loadConfig, migrateEnvSecrets, parseEnvFile } from "./config.mjs";
 
 test("recognizes only the token keys as secrets", () => {
   assert.equal(isSecretKey("OPENCODE_GO_TOKEN"), true);
@@ -92,4 +92,44 @@ test("migrateEnvSecrets does nothing when there is nothing to migrate", (t) => {
   const result = migrateEnvSecrets(file);
   assert.equal(result.migrated, 0);
   assert.equal(result.reason, "none-plain");
+});
+
+test("loadConfig ignores placeholder tokens from .env and records an audit event", (t) => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-loadguard-"));
+  const envFile = path.join(dir, ".env");
+  const eventsFile = path.join(dir, "settings-events.jsonl");
+  const codexHome = path.join(dir, "codex");
+  writeFileSync(
+    envFile,
+    "OPENCODE_GO_TOKEN=x\nDEEPSEEK_API_KEY=sk-good-key-that-is-long-enough\n",
+    "utf8",
+  );
+  const saved = {
+    MODELDOCK_ENV_FILE: process.env.MODELDOCK_ENV_FILE,
+    MODELDOCK_CODEX_HOME: process.env.MODELDOCK_CODEX_HOME,
+    MODELDOCK_SETTINGS_EVENTS_FILE: process.env.MODELDOCK_SETTINGS_EVENTS_FILE,
+    OPENCODE_GO_TOKEN: process.env.OPENCODE_GO_TOKEN,
+    DEEPSEEK_API_KEY: process.env.DEEPSEEK_API_KEY,
+  };
+  process.env.MODELDOCK_ENV_FILE = envFile;
+  process.env.MODELDOCK_CODEX_HOME = codexHome;
+  process.env.MODELDOCK_SETTINGS_EVENTS_FILE = eventsFile;
+  delete process.env.OPENCODE_GO_TOKEN;
+  delete process.env.DEEPSEEK_API_KEY;
+  t.after(() => {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const config = loadConfig();
+  assert.equal(config.tokens["opencode-go"], "", "a placeholder never routes as a token");
+  assert.equal(config.tokens["deepseek-official"], "sk-good-key-that-is-long-enough");
+  const event = JSON.parse(readFileSync(eventsFile, "utf8").trim());
+  assert.equal(event.action, "env_placeholder_ignored");
+  assert.equal(event.ok, false);
+  assert.deepEqual(event.providers, ["opencode-go"]);
+  assert.equal(event.error, "placeholder_token_ignored");
 });

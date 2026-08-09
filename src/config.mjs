@@ -1,9 +1,11 @@
 import process from "node:process";
 import os from "node:os";
 import path from "node:path";
-import { readdirSync, readFileSync, statSync, existsSync, mkdirSync, writeFileSync, copyFileSync } from "node:fs";
-import { PROVIDER_SEPARATOR, profileById, publishedSlugFor } from "./profiles.mjs";
+import { readdirSync, readFileSync, statSync, existsSync, mkdirSync, writeFileSync, copyFileSync, rmSync } from "node:fs";
+import { PROVIDER_SEPARATOR, applyCustomProfile, profileById, publishedSlugFor } from "./profiles.mjs";
+import { normalizeBaseUrl } from "./custom-endpoint.mjs";
 import { encryptSecret, decryptSecret, isSecretKey } from "./secrets.mjs";
+import { recordSettingsEvent } from "./settings-events.mjs";
 
 // Resolve the user configuration (.env) file. Priority:
 //   1. MODELDOCK_ENV_FILE (explicit path)
@@ -44,6 +46,19 @@ export function serializeEnvFile(entries) {
     .join("\n") + "\n";
 }
 
+// A value that can never be a real credential: missing, too short, or a
+// placeholder/masked shape. Rejected before it reaches the disk or the relay so
+// a bad settings save can never silently take the gateway down (the 401
+// incident class: a literal "x" persisted and routed).
+export function isPlaceholderToken(value) {
+  const token = String(value || "").trim();
+  if (!token) return true;
+  if (token.length < 12) return true;
+  if (/^[xX]+$/.test(token)) return true;
+  if (/^[\u2022.*_-]+$/.test(token)) return true;
+  return false;
+}
+
 // Load a .env file into process.env without overriding real environment variables.
 // Secret keys are decrypted on the way in, so callers always see the plaintext token;
 // plaintext values (an old unencrypted file) pass through unchanged.
@@ -62,30 +77,83 @@ function applyEnvFile(file) {
 export function writeEnvFile(updates, file = envFileFor()) {
   if (!file) file = envFileFor();
   const raw = existsSync(file) ? readFileSync(file, "utf8") : "";
-  const lines = raw.split(/\r?\n/);
-  const updated = new Set(Object.keys(updates));
-  const next = [];
-  for (const line of lines) {
-    const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=/);
-    if (match && updated.has(match[1])) {
-      // Secrets are stored encrypted on disk; everything else stays as given.
-      const value = isSecretKey(match[1]) ? encryptSecret(updates[match[1]]) : updates[match[1]];
-      next.push(`${match[1]}=${value}`);
-      updated.delete(match[1]);
-    } else {
-      next.push(line);
+  const hasSecretUpdate = Object.keys(updates).some((key) => isSecretKey(key));
+  let backup;
+  if (hasSecretUpdate && existsSync(file)) {
+    backup = `${file}.bak-${Date.now()}`;
+    copyFileSync(file, backup);
+  }
+  try {
+    const lines = raw.split(/\r?\n/);
+    const updated = new Set(Object.keys(updates));
+    const next = [];
+    for (const line of lines) {
+      const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=/);
+      if (match && updated.has(match[1])) {
+        // Secrets are stored encrypted on disk; everything else stays as given.
+        const value = isSecretKey(match[1]) ? encryptSecret(updates[match[1]]) : updates[match[1]];
+        next.push(`${match[1]}=${value}`);
+        updated.delete(match[1]);
+      } else {
+        next.push(line);
+      }
+    }
+    for (const key of updated) {
+      const value = isSecretKey(key) ? encryptSecret(updates[key]) : updates[key];
+      next.push(`${key}=${value}`);
+    }
+    const content = next.join("\n").replace(/\n+$/, "\n");
+    // Write-verify: the on-disk file must decrypt back to exactly the intended
+    // plaintext. A silent DPAPI failure would otherwise persist a corrupt value
+    // that only surfaces on the next restart.
+    if (hasSecretUpdate) {
+      const persisted = parseEnvFile(content);
+      for (const key of Object.keys(updates)) {
+        if (!isSecretKey(key)) continue;
+        const plain = String(updates[key]);
+        const stored = persisted[key];
+        if (!stored || decryptSecret(stored) !== plain) {
+          const error = new Error(`Secret round-trip check failed for ${key}; .env was left unchanged.`);
+          error.code = "env_write_verify_failed";
+          throw error;
+        }
+      }
+    }
+    mkdirSync(path.dirname(file), { recursive: true });
+    writeFileSync(file, content, "utf8");
+    if (hasSecretUpdate) pruneEnvBackups(file);
+    for (const [key, value] of Object.entries(updates)) {
+      if (value) process.env[key] = isSecretKey(key) ? decryptSecret(encryptSecret(value)) : value;
+    }
+    return file;
+  } catch (error) {
+    if (backup && existsSync(backup)) {
+      try {
+        copyFileSync(backup, file);
+      } catch {
+        // Keep the original error; restoration is best effort.
+      }
+    }
+    throw error;
+  }
+}
+
+function pruneEnvBackups(file, keep = 5) {
+  const dir = path.dirname(file);
+  const prefix = `${path.basename(file)}.bak-`;
+  let backups;
+  try {
+    backups = readdirSync(dir).filter((name) => name.startsWith(prefix)).sort();
+  } catch {
+    return;
+  }
+  for (const name of backups.slice(0, Math.max(0, backups.length - keep))) {
+    try {
+      rmSync(path.join(dir, name), { force: true });
+    } catch {
+      // Best effort: an unremovable backup is harmless.
     }
   }
-  for (const key of updated) {
-    const value = isSecretKey(key) ? encryptSecret(updates[key]) : updates[key];
-    next.push(`${key}=${value}`);
-  }
-  mkdirSync(path.dirname(file), { recursive: true });
-  writeFileSync(file, next.join("\n").replace(/\n+$/, "\n"), "utf8");
-  for (const [key, value] of Object.entries(updates)) {
-    if (value) process.env[key] = isSecretKey(key) ? decryptSecret(encryptSecret(value)) : value;
-  }
-  return file;
 }
 
 // One-time migration of a plaintext .env to encrypted secrets. Backs up the original,
@@ -221,11 +289,31 @@ export function loadConfig() {
     ? { token: process.env[profile.tokenEnvName], source: "environment" }
     : (profileId === "opencode-go" ? discoverCodexGoToken(codexHome) : { token: "", source: "missing" });
 
-  const opencodeGoToken = process.env.OPENCODE_GO_TOKEN || discoverCodexGoToken(codexHome).token;
-  const deepseekToken = process.env.DEEPSEEK_API_KEY || "";
+  // Load-side write protection: a placeholder or unreadable token in .env is
+  // treated as unset and (for OpenCode Go) falls back to the Codex config
+  // backup instead of being routed. A bad persisted value therefore degrades to
+  // "no token" plus an audit event, never to a silent 401 wall.
+  const rawOpencodeToken = process.env.OPENCODE_GO_TOKEN || "";
+  const rawDeepseekToken = process.env.DEEPSEEK_API_KEY || "";
+  const ignoredTokens = [];
+  if (rawOpencodeToken && isPlaceholderToken(rawOpencodeToken)) ignoredTokens.push("opencode-go");
+  if (rawDeepseekToken && isPlaceholderToken(rawDeepseekToken)) ignoredTokens.push("deepseek-official");
+  if (ignoredTokens.length) {
+    recordSettingsEvent({ action: "env_placeholder_ignored", providers: ignoredTokens, ok: false, error: "placeholder_token_ignored" });
+  }
+  const opencodeGoToken = rawOpencodeToken && !isPlaceholderToken(rawOpencodeToken) ? rawOpencodeToken : discoverCodexGoToken(codexHome).token;
+  const deepseekToken = rawDeepseekToken && !isPlaceholderToken(rawDeepseekToken) ? rawDeepseekToken : "";
+  // Custom endpoint (dashboard "Custom model" section): a user-configured
+  // Responses provider. Empty until the Add flow writes these keys into .env.
+  const customBaseUrl = normalizeBaseUrl(process.env.MODELDOCK_CUSTOM_BASE_URL || "");
+  const customApiKey = process.env.MODELDOCK_CUSTOM_API_KEY || "";
+  const customModel = String(process.env.MODELDOCK_CUSTOM_MODEL || "").trim();
+  const customMain = ["1", "true", "on", "yes"].includes(String(process.env.MODELDOCK_CUSTOM_MAIN || "").toLowerCase());
+  const customVision = ["1", "true", "on", "yes"].includes(String(process.env.MODELDOCK_CUSTOM_VISION || "").toLowerCase());
   const tokens = {
     "opencode-go": opencodeGoToken,
     "deepseek-official": deepseekToken,
+    ...(customApiKey ? { custom: customApiKey } : {}),
   };
 
   // A model reference may come from an older .env as a bare id (gpt-5.6-luna). Publish
@@ -235,7 +323,8 @@ export function loadConfig() {
     const id = String(raw || "").trim();
     return !id || id.includes(PROVIDER_SEPARATOR) ? id : publishedSlugFor(profileId, id);
   };
-  const mainModel = modelRef(process.env.MODELDOCK_MAIN_MODEL || "deepseek-v4-flash");
+  const customSlug = customModel ? `${customModel}${PROVIDER_SEPARATOR}custom` : "";
+  const mainModel = modelRef(process.env.MODELDOCK_MAIN_MODEL || (customMain && customSlug ? customSlug : "deepseek-v4-flash"));
   // Mode-aware default vision model. ON mode (paid native-GPT merge) defaults to
   // Luna so image turns never route to the zen free endpoint, whose empty-output
   // bug burns the whole output budget and returns nothing (200 + output:[] or a
@@ -254,7 +343,7 @@ export function loadConfig() {
     return hasChatGptLogin(codexHome);
   })();
   const defaultVisionModel = trialMode || !nativeMerge ? "mimo-v2.5-free" : "gpt-5.6-luna";
-  const visionModel = modelRef(process.env.MODELDOCK_VISION_MODEL || defaultVisionModel);
+  const visionModel = modelRef(process.env.MODELDOCK_VISION_MODEL || (customVision && customSlug ? customSlug : defaultVisionModel));
   const visionFallbackModel = modelRef(process.env.MODELDOCK_VISION_FALLBACK_MODEL || "minimax-m3");
 
   const debug = {
@@ -269,7 +358,7 @@ export function loadConfig() {
   const mcpTransportRaw = (process.env.MODELDOCK_MCP_TRANSPORT || "stdio").trim().toLowerCase();
   const mcpTransport = ["stdio", "url"].includes(mcpTransportRaw) ? mcpTransportRaw : "stdio";
 
-  return Object.freeze({
+  const config = Object.freeze({
     host,
     port: integer("MODELDOCK_PORT", 4097, { min: 1, max: 65535 }),
     profile,
@@ -286,6 +375,11 @@ export function loadConfig() {
     goToken: discovered.token,
     goTokenSource: discovered.source,
     tokens,
+    customBaseUrl,
+    customApiKey,
+    customModel,
+    customMain,
+    customVision,
     mainModel,
     visionModel,
     visionFallbackModel,
@@ -339,6 +433,10 @@ export function loadConfig() {
     codexHome,
     envFile: envFileFor(),
   });
+  // Populate the custom provider profile so catalog building and per-model
+  // routing see the configured endpoint/model (see profiles.mjs).
+  applyCustomProfile(config);
+  return config;
 }
 
 export function publicConfig(config) {
@@ -360,6 +458,5 @@ export function publicConfig(config) {
       dumpDir: config.debug?.dumpDir || "",
       dumpAll: Boolean(config.debug?.dumpAll),
     },
-    envFile: config.envFile || "",
   };
 }

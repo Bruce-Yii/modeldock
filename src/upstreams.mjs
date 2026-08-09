@@ -121,6 +121,10 @@ export function createUpstreams({ config, metrics, mediaStore, memoryStore = nul
 
   function visionEndpointFor(model) {
     const provider = providerForModel(config, model);
+    if (provider === "custom") {
+      const base = (config.customBaseUrl || "").replace(/\/+$/, "");
+      if (base) return { url: `${base}/responses`, style: "responses" };
+    }
     if (provider === "deepseek-official") return { url: upstreamUrl(config.deepseekBaseUrl || profileById("deepseek-official").baseUrl, "responses"), style: "responses" };
     const opencodeBase = config.opencodeBaseUrl || config.goBaseUrl;
     // The selected model may be the published slug (gpt-5.6-luna@opencode-go); the

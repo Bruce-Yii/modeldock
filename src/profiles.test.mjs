@@ -6,6 +6,7 @@ import {
   publishedSlugFor,
   profileById,
   profileOptions,
+  applyCustomProfile,
   CONTEXT_WINDOW,
   AUTO_COMPACT_PERCENT,
   AUTO_COMPACT_TOKEN_LIMIT,
@@ -32,8 +33,19 @@ test("exposes every registered profile through the registry", () => {
 
 test("lists all profiles as selectable options", () => {
   const options = profileOptions();
-  assert.deepEqual(options.map((option) => option.id), ["opencode-go", "deepseek-official"]);
+  assert.deepEqual(options.map((option) => option.id), ["opencode-go", "deepseek-official", "custom"]);
   assert.ok(options.every((option) => typeof option.label === "string" && option.label.length > 0));
+});
+
+test("custom profile is empty until configured and fills from config", () => {
+  const empty = applyCustomProfile({ customModel: "", customBaseUrl: "" });
+  assert.equal(empty.availableModels.length, 0);
+  const filled = applyCustomProfile({ customModel: "vendor/model-x", customBaseUrl: "https://vendor.example/v1", customVision: true });
+  assert.equal(filled.id, "custom");
+  assert.equal(filled.label, "Custom");
+  assert.deepEqual(filled.availableModels, [
+    { id: "vendor/model-x", label: "vendor/model-x", endpoint: "responses", supportsVision: true, ownerQualified: true, status: "available" },
+  ]);
 });
 
 test("opencode-go profile keeps the Go-specific hardening flags", () => {

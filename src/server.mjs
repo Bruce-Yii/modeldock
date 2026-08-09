@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import express from "express";
 import zlib from "node:zlib";
 import { createMcpExpressApp } from "@modelcontextprotocol/express";
-import { loadConfig, publicConfig, writeEnvFile, envFileFor, migrateEnvSecrets } from "./config.mjs";
+import { loadConfig, publicConfig, writeEnvFile, envFileFor, migrateEnvSecrets, isPlaceholderToken } from "./config.mjs";
 import { catalogFor } from "./catalog.mjs";
 import { nativeModelSlugs, refreshNativeCatalog } from "./native-catalog.mjs";
 import { MediaStore } from "./media-store.mjs";
@@ -21,7 +21,9 @@ import { createUpdater } from "./update.mjs";
 import { clearOwnerFile, describeOwnerConflict, writeOwnerFile } from "./instance-owner.mjs";
 import { CALLER_PATH_PREFIX, callerBasePath, callerKeyEqual, loadOrCreateCallerKey } from "./caller-key.mjs";
 import { RouteAffinity } from "./router.mjs";
-import { bareModelId, profileOptions, profileById, providerForModel, publishedSlugFor, tokenFor, TRIAL_MAIN_MODEL, TRIAL_VISION_MODEL } from "./profiles.mjs";
+import { PROVIDER_SEPARATOR, applyCustomProfile, bareModelId, profileOptions, profileById, providerForModel, publishedSlugFor, tokenFor, TRIAL_MAIN_MODEL, TRIAL_VISION_MODEL } from "./profiles.mjs";
+import { CustomEndpointError, listEndpointModels, normalizeBaseUrl, probeCustomResponses } from "./custom-endpoint.mjs";
+import { recordSettingsEvent } from "./settings-events.mjs";
 import staticFiles from "./static-inline.mjs";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -250,12 +252,18 @@ function settingsPayload(services) {
   const mainToken = config.tokens?.["opencode-go"] || config.goToken || "";
   const deepseekToken = config.tokens?.["deepseek-official"] || "";
   return {
-    envFile: config.envFile || "",
     tokenConfigured: Boolean(mainToken || deepseekToken),
     providers: [
       { id: "opencode-go", label: "OpenCode Go", tokenConfigured: Boolean(mainToken) },
       { id: "deepseek-official", label: "DeepSeek (Official)", tokenConfigured: Boolean(deepseekToken) },
     ],
+    custom: {
+      baseUrl: config.customBaseUrl || "",
+      model: config.customModel || "",
+      apiKeyConfigured: Boolean(config.tokens?.["custom"]),
+      asMain: Boolean(config.customMain),
+      asVision: Boolean(config.customVision),
+    },
     models: {
       mainModel: modelSelection?.mainModel || config.mainModel,
       visionModel: modelSelection?.visionModel || config.visionModel,
@@ -266,6 +274,19 @@ function settingsPayload(services) {
       enabled: Boolean(autostart?.enabled?.()),
     },
   };
+}
+
+// Verify a newly entered provider token with the same near-free Responses probe
+// the custom-endpoint Add flow uses. The token is only persisted when its own
+// upstream accepts it, so a well-formed but wrong key cannot be written and then
+// surface as a 401 wall after the next restart.
+async function probeSettingsToken(config, provider, token) {
+  const profile = profileById(provider);
+  const baseUrl = provider === "deepseek-official"
+    ? (config.deepseekBaseUrl || profile.baseUrl)
+    : (config.opencodeBaseUrl || config.goBaseUrl || profile.baseUrl);
+  const model = profile.availableModels?.[0]?.id || config.mainModel;
+  return probeCustomResponses({ baseUrl, apiKey: token, modelId: model });
 }
 
 function configMutationGuard(config) {
@@ -306,6 +327,7 @@ const ZEN_FREE_BASE = "https://opencode.ai/zen/v1";
 
 function upstreamBaseForModel(config, model) {
   const provider = providerForModel(config, model);
+  if (provider === "custom") return (config.customBaseUrl || "").replace(/\/$/, "");
   if (provider === "deepseek-official") return (config.deepseekBaseUrl || profileById("deepseek-official").baseUrl).replace(/\/$/, "");
   const upstream = bareModelId(model);
   if (upstream && (upstream.endsWith("-free") || upstream === "big-pickle")) return ZEN_FREE_BASE;
@@ -586,6 +608,9 @@ async function refreshProfileModels(profile, config) {
 }
 export function createServices(config = loadConfig()) {
   const mutableConfig = { ...config };
+  // loadConfig always supplies `tokens`; test fixtures build config objects by
+  // hand, so make the runtime copy self-consistent before routes mutate it.
+  mutableConfig.tokens = mutableConfig.tokens || {};
   const metrics = new Metrics({ recentLimit: mutableConfig.recentLimit });
   const mediaStore = new MediaStore({
     ttlMs: mutableConfig.mediaTtlMs,
@@ -1025,22 +1050,129 @@ export function createApp(services = createServices()) {
     }
   });
   app.get("/api/settings", (req, res) => res.json(settingsPayload(services)));
-  app.post("/api/settings", mutateConfig, (req, res) => {
+  app.post("/api/settings", mutateConfig, async (req, res) => {
     const body = req.body || {};
+    const updates = {};
+    const providers = [];
+    let failedProvider = null;
     try {
       if (body.opencodeGoToken) {
-        writeEnvFile({ OPENCODE_GO_TOKEN: String(body.opencodeGoToken) });
-        config.tokens["opencode-go"] = String(body.opencodeGoToken);
+        const token = String(body.opencodeGoToken).trim();
+        providers.push("opencode-go");
+        if (isPlaceholderToken(token)) {
+          const error = new Error("A valid OpenCode Go token is required.");
+          error.code = "invalid_opencode_go_token";
+          throw error;
+        }
+        updates.OPENCODE_GO_TOKEN = token;
       }
       if (body.deepseekApiKey) {
-        writeEnvFile({ DEEPSEEK_API_KEY: String(body.deepseekApiKey) });
-        config.tokens["deepseek-official"] = String(body.deepseekApiKey);
+        const token = String(body.deepseekApiKey).trim();
+        providers.push("deepseek-official");
+        if (isPlaceholderToken(token)) {
+          const error = new Error("A valid DeepSeek API key is required.");
+          error.code = "invalid_deepseek_api_key";
+          throw error;
+        }
+        updates.DEEPSEEK_API_KEY = token;
       }
+      if (Object.keys(updates).length) {
+        for (const [envKey, provider, label] of [
+          ["OPENCODE_GO_TOKEN", "opencode-go", "OpenCode Go"],
+          ["DEEPSEEK_API_KEY", "deepseek-official", "DeepSeek"],
+        ]) {
+          if (!updates[envKey]) continue;
+          try {
+            await probeSettingsToken(config, provider, updates[envKey]);
+          } catch (error) {
+            const detail = error instanceof CustomEndpointError ? error.message : String(error.message || error);
+            const wrapped = new Error(`${label} rejected this token: ${detail}`);
+            wrapped.code = `token_rejected_${provider}`;
+            failedProvider = provider;
+            throw wrapped;
+          }
+        }
+        writeEnvFile(updates, config.envFile);
+        config.tokens["opencode-go"] = updates.OPENCODE_GO_TOKEN || config.tokens["opencode-go"];
+        config.tokens["deepseek-official"] = updates.DEEPSEEK_API_KEY || config.tokens["deepseek-official"];
+      }
+      recordSettingsEvent({ providers, ok: true, filePath: config.settingsEventsFile });
       recordConfigAction(metrics, "settings_update", { ok: true });
       return res.json(settingsPayload(services));
     } catch (error) {
+      const errorProviders = failedProvider ? [failedProvider] : providers;
+      recordSettingsEvent({ providers: errorProviders, ok: false, error: error.code || "settings_failed", filePath: config.settingsEventsFile });
       recordConfigAction(metrics, "settings_update", { ok: false, error: error.message });
-      return res.status(500).json({ error: { type: "settings_failed", message: error.message } });
+      const status = error.code?.startsWith("invalid_") || error.code?.startsWith("token_rejected_") ? 400 : 500;
+      return res.status(status).json({ error: { type: error.code || "settings_failed", message: error.message } });
+    }
+  });
+
+  function customErrorPayload(error) {
+    const code = error instanceof CustomEndpointError ? error.code : "upstream";
+    return { error: { type: code, message: error.message } };
+  }
+
+  // Dashboard "Custom model" flow: list the models a user endpoint advertises,
+  // then Add runs a Responses probe before persisting the provider.
+  app.post("/api/custom/list-models", mutateConfig, async (req, res) => {
+    const { baseUrl, apiKey } = req.body || {};
+    try {
+      const result = await listEndpointModels({ baseUrl, apiKey });
+      return res.json(result);
+    } catch (error) {
+      return res.status(400).json(customErrorPayload(error));
+    }
+  });
+
+  app.post("/api/custom/add", mutateConfig, async (req, res) => {
+    const { baseUrl, apiKey, modelId, asMain, asVision } = req.body || {};
+    try {
+      const model = String(modelId || "").trim();
+      if (!model) throw new CustomEndpointError("model", "A model id is required.");
+      if (!String(apiKey || "").trim()) throw new CustomEndpointError("key", "An API key is required.");
+      const probe = await probeCustomResponses({ baseUrl, apiKey, modelId: model });
+      const qualified = `${model}${PROVIDER_SEPARATOR}custom`;
+      const updates = {
+        MODELDOCK_CUSTOM_BASE_URL: normalizeBaseUrl(baseUrl),
+        MODELDOCK_CUSTOM_API_KEY: apiKey,
+        MODELDOCK_CUSTOM_MODEL: model,
+        MODELDOCK_CUSTOM_MAIN: asMain ? "1" : "0",
+        MODELDOCK_CUSTOM_VISION: asVision ? "1" : "0",
+      };
+      if (asMain) updates.MODELDOCK_MAIN_MODEL = qualified;
+      else if ((config.mainModel || "") === qualified) updates.MODELDOCK_MAIN_MODEL = "";
+      if (asVision) updates.MODELDOCK_VISION_MODEL = qualified;
+      else if ((config.visionModel || "") === qualified) updates.MODELDOCK_VISION_MODEL = "";
+      writeEnvFile(updates, config.envFile);
+      config.customBaseUrl = updates.MODELDOCK_CUSTOM_BASE_URL;
+      config.customApiKey = apiKey;
+      config.customModel = model;
+      config.customMain = Boolean(asMain);
+      config.customVision = Boolean(asVision);
+      config.tokens.custom = apiKey;
+      applyCustomProfile(config);
+      if (asMain) {
+        config.mainModel = qualified;
+        services.modelSelection.mainModel = qualified;
+        services.configSwitcher.model = qualified;
+      }
+      if (asVision) services.modelSelection.visionModel = qualified;
+      // Rewrite the catalog file so the Codex picker sees the model immediately
+      // instead of waiting for the next hourly refresh.
+      services.writeCatalogFile?.();
+      recordConfigAction(metrics, "custom_add", { ok: true, model });
+      return res.json({
+        ok: true,
+        model,
+        usage: probe.usage,
+        endpoint: probe.endpoint,
+        responsesUrl: probe.responsesUrl,
+        settings: settingsPayload(services),
+      });
+    } catch (error) {
+      recordConfigAction(metrics, "custom_add", { ok: false, error: error.message });
+      return res.status(400).json(customErrorPayload(error));
     }
   });
 

@@ -953,13 +953,184 @@ async function openSettings() {
     goInput.placeholder = go?.tokenConfigured ? t("settings.configured") : t("settings.required");
     dsInput.placeholder = ds?.tokenConfigured ? t("settings.configured") : t("settings.optional");
     $("settings-status").textContent = "";
-    $("settings-envfile").textContent = data.envFile || "";
     renderAutostart(data);
+    renderCustomSection(data.custom);
     if (typeof dialog.showModal === "function") dialog.showModal();
     else dialog.setAttribute("open", "");
   } catch (error) {
     window.alert(error.message);
   }
+}
+
+// --- Custom model add section ---
+const customEndpointInput = $("custom-endpoint");
+const customApiKeyInput = $("custom-api-key");
+const customModelSelect = $("custom-model-select");
+const customAsMain = $("custom-as-main");
+const customAsVision = $("custom-as-vision");
+const customListModelsBtn = $("custom-list-models");
+const customAddBtn = $("custom-add-btn");
+const customStatus = $("custom-status");
+const customError = $("custom-error");
+const customEndpointHint = $("custom-endpoint-hint");
+
+function customShow(text, error) {
+  if (customStatus) customStatus.hidden = !text || Boolean(error);
+  if (customError) customError.hidden = !(text && error);
+  if (customStatus) customStatus.textContent = error ? "" : text || "";
+  if (customError) customError.textContent = error ? text : "";
+}
+
+function customErrorText(code, fallback) {
+  const key = {
+    connect: "custom.errConnect",
+    key: "custom.errKey",
+    model: "custom.errModel",
+    upstream: "custom.errUpstream",
+  }[code];
+  return key ? t(key) : fallback;
+}
+
+// Lightweight mirror of the server's normalizeBaseUrl: show the completed
+// Responses URL the probe will actually hit, e.g. https://host/v1 -> .../responses.
+function customResponsesUrlPreview(raw) {
+  const value = String(raw || "").trim().replace(/\/+$/, "");
+  if (!/^https?:\/\//i.test(value)) return "";
+  const base = /\/v1$/i.test(value) ? value : `${value}/v1`;
+  return `${base}/responses`;
+}
+
+function customShowHint(url) {
+  if (!customEndpointHint) return;
+  if (!url) {
+    customEndpointHint.hidden = true;
+    customEndpointHint.textContent = "";
+    return;
+  }
+  customEndpointHint.hidden = false;
+  customEndpointHint.textContent = t("custom.probeUrl", { url });
+}
+
+function renderCustomSection(custom) {
+  const state = custom || {};
+  if (!customEndpointInput || !customApiKeyInput) return;
+  customEndpointInput.value = state.baseUrl || "";
+  customShowHint(customResponsesUrlPreview(state.baseUrl));
+  if (customModelSelect) {
+    customModelSelect.replaceChildren();
+    if (state.model) {
+      const option = document.createElement("option");
+      option.value = state.model;
+      option.textContent = state.model;
+      customModelSelect.append(option);
+    }
+    customModelSelect.disabled = !state.model;
+  }
+  if (customAsMain) customAsMain.checked = Boolean(state.asMain);
+  if (customAsVision) customAsVision.checked = Boolean(state.asVision);
+  if (customApiKeyInput) {
+    customApiKeyInput.value = "";
+    customApiKeyInput.placeholder = state.apiKeyConfigured ? t("settings.configured") : "sk-...";
+  }
+  customShow("", false);
+}
+
+if (customEndpointInput) {
+  customEndpointInput.addEventListener("input", () => {
+    customShowHint(customResponsesUrlPreview(customEndpointInput.value));
+  });
+}
+
+if (customListModelsBtn) {
+  customListModelsBtn.addEventListener("click", async () => {
+    const baseUrl = customEndpointInput.value.trim();
+    const apiKey = customApiKeyInput.value.trim();
+    if (!baseUrl) {
+      customShow(t("custom.errEndpointRequired"), true);
+      return;
+    }
+    customListModelsBtn.disabled = true;
+    try {
+      const response = await fetch("/api/custom/list-models", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ baseUrl, apiKey }),
+      });
+      const body = await response.json();
+      if (!response.ok) {
+        throw Object.assign(new Error(body.error?.message || "List models failed"), { code: body.error?.type });
+      }
+      customModelSelect.replaceChildren();
+      for (const model of body.models || []) {
+        const option = document.createElement("option");
+        option.value = model.id;
+        option.textContent = model.label || model.id;
+        customModelSelect.append(option);
+      }
+      customModelSelect.disabled = !(body.models || []).length;
+      // Surface the exact URL the Add probe will hit (server-normalized).
+      customShowHint(body.responsesUrl || customResponsesUrlPreview(baseUrl));
+      customShow(
+        body.models?.length ? t("custom.modelsLoaded", { n: body.models.length }) : t("custom.noModels"),
+        false,
+      );
+    } catch (error) {
+      customShow(customErrorText(error.code) || error.message, true);
+    } finally {
+      customListModelsBtn.disabled = false;
+    }
+  });
+}
+
+if (customAddBtn) {
+  customAddBtn.addEventListener("click", async () => {
+    const baseUrl = customEndpointInput.value.trim();
+    const apiKey = customApiKeyInput.value.trim();
+    const modelId = customModelSelect.value;
+    if (!baseUrl) {
+      customShow(t("custom.errEndpointRequired"), true);
+      return;
+    }
+    if (!modelId) {
+      customShow(t("custom.errModelRequired"), true);
+      return;
+    }
+    if (!apiKey) {
+      customShow(t("custom.errKeyRequired"), true);
+      return;
+    }
+    customAddBtn.disabled = true;
+    customAddBtn.textContent = t("custom.adding");
+    customShow("", false);
+    try {
+      const response = await fetch("/api/custom/add", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          baseUrl,
+          apiKey,
+          modelId,
+          asMain: Boolean(customAsMain?.checked),
+          asVision: Boolean(customAsVision?.checked),
+        }),
+      });
+      const body = await response.json();
+      if (!response.ok) {
+        throw Object.assign(new Error(body.error?.message || "Add failed"), { code: body.error?.type });
+      }
+      customShowHint(body.responsesUrl || customResponsesUrlPreview(baseUrl));
+      customShow(t("custom.added"), false);
+      // Refresh the dashboard so the model list and route card pick up the new
+      // provider immediately.
+      poll().catch(() => {});
+      pollConfig().catch(() => {});
+    } catch (error) {
+      customShow(customErrorText(error.code) || error.message, true);
+    } finally {
+      customAddBtn.disabled = false;
+      customAddBtn.textContent = t("custom.add");
+    }
+  });
 }
 
 function closeSettings() {

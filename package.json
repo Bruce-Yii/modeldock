@@ -10,7 +10,9 @@
   "scripts": {
     "start": "node src/server.mjs",
     "dev": "node --watch src/server.mjs",
+    "pretest": "node scripts/cleanup-sandbox.mjs",
     "test": "node --test test/*.test.mjs src/*.test.mjs",
+    "sandbox:clean": "node scripts/cleanup-sandbox.mjs",
     "test:install": "node --test test/install-mock.test.mjs test/install-macos-sim.test.mjs",
     "probe:live": "node scripts/live-probe.mjs",
     "build": "node scripts/build.mjs",
