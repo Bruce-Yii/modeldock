@@ -120,7 +120,7 @@ function removeManagedRoute(lines) {
       if (MANAGED_END.test(line)) inSentinel = false;
       continue;
     }
-    if (/^\s*\[model_providers\.modeldock_go\]/.test(line)) {
+    if (/^\s*\[model_providers\.modeldock(?:_go)?\]/.test(line)) {
       skippingProvider = true;
       continue;
     }
@@ -183,30 +183,56 @@ function setTopLevel(lines, key, value) {
   return lines;
 }
 
-// Build the transparent managed config: the built-in openai provider stays, its
-// base URL is redirected to the local gate, and the realtime endpoints point at
-// OpenAI so Codex Voice never dials the loopback. The catalog file keeps naming
-// our models in the App picker (openai/codex#32119 only affects custom providers).
-export function buildManagedCodexConfig(source, { baseUrl, model, catalogFile = "", mcpUrl = "", mcpCommand = "", mcpArgs = [], mcpEnv = {}, originalExisted = true }) {
+// Build the managed Codex config. Two shapes:
+//  - transparent (default): the built-in openai provider stays, its base URL is
+//    redirected to the local gate, and the realtime endpoints point at OpenAI so
+//    Codex Voice never dials the loopback. For signed-in users who keep native
+//    GPT models beside ours (openai/codex#32119 only affects custom providers).
+//  - login-free: a custom [model_providers.modeldock] table with the keyed URL
+//    and a self-contained bearer token, so signed-out Codex never asks for
+//    ChatGPT credentials. Picker aliases (native-alias) make the models list
+//    visible in this shape.
+export function buildManagedCodexConfig(source, { baseUrl, model, catalogFile = "", mcpUrl = "", mcpCommand = "", mcpArgs = [], mcpEnv = {}, originalExisted = true, loginFree = false }) {
   const newline = source.includes("\r\n") ? "\r\n" : "\n";
   let lines = removeManagedRoute(source.replace(/\r\n/g, "\n").split("\n"));
   while (lines.length && !lines.at(-1).trim()) lines.pop();
   lines = setTopLevel(lines, "model", model);
+  if (loginFree) lines = setTopLevel(lines, "model_provider", "modeldock");
 
-  const managed = [
-    "# BEGIN modeldock-managed",
-    "# Managed by ModelDock: keeps the built-in openai provider and points it at the local gate.",
-    `# ModelDock original config existed: ${originalExisted ? "true" : "false"}`,
-    `openai_base_url = ${tomlString(baseUrl)}`,
-  ];
+  const managed = loginFree
+    ? [
+        "# BEGIN modeldock-managed",
+        "# Managed by ModelDock: login-free custom provider (no ChatGPT sign-in required).",
+        `# ModelDock original config existed: ${originalExisted ? "true" : "false"}`,
+      ]
+    : [
+        "# BEGIN modeldock-managed",
+        "# Managed by ModelDock: keeps the built-in openai provider and points it at the local gate.",
+        `# ModelDock original config existed: ${originalExisted ? "true" : "false"}`,
+        `openai_base_url = ${tomlString(baseUrl)}`,
+      ];
   if (catalogFile) managed.push(`model_catalog_json = ${tomlString(catalogFile)}`);
-  managed.push(
-    'experimental_realtime_webrtc_call_base_url = "https://chatgpt.com/backend-api/codex"',
-    'experimental_realtime_ws_base_url = "https://api.openai.com/v1"',
-    "# END modeldock-managed",
-  );
+  if (!loginFree) {
+    managed.push(
+      'experimental_realtime_webrtc_call_base_url = "https://chatgpt.com/backend-api/codex"',
+      'experimental_realtime_ws_base_url = "https://api.openai.com/v1"',
+    );
+  }
+  managed.push("# END modeldock-managed");
   const firstTable = lines.findIndex((line) => /^\s*\[/.test(line));
   lines.splice(firstTable < 0 ? lines.length : firstTable, 0, "", ...managed);
+
+  if (loginFree) {
+    lines.push(
+      "",
+      "[model_providers.modeldock]",
+      "# Managed by ModelDock: login-free provider table (signed-out Codex).",
+      `name = ${tomlString("ModelDock (external models)")}`,
+      `base_url = ${tomlString(baseUrl)}`,
+      'wire_api = "responses"',
+      'experimental_bearer_token = "modeldock-placeholder"',
+    );
+  }
 
   if (mcpUrl) {
     lines.push(
@@ -232,7 +258,7 @@ export function buildManagedCodexConfig(source, { baseUrl, model, catalogFile = 
 }
 
 export class CodexConfigSwitcher {
-  constructor({ codexHome, baseUrl, model, catalogFile = "", mcpUrl = "", mcpCommand = "", mcpArgs = [], mcpEnv = {} }) {
+  constructor({ codexHome, baseUrl, model, catalogFile = "", mcpUrl = "", mcpCommand = "", mcpArgs = [], mcpEnv = {}, loginFree = false }) {
     this.codexHome = path.resolve(codexHome || path.join(process.cwd(), ".modeldock-codex-home"));
     this.configPath = path.join(this.codexHome, "config.toml");
     this.stateDir = path.join(this.codexHome, "modeldock");
@@ -244,6 +270,7 @@ export class CodexConfigSwitcher {
     this.mcpCommand = mcpCommand;
     this.mcpArgs = mcpArgs;
     this.mcpEnv = mcpEnv;
+    this.loginFree = loginFree;
   }
 
   async #readState() {
@@ -288,8 +315,8 @@ export class CodexConfigSwitcher {
       onboarded: Boolean(state.onboarded),
       onboardedAt: state.onboardedAt || null,
       targetModel: this.model,
-      targetProvider: "openai",
-      targetMode: "openai_base_url",
+      targetProvider: this.loginFree ? "modeldock" : "openai",
+      targetMode: this.loginFree ? "provider_table" : "openai_base_url",
       needsMigration: Boolean(state.enabled && routeActive && !isNewManaged(current) && isLegacyManaged(current)),
       codexRouterConflict: hasCodexRouterBlock(current),
       stateError: state.stateError || null,
@@ -382,6 +409,7 @@ export class CodexConfigSwitcher {
       mcpArgs: this.mcpArgs,
       mcpEnv: this.mcpEnv,
       originalExisted,
+      loginFree: this.loginFree,
     });
     // Defensive: the writer must never emit duplicates either (setTopLevel
     // dedupes `model`, the managed block owns its keys, but a future edit could
