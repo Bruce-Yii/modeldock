@@ -1,8 +1,11 @@
 # Model Dock For Codex
 
-Give DeepSeek eyes, ears, a voice, a web connection, and a memory inside
-Codex - a thin local Responses bridge for OpenCode Go and DeepSeek official,
-with native GPT passthrough and live token, latency, and trace observability.
+Keep everything in Codex - and add DeepSeek. Give DeepSeek eyes, ears, a
+voice, a web search, a memory, and the content-to-video skill. ModelDock
+focuses on one thing: making DeepSeek work natively inside Codex.
+
+A thin local Responses bridge for OpenCode Go and DeepSeek official, with
+native GPT passthrough and live token, latency, and trace observability.
 
 <p align="center">
   English ·
@@ -33,6 +36,13 @@ without rewriting the conversation history:
   cross-session memory, so decisions and baselines survive between sessions. It
   is opt-in: set `MODELDOCK_MEMORY=1` in `~/.modeldock/.env` and restart to
   enable it.
+- **Make** - the `content-to-video` skill lets the model produce finished MP4
+  videos end-to-end: classify content, storyboard per-shot tech stacks, narrate
+  with measured durations, build three.js / HTML or HyperFrames scenes, assemble
+  with ffmpeg, and QA every frame. Audio assets (BGM / SFX) are not bundled to
+  keep the skill small - download the library from the
+  [video-shotcraft](https://github.com/Vincentwei1021/video-shotcraft) repo
+  (sparse-checkout `assets/audio`) when a project needs sound.
 
 The bridge is a thin local gateway: the Responses stream passes through
 untouched, and multi-turn tool loops, streaming, and long-session compaction
