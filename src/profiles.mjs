@@ -91,6 +91,19 @@ function catalogEntry({ slug, displayName, description, compHash, inputModalitie
 
 function modelCatalogDefaults({ mainModel, displayName, description, compHash, inputModalities, supportsSearchTool, baseInstructions, defaultReasoningLevel = "high", supportedReasoningLevels = [ { effort: "low", description: "Fast responses with lighter reasoning" }, { effort: "high", description: "Deeper reasoning for complex work" }, { effort: "xhigh", description: "Extra-deep reasoning for hard problems" } ], availableModels = [] }) {
   const base = { compHash, supportsSearchTool, baseInstructions, defaultReasoningLevel, supportedReasoningLevels };
+  // The selected main model may belong to a provider other than the active
+  // profile (e.g. a dashboard-added custom endpoint set as main). Label its
+  // catalog entry "Provider - Model" like every other entry; the caller's
+  // displayName stays the fallback for bare ids owned by the active profile.
+  const ownerQualifiedDisplayName = (id) => {
+    const at = String(id || "").lastIndexOf(PROVIDER_SEPARATOR);
+    if (at <= 0) return null;
+    const owner = String(id).slice(at + 1);
+    const profile = profileById(owner);
+    if (!profile?.label) return null;
+    const modelLabel = (profile.availableModels || []).find((m) => m.id === bareModelId(id))?.label || bareModelId(id);
+    return `${profile.label} - ${modelLabel}`;
+  };
   // The main model may be the published slug (gpt-5.6-luna@opencode-go); the profile
   // catalog stores bare ids, so resolve through bareModelId before looking it up.
   const contextWindowFor = (id) => availableModels.find((model) => model.id === bareModelId(id))?.contextWindow || CONTEXT_WINDOW;
@@ -116,7 +129,7 @@ function modelCatalogDefaults({ mainModel, displayName, description, compHash, i
   }
   return {
     models: [
-      catalogEntry({ ...base, slug: mainModel, displayName, description, inputModalities, priority: 1, contextWindow: contextWindowFor(mainModel) }),
+      catalogEntry({ ...base, slug: mainModel, displayName: ownerQualifiedDisplayName(mainModel) || displayName, description, inputModalities, priority: 1, contextWindow: contextWindowFor(mainModel) }),
       ...rest.map((model, index) => catalogEntry({
         ...base,
         slug: model.slug,
@@ -245,9 +258,36 @@ const DEEPSEEK_OFFICIAL_PROFILE = {
   },
 };
 
+// The user-configured endpoint profile (dashboard "Custom model" section). Empty
+// until the Add flow writes MODELDOCK_CUSTOM_* into .env; applyCustomProfile()
+// fills it at config load, so catalog building and per-model routing see the
+// same model without any compile-time knowledge of the endpoint.
+const CUSTOM_PROFILE = {
+  id: "custom",
+  label: "Custom",
+  baseUrl: "",
+  tokenEnvName: "MODELDOCK_CUSTOM_API_KEY",
+  blockedToolTypes: new Set([]),
+  hiddenToolNames: new Set([]),
+  availableModels: [],
+  modelCatalog({ mainModel, baseInstructions }) {
+    return modelCatalogDefaults({
+      mainModel,
+      displayName: "Custom endpoint",
+      description: "User-configured custom Responses endpoint through ModelDock.",
+      compHash: "modeldock-custom-v1",
+      inputModalities: ["text", "image"],
+      supportsSearchTool: false,
+      baseInstructions,
+      availableModels: CUSTOM_PROFILE.availableModels,
+    });
+  },
+};
+
 const PROFILES = {
   "opencode-go": OPENCODE_GO_PROFILE,
   "deepseek-official": DEEPSEEK_OFFICIAL_PROFILE,
+  custom: CUSTOM_PROFILE,
 };
 
 export function profileById(id) {
@@ -256,6 +296,29 @@ export function profileById(id) {
 
 export function profileOptions() {
   return Object.values(PROFILES).map((profile) => ({ id: profile.id, label: profile.label }));
+}
+
+// Populate the custom profile from config so the catalog and per-model routing
+// treat the configured endpoint/model like any other provider. Called at config
+// load and after the dashboard Add flow writes new values.
+export function applyCustomProfile(config) {
+  const model = String(config.customModel || "").trim();
+  const baseUrl = String(config.customBaseUrl || "").trim().replace(/\/+$/, "");
+  CUSTOM_PROFILE.baseUrl = baseUrl;
+  CUSTOM_PROFILE.availableModels = model && baseUrl
+    ? [{
+        id: model,
+        label: model,
+        endpoint: "responses",
+        supportsVision: Boolean(config.customVision),
+        // Always owner-qualified so the published slug carries @custom: the
+        // picker groups it under "Custom" and routing never mistakes it for an
+        // opencode-go model with the same bare id.
+        ownerQualified: true,
+        status: "available",
+      }]
+    : [];
+  return CUSTOM_PROFILE;
 }
 
 // Resolve which provider owns a model id. The currently active profile wins, then any

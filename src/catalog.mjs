@@ -16,7 +16,7 @@ export function baseInstructionsFor(config) {
     "Design-first workflow (MANDATORY for frontend/UI work): before coding any frontend surface (web page, dashboard, game UI, component, landing page, mobile UI, data-viz page), run image_gen first (1-3 direction images, brief-style prompt with purpose, layout, color mood, style keywords, and an avoid-list), read the output with vision_inspect (describe layout, colors, text hierarchy, component styles, spacing rhythm), write a one-paragraph review, then implement by translating structure, palette, and hierarchy into the project's framework. image_gen output is a reference, never a final artifact; never claim you saw the image; do not copy icons, copy, or artwork from the draft. Skip for tiny changes; skip image_gen when the user already provided a design - read it with vision_inspect instead.",
     "Before starting a task, check ~/.codex/memories/MEMORY.md (or $CODEX_HOME/memories/MEMORY.md) for memory groups whose applies_to matches the current working directory, and reuse them when relevant.",
     ...(config.memoryEnabled
-      ? ["Memory (MANDATORY): this project keeps persistent memory across sessions. Before starting substantive work, call recall_memory once with a query about the task - past decisions, baselines, and fixes are usually relevant. Call store_memory as soon as you learn something reusable: a hard-won fix, a stable project fact, a decision or baseline you relied on, or a correction to an earlier belief. If you would want it in the next session, store it now rather than leaving it only in this conversation. Keep stored text short and factual."]
+      ? ["Memory (MANDATORY): this project keeps persistent memory across sessions. Before starting substantive work, call recall_memory once with a query about the task - past decisions, baselines, and fixes are usually relevant. Call store_memory as soon as you learn something reusable: a hard-won fix, a stable project fact, a decision or baseline you relied on, or a correction to an earlier belief. If you would want it in the next session, store it now rather than leaving it only in this conversation. To correct a stale entry, recall it and store the correction under the same key from its result. Keep stored text short and factual."]
       : []),
     "ModelDock MCP tools also work directly when the session MCP connection is unavailable: run `node scripts/mcp-call.mjs <tool> ...` in a shell. Key tools: `vision <path> <question>` (inspect an image), `search <query>` (web search), `recall <query> [scope_dir]` (recall memory), `store <content> [scope_dir] [kind]` (store memory). Run `node scripts/mcp-call.mjs list_mcp_tools` to list every tool and its arguments.",
     `Restarting the gateway: if you need to restart the ModelDock service (e.g. after config or model changes), run: powershell -ExecutionPolicy Bypass -File "${restartScript}". It stops the process on the configured port, starts a fresh detached instance, and prints 'gateway healthy' when /healthz passes; wait for that line before continuing.`,
@@ -124,6 +124,7 @@ function sanitizeNativeReasoningLevels(model) {
 const PROVIDER_LABELS = {
   "opencode-go": "OpenCode Go",
   "deepseek-official": "DeepSeek Official",
+  custom: "Custom",
   openai: "OpenAI",
 };
 

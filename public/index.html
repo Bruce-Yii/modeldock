@@ -159,7 +159,6 @@
           <div><p class="eyebrow" data-i18n="settings.eyebrow">SETTINGS</p><h2 data-i18n="settings.title">Connection</h2></div>
           <button id="settings-close" type="button" class="settings-close" aria-label="Close settings" title="Close settings">&times;</button>
         </div>
-        <p class="settings-path"><span data-i18n="settings.path">Config file:</span> <code id="settings-envfile"></code></p>
         <label class="field">
           <div class="field-head">
             <span data-i18n="settings.goLabel">OpenCode Go token</span>
@@ -174,6 +173,38 @@
           </div>
           <input id="settings-deepseek-token" type="password" placeholder="sk-..." autocomplete="off" spellcheck="false" />
         </label>
+        <details id="custom-add" class="custom-add">
+          <summary class="custom-add-summary" data-i18n="settings.customTitle">Custom model</summary>
+          <div class="custom-add-body">
+            <label class="field">
+              <div class="field-head"><span data-i18n="custom.endpoint">Endpoint (base URL)</span></div>
+              <div class="custom-row">
+                <input id="custom-endpoint" type="url" placeholder="https://host/v1" autocomplete="off" spellcheck="false" />
+                <button id="custom-list-models" type="button" class="custom-action" data-i18n="custom.listModels">List Models</button>
+              </div>
+              <p id="custom-endpoint-hint" class="custom-hint" aria-live="polite" hidden></p>
+            </label>
+            <label class="field">
+              <div class="field-head"><span data-i18n="custom.model">Model</span></div>
+              <div class="custom-row">
+                <select id="custom-model-select" class="custom-model-select" aria-label="Model" disabled></select>
+                <div class="custom-toggles" role="group" aria-label="Custom model roles">
+                  <label class="chip-toggle"><input id="custom-as-main" type="checkbox" /><span data-i18n="custom.main">Main model</span></label>
+                  <label class="chip-toggle"><input id="custom-as-vision" type="checkbox" /><span data-i18n="custom.vision">Vision model</span></label>
+                </div>
+              </div>
+            </label>
+            <label class="field">
+              <div class="field-head"><span data-i18n="custom.apiKey">API key</span></div>
+              <div class="custom-row">
+                <input id="custom-api-key" type="password" placeholder="sk-..." autocomplete="off" spellcheck="false" />
+                <button id="custom-add-btn" type="button" class="custom-action primary" data-i18n="custom.add">Add</button>
+              </div>
+            </label>
+            <p id="custom-status" class="custom-status" aria-live="polite" hidden></p>
+            <p id="custom-error" class="custom-error" aria-live="polite" hidden></p>
+          </div>
+        </details>
         <label class="field">
           <div class="field-head">
             <span data-i18n="settings.language">Interface language</span>

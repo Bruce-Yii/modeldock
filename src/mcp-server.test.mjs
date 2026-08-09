@@ -97,6 +97,14 @@ test("MCP sidecar registers recall_memory when memory is enabled", async () => {
     const stored = JSON.parse(store.parsed.result?.content?.[0]?.text || "{}");
     assert.equal(stored.stored, true);
     assert.equal(stored.scope, "D:\\projects\\stockscan");
+
+    const recalled = await rpc(instance.url, "tools/call", {
+      name: "recall_memory",
+      arguments: { query: "test baseline", scope_dir: "D:\\projects\\stockscan" },
+    });
+    assert.equal(recalled.status, 200);
+    const recallText = recalled.parsed.result?.content?.[0]?.text || "";
+    assert.match(recallText, /key: /, "recall output exposes the entry key for later updates");
   } finally {
     await instance.stop();
     instance.services.memoryStore?.close();

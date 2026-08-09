@@ -121,6 +121,7 @@ function formatHits(hits) {
     const snippet = String(hit.text || "").replace(/\s+/g, " ").trim().slice(0, 1200);
     lines.push("");
     lines.push(`[${index + 1}] ${heading} (${hit.trust_class}/${hit.memory_state})`);
+    lines.push(`key: ${hit.key || "-"}`);
     lines.push(`source: ${source}${locator.heading ? ` > ${locator.heading}` : ""}`);
     lines.push(snippet);
   });
@@ -306,8 +307,12 @@ export class MemoryStore {
     const loose = terms.map(quote).join(" OR ");
     const sql = `
       SELECT u.id, u.head, u.text, u.trust_class, u.memory_state, u.locator, u.scope_paths,
+             si.native_id AS key,
              bm25(content_fts) AS score
-      FROM content_fts f JOIN content_units u ON u.id = f.id
+      FROM content_fts f
+      JOIN content_units u ON u.id = f.id
+      JOIN source_revisions sr ON sr.id = u.source_revision_id
+      JOIN source_items si ON si.id = sr.source_item_id
       WHERE content_fts MATCH ?
         AND u.memory_state = 'captured'
       ORDER BY score DESC

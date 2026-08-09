@@ -221,12 +221,47 @@ test("storeMemory dedupes identical content and supersedes via a stable key", ()
     const hit = store.search({ query: "checkpoints" });
     assert.equal(hit.count, 1, "superseded revision is not recalled");
     assert.match(hit.text, /daily checkpoints/);
+    assert.match(hit.text, /key: iter-style/, "recall output exposes the stable key");
 
     const states = store.db.prepare("SELECT memory_state, COUNT(*) AS n FROM content_units GROUP BY memory_state").all();
     const byState = Object.fromEntries(states.map((row) => [row.memory_state, row.n]));
     assert.ok(byState.superseded >= 1, "old key revision is marked superseded");
   } finally {
     store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("recall exposes the key so a later session can correct the entry", () => {
+  const { dir } = memoryDir();
+  const dbPath = path.join(dir, "memory.db");
+  let store = new MemoryStore({ dbPath });
+  try {
+    store.storeMemory({ content: "Trading rule: buy only above MA200.", kind: "baseline", key: "ma200-rule" });
+    store.close();
+    // A later session has only the recall output to work from.
+    store = new MemoryStore({ dbPath });
+    const hit = store.search({ query: "MA200" });
+    assert.equal(hit.count, 1);
+    assert.match(hit.text, /key: ma200-rule/);
+    const key = /key: (\S+)/.exec(hit.text)?.[1];
+    const updated = store.storeMemory({
+      content: "Trading rule: buy above MA200 with a volume filter.",
+      kind: "baseline",
+      key,
+    });
+    assert.equal(updated.stored, true);
+    assert.equal(updated.revision, 2, "same key from recall creates a new revision");
+    const fresh = store.search({ query: "volume filter" });
+    assert.equal(fresh.count, 1);
+    assert.match(fresh.text, /volume filter/);
+    assert.ok(!fresh.text.includes("buy only above"), "superseded text is not recalled");
+  } finally {
+    try {
+      store.close();
+    } catch {
+      // Already closed by the test body.
+    }
     rmSync(dir, { recursive: true, force: true });
   }
 });

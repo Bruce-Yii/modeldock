@@ -544,6 +544,14 @@ export function applyToolPolicy(tools, { hiddenToolNames = TEXT_MODEL_HIDDEN_TOO
 export function upstreamTargetFor(config, model) {
   const provider = providerForModel(config, model);
   const upstreamModel = bareModelId(model);
+  if (provider === "custom") {
+    return {
+      provider,
+      model: upstreamModel,
+      url: `${(config.customBaseUrl || "").replace(/\/+$/, "")}/responses`,
+      token: config.tokens?.["custom"] || config.customApiKey || "",
+    };
+  }
   if (provider === "deepseek-official") {
     return {
       provider,

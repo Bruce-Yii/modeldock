@@ -593,3 +593,234 @@ test("initAutostartDefault leaves no mark when the platform is unsupported or en
   assert.equal(await initAutostartDefault(failing, { stateDir: dir }), false);
   await assert.rejects(readFile(path.join(dir, "autostart-initialized"), "utf8"));
 });
+
+test("custom endpoint flow: list models, probe, persist, publish to catalog", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-custom-endpoint-"));
+  const envFile = path.join(dir, ".env");
+  const instance = await startApp({
+    envFile,
+    codexCatalogFile: path.join(dir, "codex-model-catalog.json"),
+  });
+  t.after(async () => {
+    await instance.stop();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async (url, options) => {
+      const value = String(url);
+      // Only stub the external vendor endpoint; the gateway's own local routes
+      // (/api/custom/*, /v1/models) must pass through to the test server.
+      if (value.startsWith("https://vendor.example/") && value.endsWith("/v1/models")) {
+        return { ok: true, status: 200, json: async () => ({ data: [{ id: "vendor/model-x" }] }) };
+      }
+      if (value.startsWith("https://vendor.example/") && value.endsWith("/v1/responses")) {
+        return { ok: true, status: 200, json: async () => ({ id: "resp_1", usage: { input_tokens: 5, output_tokens: 1 } }) };
+      }
+      return originalFetch(url, options);
+    };
+
+    const list = await (await fetch(`${instance.base}/api/custom/list-models`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ baseUrl: "https://vendor.example/v1", apiKey: "sk-test" }),
+    })).json();
+    assert.deepEqual(list.models.map((model) => model.id), ["vendor/model-x"]);
+
+    const add = await (await fetch(`${instance.base}/api/custom/add`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        baseUrl: "https://vendor.example/v1",
+        apiKey: "sk-test",
+        modelId: "vendor/model-x",
+        asMain: true,
+        asVision: false,
+      }),
+    })).json();
+    assert.equal(add.ok, true);
+    assert.equal(add.model, "vendor/model-x");
+    assert.equal(add.responsesUrl, "https://vendor.example/v1/responses");
+    assert.equal(add.settings.custom.apiKeyConfigured, true);
+    assert.equal(add.settings.custom.model, "vendor/model-x");
+    assert.equal(add.settings.custom.asMain, true);
+
+    // Persisted to the isolated env file.
+    const env = await readFile(envFile, "utf8");
+    assert.match(env, /MODELDOCK_CUSTOM_BASE_URL=https:\/\/vendor\.example\/v1/);
+    assert.match(env, /MODELDOCK_CUSTOM_API_KEY=sk-test/);
+    assert.match(env, /MODELDOCK_CUSTOM_MODEL=vendor\/model-x/);
+    assert.match(env, /MODELDOCK_CUSTOM_MAIN=1/);
+    assert.match(env, /MODELDOCK_MAIN_MODEL=vendor\/model-x@custom/);
+
+    // Published to the catalog under the Custom provider.
+    const catalog = await (await fetch(`${instance.base}/v1/models`)).json();
+    const customEntry = catalog.models.find((entry) => entry.slug === "vendor/model-x@custom");
+    assert.ok(customEntry, "custom model appears in the published catalog");
+    assert.equal(customEntry.display_name, "Custom - vendor/model-x");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("custom endpoint add rejects a failing probe with a classified error", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-custom-endpoint-fail-"));
+  const instance = await startApp({ envFile: path.join(dir, ".env") });
+  t.after(async () => {
+    await instance.stop();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async (url, options) => {
+      if (String(url).startsWith("https://vendor.example/") && String(url).endsWith("/v1/responses")) {
+        return { ok: false, status: 401, json: async () => ({}) };
+      }
+      // Everything else (including the gateway request itself) must pass through.
+      return originalFetch(url, options);
+    };
+    const response = await fetch(`${instance.base}/api/custom/add`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        baseUrl: "https://vendor.example/v1",
+        apiKey: "sk-bad",
+        modelId: "vendor/model-x",
+        asMain: false,
+        asVision: false,
+      }),
+    });
+    assert.equal(response.status, 400);
+    const body = await response.json();
+    assert.equal(body.error.type, "key");
+    assert.ok(body.error.message.includes("401"));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("settings save probes the upstream and persists only a working token", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-settings-save-"));
+  const envFile = path.join(dir, ".env");
+  const eventsFile = path.join(dir, "settings-events.jsonl");
+  const instance = await startApp({
+    envFile,
+    settingsEventsFile: eventsFile,
+    codexCatalogFile: path.join(dir, "codex-model-catalog.json"),
+  });
+  t.after(async () => {
+    await instance.stop();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async (url, options) => {
+      const value = String(url);
+      if (value === "https://go.example.com/v1/responses" || value === "https://api.deepseek.com/v1/responses") {
+        return { ok: true, status: 200, json: async () => ({ id: "resp_probe", usage: { input_tokens: 5, output_tokens: 1 } }) };
+      }
+      return originalFetch(url, options);
+    };
+
+    const response = await fetch(`${instance.base}/api/settings`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        opencodeGoToken: "sk-opencode-valid-token-123456",
+        deepseekApiKey: "sk-deepseek-valid-key-123456",
+      }),
+    });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.providers[0].tokenConfigured, true);
+    assert.equal(body.providers[1].tokenConfigured, true);
+
+    const env = await readFile(envFile, "utf8");
+    assert.match(env, /^OPENCODE_GO_TOKEN=/m);
+    assert.match(env, /^DEEPSEEK_API_KEY=/m);
+    const events = (await readFile(eventsFile, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    assert.equal(events[events.length - 1].ok, true);
+    assert.deepEqual([...events[events.length - 1].providers].sort(), ["deepseek-official", "opencode-go"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("settings save rejects a token the upstream rejects without writing", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-settings-reject-"));
+  const envFile = path.join(dir, ".env");
+  const eventsFile = path.join(dir, "settings-events.jsonl");
+  const instance = await startApp({
+    envFile,
+    settingsEventsFile: eventsFile,
+    codexCatalogFile: path.join(dir, "codex-model-catalog.json"),
+  });
+  t.after(async () => {
+    await instance.stop();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async (url, options) => {
+      if (String(url) === "https://go.example.com/v1/responses") {
+        return { ok: false, status: 401, json: async () => ({}) };
+      }
+      return originalFetch(url, options);
+    };
+
+    const response = await fetch(`${instance.base}/api/settings`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ opencodeGoToken: "sk-wrong-but-well-formed-123456" }),
+    });
+    assert.equal(response.status, 400);
+    const body = await response.json();
+    assert.equal(body.error.type, "token_rejected_opencode-go");
+    assert.ok(body.error.message.includes("401"));
+
+    const env = await readFile(envFile, "utf8").catch(() => "");
+    assert.doesNotMatch(env, /OPENCODE_GO_TOKEN=/);
+    const events = (await readFile(eventsFile, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    assert.equal(events[events.length - 1].ok, false);
+    assert.equal(events[events.length - 1].error, "token_rejected_opencode-go");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("settings save rejects placeholder tokens before any upstream probe", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-settings-placeholder-"));
+  const instance = await startApp({
+    envFile: path.join(dir, ".env"),
+    settingsEventsFile: path.join(dir, "settings-events.jsonl"),
+    codexCatalogFile: path.join(dir, "codex-model-catalog.json"),
+  });
+  t.after(async () => {
+    await instance.stop();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  let probed = false;
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async (url, options) => {
+      if (String(url).endsWith("/responses") && options?.method === "POST") probed = true;
+      return originalFetch(url, options);
+    };
+    const response = await fetch(`${instance.base}/api/settings`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ opencodeGoToken: "x" }),
+    });
+    assert.equal(response.status, 400);
+    const body = await response.json();
+    assert.equal(body.error.type, "invalid_opencode_go_token");
+    assert.equal(probed, false, "placeholder rejection must not hit the upstream");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

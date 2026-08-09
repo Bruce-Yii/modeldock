@@ -140,7 +140,7 @@ export function createMcpServer({ upstreams, acceptScopeOnly = false }) {
           {
             title: "Recall Memory",
             description:
-              "Search this project's persistent memory: past decisions, frozen baselines, user preferences and reusable knowledge written across sessions. Call this when the task depends on earlier work, specific parameters, or facts not present in the current conversation. Returns ranked snippets with their source file.",
+              "Search this project's persistent memory: past decisions, frozen baselines, user preferences and reusable knowledge written across sessions. Call this when the task depends on earlier work, specific parameters, or facts not present in the current conversation. Returns ranked snippets with their source file. Each hit includes a stable key; pass it back to store_memory to update or correct that entry.",
             inputSchema: recallInputSchema,
             annotations: { readOnlyHint: true, openWorldHint: false },
           },
@@ -160,7 +160,7 @@ export function createMcpServer({ upstreams, acceptScopeOnly = false }) {
           {
             title: "Store Memory",
             description:
-              "Persist a fact, decision, preference, correction, or baseline into this project's long-term memory vault so future sessions can recall it with recall_memory. Call this when something reusable happened in this conversation: a stable preference, a hard-won fix, a frozen baseline, a project fact, or a correction. Do not store one-off task details or transient state.",
+              "Persist a fact, decision, preference, correction, or baseline into this project's long-term memory vault so future sessions can recall it with recall_memory. Call this when something reusable happened in this conversation: a stable preference, a hard-won fix, a frozen baseline, a project fact, or a correction. Do not store one-off task details or transient state. To correct or replace an earlier memory, recall it first and reuse its key from the result - storing under the same key supersedes the old revision.",
             inputSchema: z.object({
               content: z.string().min(1).describe("What to remember, one short paragraph"),
               scope_dir: z.string().optional().describe("Absolute working directory this memory applies to; omit to use the session working directory"),
@@ -168,7 +168,7 @@ export function createMcpServer({ upstreams, acceptScopeOnly = false }) {
                 .enum(["decision", "preference", "baseline", "knowledge", "correction"])
                 .optional()
                 .describe("Memory kind, used as its recall heading; defaults to knowledge"),
-              key: z.string().optional().describe("Stable key to update an existing memory instead of appending a new one"),
+              key: z.string().optional().describe("Stable key from recall_memory results; reuse the same key to update or correct an existing entry instead of appending a new one"),
             }),
             annotations: { readOnlyHint: false, openWorldHint: false },
           },
