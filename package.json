@@ -10,7 +10,7 @@
   "scripts": {
     "start": "node src/server.mjs",
     "dev": "node --watch src/server.mjs",
-    "test": "node --test test/*.test.mjs src/autostart.test.mjs src/catalog.test.mjs src/config.test.mjs src/caller-key.test.mjs src/config-switcher.test.mjs src/error-translation.test.mjs src/gateway.test.mjs src/instance-owner.test.mjs src/mcp-server.test.mjs src/mcp-standalone.test.mjs src/media-store.test.mjs src/memory.test.mjs src/metrics.test.mjs src/native-catalog.test.mjs src/profiles.test.mjs src/router.test.mjs src/secrets.test.mjs src/server-gateway.test.mjs src/server.test.mjs src/update.test.mjs src/upstreams.test.mjs src/usage-events.test.mjs",
+    "test": "node --test test/*.test.mjs src/*.test.mjs",
     "test:install": "node --test test/install-mock.test.mjs test/install-macos-sim.test.mjs",
     "probe:live": "node scripts/live-probe.mjs",
     "build": "node scripts/build.mjs",
