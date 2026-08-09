@@ -415,6 +415,9 @@
     // own "Open Settings" button. The watchdog then leaves it alone, because
     // the settings modal must sit above the guide while a token is typed.
     settingsIntent: false,
+    // Auto-open the settings dialog once per run after the guide finishes
+    // without an OpenCode Go token, so the key can be added right away.
+    promptedSettings: false,
   };
   let watchdog = null;
 
@@ -847,7 +850,19 @@
     const ul = document.createElement("ul");
     for (const bullet of rec.bullets) {
       const li = document.createElement("li");
-      li.textContent = bullet;
+      if (bullet === L("reco.register")) {
+        // The register recommendation is the same referral link used everywhere
+        // else in the guide and the settings dialog.
+        const a = document.createElement("a");
+        a.className = "wz-link";
+        a.href = OPENCODE_SIGNUP;
+        a.target = "_blank";
+        a.rel = "noopener noreferrer";
+        a.textContent = bullet;
+        li.append(a);
+      } else {
+        li.textContent = bullet;
+      }
       ul.append(li);
     }
     reco.append(h3, ul);
@@ -946,6 +961,7 @@
       state.applying = false;
       state.step = "done";
       render();
+      promptSettingsIfNoToken();
     } catch (error) {
       state.applyResult = null;
       state.applying = false;
@@ -982,6 +998,20 @@
     const reload = Boolean(state.applyResult?.modeChanged);
     hide();
     if (reload) setTimeout(() => window.location.reload(), 500);
+  }
+
+  // The done screen tells the user to fully restart Codex; when the guide
+  // completed without an OpenCode Go token, surface the settings dialog (which
+  // shows above the guide in the browser top layer) so the key can be entered
+  // in the same sitting. settingsIntent keeps the watchdog from closing it.
+  function promptSettingsIfNoToken() {
+    if (state.promptedSettings) return;
+    if (state.onboard?.tokenConfigured?.["opencode-go"]) return;
+    state.promptedSettings = true;
+    setTimeout(() => {
+      openSettings();
+      setTimeout(() => document.getElementById("settings-go-token")?.focus(), 350);
+    }, 500);
   }
 
   function mount() {
@@ -1032,6 +1062,7 @@
     try {
       if (force || !state.onboard) state.onboard = await refreshOnboard();
       if (!force && state.onboard.onboarded) return;
+      state.promptedSettings = false;
       state.step = "welcome";
       render();
       show();

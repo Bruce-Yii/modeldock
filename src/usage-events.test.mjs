@@ -25,6 +25,41 @@ test("recordUsageEvent appends one JSON line per event", (t) => {
   assert.equal(second.inputTokens, undefined, "absent counts are omitted, not zeroed");
 });
 
+test("recordUsageEvent records session and thread ids when present", (t) => {
+  const { dir, file } = tempFile();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const event = recordUsageEvent({
+    model: "deepseek-v4-flash",
+    sessionId: "session-123",
+    threadId: "thread-456",
+    filePath: file,
+  });
+  assert.equal(event.meteringVersion, 2);
+  assert.equal(event.sessionId, "session-123");
+  assert.equal(event.threadId, "thread-456");
+  assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), event);
+});
+
+test("recordUsageEvent omits missing and blank session ids", (t) => {
+  const { dir, file } = tempFile();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const event = recordUsageEvent({ sessionId: "   ", threadId: undefined, filePath: file });
+  assert.equal("sessionId" in event, false);
+  assert.equal("threadId" in event, false);
+});
+
+test("recordUsageEvent bounds session and thread ids", (t) => {
+  const { dir, file } = tempFile();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const event = recordUsageEvent({
+    sessionId: "s".repeat(200),
+    threadId: "t".repeat(200),
+    filePath: file,
+  });
+  assert.equal(event.sessionId.length, 160);
+  assert.equal(event.threadId.length, 160);
+});
+
 test("recordUsageEvent sanitizes junk without throwing", (t) => {
   const { dir, file } = tempFile();
   t.after(() => rmSync(dir, { recursive: true, force: true }));

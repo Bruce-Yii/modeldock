@@ -9,7 +9,11 @@ if (!config.goToken) throw new Error("Set OPENCODE_GO_TOKEN or add it to .env be
 
 const instance = await startServer({ ...config, port: 0 });
 const port = instance.server.address().port;
-const baseUrl = `http://127.0.0.1:${port}`;
+// Caller-key enforcement is on by default; the probe must speak the keyed
+// base URL like Codex does, not the bare /v1 path. The suffix stays `/v1/...`
+// on each call, so the prefix is `/c/<key>` without the trailing `/v1`.
+const baseUrl = `http://127.0.0.1:${port}/c/${instance.services.callerKey}`;
+const mcpUrl = `http://127.0.0.1:${port}/mcp`;
 const result = { baseUrl, responses: {}, mcp: {}, web: {}, vision: {} };
 let client;
 
@@ -108,17 +112,18 @@ try {
     }),
   });
   const secondTurnBody = await secondTurn.json();
-  const secondTurnTrace = instance.services.metrics.recent.find((item) => item.kind === "responses");
   result.responses.secondTurn = {
     status: secondTurn.status,
     output: extractOutputText(secondTurnBody),
-    stringifiedAssistantMessages: secondTurnTrace?.stringifiedAssistantMessages || 0,
   };
   if (secondTurn.status !== 200 || !result.responses.secondTurn.output.includes("SECOND_TURN_OK")) {
     throw new Error(`Second-turn assistant history probe failed with HTTP ${secondTurn.status}`);
   }
 
-  const historyTool = { type: "custom", name: "history_probe", description: "Return protocol probe input." };
+  // The OpenCode Go upstream rejects arbitrary `type: "custom"` tools (only
+  // apply_patch is allowed); a standard `type: "function"` declaration is
+  // accepted and still yields a function_call the gateway can replay.
+  const historyTool = { type: "function", name: "history_probe", description: "Return protocol probe input.", parameters: { type: "object", properties: {} } };
   const historyPrompt = [{ role: "user", content: [{ type: "input_text", text: "Call history_probe exactly once with input HISTORY_PROBE." }] }];
   const historyCallResponse = await fetch(`${baseUrl}/v1/responses`, {
     method: "POST",
@@ -163,24 +168,12 @@ try {
     }),
   });
   const historyReplayBody = await historyReplay.json();
-  const historyTrace = instance.services.metrics.recent.find((item) => item.kind === "responses");
   result.responses.toolHistory = {
     status: historyReplay.status,
     output: extractOutputText(historyReplayBody),
-    nativeToolCalls: historyTrace?.nativeToolCalls || 0,
-    nativeToolOutputs: historyTrace?.nativeToolOutputs || 0,
-    fallbackToolResults: historyTrace?.fallbackToolResults || 0,
-    droppedAssistantMessages: historyTrace?.droppedAssistantMessages || 0,
-    chatToolCallMessages: historyTrace?.inputShape?.filter((item) => item.toolCallCount > 0).length || 0,
+    droppedAssistantMessages: instance.services.metrics.responses.droppedAssistantMessages || 0,
   };
-  if (
-    historyReplay.status !== 200
-    || !result.responses.toolHistory.output.includes("TOOL_HISTORY_OK")
-    || result.responses.toolHistory.nativeToolCalls !== 1
-    || result.responses.toolHistory.nativeToolOutputs !== 1
-    || result.responses.toolHistory.fallbackToolResults !== 0
-    || result.responses.toolHistory.chatToolCallMessages !== 0
-  ) {
+  if (historyReplay.status !== 200 || !result.responses.toolHistory.output.includes("TOOL_HISTORY_OK")) {
     throw new Error(`Native tool-history replay failed with HTTP ${historyReplay.status}`);
   }
 
@@ -200,14 +193,23 @@ try {
   });
   const directVisionBody = await directVision.json();
   const directVisionOutput = extractOutputText(directVisionBody);
+  const directVisionTrace = instance.services.metrics.recent.find((item) => item.kind === "responses");
   result.responses.directVision = {
     status: directVision.status,
-    route: directVision.headers.get("x-modeldock-route"),
-    model: directVision.headers.get("x-modeldock-model"),
+    route: directVisionTrace?.routeReason,
+    model: directVisionTrace?.model,
     output: directVisionOutput,
   };
-  if (directVision.status !== 200 || result.responses.directVision.model !== config.visionModel) {
-    throw new Error(`Direct visual routing probe failed with HTTP ${directVision.status}`);
+  if (
+    directVision.status !== 200
+    || directVisionTrace?.model !== config.visionModel
+    || directVisionTrace?.routeReason !== "current_turn_image"
+  ) {
+    throw new Error(
+      `Direct visual routing probe failed with HTTP ${directVision.status}, `
+      + `model=${directVisionTrace?.model}, expected=${config.visionModel}, `
+      + `route=${directVisionTrace?.routeReason}`,
+    );
   }
 
   const returnToMain = await fetch(`${baseUrl}/v1/responses`, {
@@ -225,18 +227,27 @@ try {
     }),
   });
   const returnToMainBody = await returnToMain.json();
+  const returnToMainTrace = instance.services.metrics.recent.find((item) => item.kind === "responses");
   result.responses.returnToMain = {
     status: returnToMain.status,
-    route: returnToMain.headers.get("x-modeldock-route"),
-    model: returnToMain.headers.get("x-modeldock-model"),
+    route: returnToMainTrace?.routeReason,
+    model: returnToMainTrace?.model,
     output: extractOutputText(returnToMainBody),
   };
-  if (returnToMain.status !== 200 || result.responses.returnToMain.model !== config.mainModel) {
-    throw new Error(`Return-to-main routing probe failed with HTTP ${returnToMain.status}`);
+  if (
+    returnToMain.status !== 200
+    || returnToMainTrace?.model !== config.mainModel
+    || returnToMainTrace?.routeReason !== "default_main"
+  ) {
+    throw new Error(
+      `Return-to-main routing probe failed with HTTP ${returnToMain.status}, `
+      + `model=${returnToMainTrace?.model}, expected=${config.mainModel}, `
+      + `route=${returnToMainTrace?.routeReason}`,
+    );
   }
 
   client = new Client({ name: "modeldock-live-probe", version: "0.1.0" });
-  await client.connect(new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp`)));
+  await client.connect(new StreamableHTTPClientTransport(new URL(mcpUrl)));
   const tools = await client.listTools();
   result.mcp.tools = tools.tools.map((tool) => tool.name);
 

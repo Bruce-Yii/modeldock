@@ -135,6 +135,22 @@ export const NATIVE_IMAGE_PATHS = new Set([
   "/v1/images/generations",
 ]);
 
+// A stream that already sent headers cannot carry a JSON error. Terminate a
+// Responses stream with a response.failed event so the client parses a failure
+// instead of reporting a mid-stream disconnect ("stream disconnected before
+// completion"). Fall back to destroying the socket if the stream refuses.
+function endRelayStreamFailure(res, message) {
+  try {
+    res.write(`event: response.failed\r\ndata: ${JSON.stringify({
+      type: "response.failed",
+      response: { id: undefined, status: "failed", error: { code: "upstream_failed", message } },
+    })}\r\n\r\n`);
+    res.end();
+  } catch {
+    res.destroy();
+  }
+}
+
 // Headers Codex's signed-in transport sends that the native backend needs.
 // Everything else (tokens for routed providers, loopback bookkeeping) stays out.
 const NATIVE_FORWARD_HEADERS = new Set([
@@ -184,6 +200,19 @@ export function nativeTarget(pathname, search) {
     .replace(/^\/c\/[^/]+\/v1/, "")
     .replace(/^\/v1(?=\/|$)/, "");
   return `${NATIVE_BASE}${withoutPrefix}${search || ""}`;
+}
+
+// Codex marks every request with its conversation and session ids in headers;
+// they ride into usage events so cache rate can be analyzed per session (hit
+// rate vs turns since last compaction) instead of as an anonymous aggregate.
+export function sessionIdsFrom(headers) {
+  const get = (name) => {
+    const value = headers?.[name];
+    return Array.isArray(value) ? String(value[0] ?? "").trim() : String(value ?? "").trim();
+  };
+  const threadId = get("x-codex-parent-thread-id") || get("x-codex-thread-id") || get("thread-id") || get("thread_id");
+  const sessionId = get("session_id") || get("session-id") || get("x-codex-session-id");
+  return { sessionId, threadId };
 }
 
 // Threads created under codex-router (or our own pre-rewrite config) persist
@@ -836,6 +865,7 @@ export async function pipeFreeStream(upstreamBody, res, tee, failedMessage, onFi
 // piped byte-for-byte with the client's signed-in headers.
 export async function relayNativeResponses(payload, res, services, { signal } = {}) {
   const { incomingHeaders, requestUrl, metrics } = services;
+  const { sessionId, threadId } = sessionIdsFrom(incomingHeaders);
   const native = { ...payload };
   if (Array.isArray(payload.input)) native.input = normalizeNativeInput(payload.input);
   delete native.previous_response_id;
@@ -847,6 +877,8 @@ export async function relayNativeResponses(payload, res, services, { signal } = 
     model: payload.model,
     upstream: "openai",
     routeReason: "native_passthrough",
+    sessionId,
+    threadId,
   });
   const markFirstResponse = () => finish?.markFirstResponse?.();
   const startedAt = Date.now();
@@ -890,6 +922,8 @@ export async function relayNativeResponses(payload, res, services, { signal } = 
         route: "native_passthrough",
         status: upstream.status,
         durationMs: Date.now() - startedAt,
+        sessionId,
+        threadId,
       });
       return { ok: false, httpStatus: upstream.status, route: { model: payload.model, reason: "native_passthrough" }, error: raw.slice(0, 400), upstreamBytes };
     }
@@ -936,6 +970,8 @@ export async function relayNativeResponses(payload, res, services, { signal } = 
       totalTokens: usage?.total_tokens,
       cachedTokens: usage?.input_tokens_details?.cached_tokens,
       reasoningTokens: usage?.output_tokens_details?.reasoning_tokens,
+      sessionId,
+      threadId,
     });
     return {
       ok: true,
@@ -954,7 +990,7 @@ export async function relayNativeResponses(payload, res, services, { signal } = 
       res.setHeader("Content-Type", "application/json");
       res.end(JSON.stringify({ error: { type: "upstream_failed", message: redactBearer(error.message) } }));
     } else {
-      res.destroy();
+      endRelayStreamFailure(res, redactBearer(error.message));
     }
     return { ok: false, httpStatus: 502, route: { model: payload.model, reason: "native_passthrough" }, error: error.message };
   }
@@ -1116,7 +1152,8 @@ function writeCompactionSse(res, model, summary) {
 // kcr1: payload. v2 returns a single compaction output item (JSON or SSE);
 // v1 returns replacement history under { output }.
 export async function relayCompaction(payload, res, services, { signal } = {}, v2 = true) {
-  const { config, metrics, mediaStore, routeAffinity, knownModels } = services;
+  const { config, metrics, mediaStore, routeAffinity, knownModels, incomingHeaders } = services;
+  const { sessionId, threadId } = sessionIdsFrom(incomingHeaders);
   const requestedModel = normalizeLegacySlug(typeof payload.model === "string" ? payload.model : "", knownModels);
   if (requestedModel !== payload.model && requestedModel) payload = { ...payload, model: requestedModel };
   const mainModel = services.mainModel || config.mainModel;
@@ -1147,6 +1184,8 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
     model: route.model,
     upstream: target.provider,
     routeReason: route.reason,
+    sessionId,
+    threadId,
   });
   const startedAt = Date.now();
   let usage;
@@ -1168,6 +1207,8 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
         route: operation,
         status: 503,
         durationMs: Date.now() - startedAt,
+        sessionId,
+        threadId,
       });
       return { ok: false, httpStatus: 503, route, error: body };
     }
@@ -1195,6 +1236,8 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
         route: operation,
         status: 502,
         durationMs: Date.now() - startedAt,
+        sessionId,
+        threadId,
       });
       return { ok: false, httpStatus: 502, route, error: "Compact response is too large." };
     }
@@ -1237,6 +1280,8 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
         route: operation,
         status: upstream.status,
         durationMs: Date.now() - startedAt,
+        sessionId,
+        threadId,
       });
       return { ok: false, httpStatus: upstream.status, route, error: translated.body.error.message.slice(0, 400), upstreamBytes: bytes.length };
     }
@@ -1283,6 +1328,8 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
       inputTokens: usage?.input_tokens,
       outputTokens: usage?.output_tokens,
       totalTokens: usage?.total_tokens,
+      sessionId,
+      threadId,
     });
     return {
       ok: true,
@@ -1300,7 +1347,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
       res.setHeader("Content-Type", "application/json");
       res.end(JSON.stringify({ error: { type: "upstream_failed", message: redactBearer(error.message) } }));
     } else {
-      res.destroy();
+      endRelayStreamFailure(res, redactBearer(error.message));
     }
     return { ok: false, httpStatus: 502, route, error: error.message };
   }
@@ -1311,7 +1358,8 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
 // `services` carries { config, metrics, mediaStore, routeAffinity, modelSelection,
 // knownModels, visionModelOf } so the caller decides wiring.
 export async function relayResponses(payload, res, services, { signal } = {}) {
-  const { config, metrics, mediaStore, routeAffinity, knownModels } = services;
+  const { config, metrics, mediaStore, routeAffinity, knownModels, incomingHeaders } = services;
+  const { sessionId, threadId } = sessionIdsFrom(incomingHeaders);
   const requestedModel = normalizeLegacySlug(typeof payload.model === "string" ? payload.model : "", knownModels);
   if (requestedModel !== payload.model && requestedModel) payload = { ...payload, model: requestedModel };
   if (isNativeModel(requestedModel, knownModels, services.nativeSlugs)) {
@@ -1390,6 +1438,8 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     model: normalizedPayload.model,
     upstream: target.provider,
     routeReason: route.reason,
+    sessionId,
+    threadId,
   });
   const markFirstResponse = () => finish?.markFirstResponse?.();
   const startedAt = Date.now();
@@ -1564,6 +1614,10 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
         inputTokens: traceUsage?.input_tokens,
         outputTokens: traceUsage?.output_tokens,
         totalTokens: traceUsage?.total_tokens,
+        cachedTokens: traceUsage?.input_tokens_details?.cached_tokens,
+        reasoningTokens: traceUsage?.output_tokens_details?.reasoning_tokens,
+        sessionId,
+        threadId,
       });
       return { ok: false, httpStatus: 429, route, error: errorMessage.slice(0, 400), usage: traceUsage, bytesOut, upstreamBytes, latencyMs: Date.now() - startedAt, upstream: target.provider };
     }
@@ -1603,6 +1657,10 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       inputTokens: traceUsage?.input_tokens,
       outputTokens: traceUsage?.output_tokens,
       totalTokens: traceUsage?.total_tokens,
+      cachedTokens: traceUsage?.input_tokens_details?.cached_tokens,
+      reasoningTokens: traceUsage?.output_tokens_details?.reasoning_tokens,
+      sessionId,
+      threadId,
     });
     return {
       ok: true,
@@ -1621,7 +1679,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       res.setHeader("Content-Type", "application/json");
       res.end(JSON.stringify({ error: { type: "upstream_failed", message: redactBearer(error.message) } }));
     } else {
-      res.destroy();
+      endRelayStreamFailure(res, redactBearer(error.message));
     }
     return { ok: false, httpStatus: 502, route, error: error.message };
   }

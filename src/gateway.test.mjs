@@ -29,6 +29,7 @@ import {
   relayResponses,
   rewriteHistoricalImages,
   routeGatewayRequest,
+  sessionIdsFrom,
   upstreamTargetFor,
 } from "./gateway.mjs";
 
@@ -43,6 +44,29 @@ function configStub() {
     profileId: "opencode-go",
   };
 }
+
+test("sessionIdsFrom extracts Codex ids with stable header precedence", () => {
+  assert.deepEqual(sessionIdsFrom({
+    "x-codex-parent-thread-id": "parent-thread",
+    "x-codex-thread-id": "child-thread",
+    "thread-id": "legacy-thread",
+    session_id: "session-1",
+    "x-codex-session-id": "session-2",
+  }), {
+    sessionId: "session-1",
+    threadId: "parent-thread",
+  });
+});
+
+test("sessionIdsFrom accepts array-valued request headers and trims them", () => {
+  assert.deepEqual(sessionIdsFrom({
+    "x-codex-thread-id": [" thread-array ", "ignored"],
+    "x-codex-session-id": [" session-array "],
+  }), {
+    sessionId: "session-array",
+    threadId: "thread-array",
+  });
+});
 
 // Decorate the underlying Writable with ServerResponse-shaped helpers instead of
 // wrapping it in a plain object: pipeGatewayStream uses stream .pipe(), which
@@ -613,6 +637,7 @@ test("relayResponses forwards a streamed response and records usage", async () =
   const res = responseStub(sink);
   const blockedReports = [];
   const finishResults = [];
+  const usageEvents = [];
   const metrics = {
     begin: () => (result) => finishResults.push(result),
     recordResponseTransform: (report) => blockedReports.push(report.blocked),
@@ -626,7 +651,7 @@ test("relayResponses forwards a streamed response and records usage", async () =
     return new Response(
       new ReadableStream({
         start(controller) {
-          controller.enqueue(Buffer.from('event: response.completed\ndata: {"type":"response.completed","response":{"model":"gpt-5.6-luna","output":[{"type":"function_call","call_id":"call_00_vis","name":"x","arguments":"{}"}],"usage":{"input_tokens":4,"output_tokens":2}}}\n\n'));
+          controller.enqueue(Buffer.from('event: response.completed\ndata: {"type":"response.completed","response":{"model":"gpt-5.6-luna","output":[{"type":"function_call","call_id":"call_00_vis","name":"x","arguments":"{}"}],"usage":{"input_tokens":4,"output_tokens":2,"input_tokens_details":{"cached_tokens":3},"output_tokens_details":{"reasoning_tokens":1}}}}\n\n'));
           controller.close();
         },
       }),
@@ -642,7 +667,7 @@ test("relayResponses forwards a streamed response and records usage", async () =
       },
       res,
       {
-        recordUsage: () => {},
+        recordUsage: (event) => usageEvents.push(event),
         config: configStub(),
         metrics,
         routeAffinity: affinity,
@@ -667,6 +692,51 @@ test("relayResponses forwards a streamed response and records usage", async () =
     const finished = finishResults[finishResults.length - 1];
     assert.equal(finished.inputTokens, 4, "finish must carry input tokens onto the trace record");
     assert.equal(finished.outputTokens, 2, "finish must carry output tokens onto the trace record");
+    assert.equal(usageEvents[0].cachedTokens, 3, "usage event must carry cached tokens from the upstream details");
+    assert.equal(usageEvents[0].reasoningTokens, 1, "usage event must carry reasoning tokens from the upstream details");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("relayResponses ends a mid-stream upstream failure with response.failed", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    return new Response(
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(Buffer.from('event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"hel"}\n\n'));
+          controller.error(new Error("upstream burst Bearer sk-abc123456"));
+        },
+      }),
+      { status: 200, headers: { "content-type": "text/event-stream" } },
+    );
+  };
+  try {
+    const result = await relayResponses(
+      {
+        model: "deepseek-v4-flash",
+        input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }],
+      },
+      res,
+      {
+        recordUsage: () => {},
+        config: configStub(),
+        metrics: { begin: () => () => {}, recordResponseTransform: () => {}, recordResponseUsage: () => {} },
+        routeAffinity: new RouteAffinity(),
+        knownModels: new Set(["deepseek-v4-flash"]),
+        mainModel: "deepseek-v4-flash",
+        visionModel: "gpt-5.6-luna",
+      },
+    );
+    assert.equal(result.ok, false);
+    const forwarded = Buffer.concat(sink.chunks).toString("utf8");
+    assert.match(forwarded, /response\.failed/);
+    assert.match(forwarded, /upstream_failed/);
+    assert.match(forwarded, /upstream burst/, "the failure reason is passed to the client");
+    assert.doesNotMatch(forwarded, /sk-abc123456/, "bearer tokens are redacted from the event");
   } finally {
     globalThis.fetch = originalFetch;
   }

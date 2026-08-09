@@ -756,17 +756,34 @@ export function createServices(config = loadConfig()) {
 // body-parser, which supports them natively.
 function zstdRequestDecoder() {
   const canZstd = typeof zlib.zstdDecompressSync === "function";
+  const maxInput = 16 * 1024 * 1024;
+  const maxOutput = 64 * 1024 * 1024;
   return (req, res, next) => {
     if (String(req.headers["content-encoding"] || "").toLowerCase() !== "zstd") return next();
     if (!canZstd) {
       return res.status(415).json({ error: { type: "unsupported_encoding", message: "zstd request bodies require Node 23.8+ (run ModelDock on Node 24)." } });
     }
     const chunks = [];
-    req.on("data", (chunk) => chunks.push(chunk));
+    let received = 0;
+    let tooLarge = false;
+    req.on("data", (chunk) => {
+      if (tooLarge) return;
+      received += chunk.length;
+      if (received > maxInput) {
+        tooLarge = true;
+        res.status(413).json({ error: { type: "payload_too_large", message: `zstd request body exceeds the ${maxInput}-byte limit` } });
+        return;
+      }
+      chunks.push(chunk);
+    });
     req.on("error", next);
     req.on("end", () => {
+      if (tooLarge) return;
       try {
         const body = zlib.zstdDecompressSync(Buffer.concat(chunks));
+        if (body.length > maxOutput) {
+          return res.status(413).json({ error: { type: "payload_too_large", message: `zstd request decompresses beyond the ${maxOutput}-byte limit` } });
+        }
         req.headers["content-encoding"] = "identity";
         req.headers["content-length"] = String(body.length);
         req.body = JSON.parse(body.toString("utf8"));
@@ -1202,7 +1219,17 @@ export function createApp(services = createServices()) {
   const eventClients = new Set();
   const broadcast = () => {
     const data = `data: ${JSON.stringify(statusPayload(services))}\n\n`;
-    for (const client of eventClients) client.write(data);
+    for (const client of [...eventClients]) {
+      try {
+        if (client.writableEnded || client.destroyed) {
+          eventClients.delete(client);
+          continue;
+        }
+        client.write(data);
+      } catch {
+        eventClients.delete(client);
+      }
+    }
   };
   metrics.on("change", broadcast);
   app.get("/api/events", (req, res) => {

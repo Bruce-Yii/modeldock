@@ -4,6 +4,8 @@ import { createServer } from "node:http";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import zlib from "node:zlib";
+import { randomBytes } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createApp, createServices, startServer, initAutostartDefault, codexModelCatalog } from "./server.mjs";
 import { OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE } from "./profiles.mjs";
@@ -434,6 +436,33 @@ test("api/status exposes debug flags without dump path leaks", async (t) => {
   assert.equal(status.config.debug.enabled, true);
   assert.equal(status.config.debug.noReasoning, true);
   assert.equal(status.config.debug.dumpDir, "");
+});
+
+test("zstd decoder caps the compressed stream and the decompressed body", async (t) => {
+  if (typeof zlib.zstdCompressSync !== "function") {
+    t.skip("zstd requires Node 23.8+");
+    return;
+  }
+  const instance = await startApp({});
+  t.after(instance.stop);
+
+  // Highly compressible payload: tiny on the wire, decompresses past 64MB.
+  const bomb = zlib.zstdCompressSync(Buffer.alloc(100 * 1024 * 1024));
+  const tooBig = await fetch(`${instance.base}/healthz`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "content-encoding": "zstd" },
+    body: bomb,
+  });
+  assert.equal(tooBig.status, 413);
+
+  // Incompressible stream that already exceeds the 16MB input cap.
+  const huge = zlib.zstdCompressSync(randomBytes(17 * 1024 * 1024));
+  const tooLong = await fetch(`${instance.base}/healthz`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "content-encoding": "zstd" },
+    body: huge,
+  });
+  assert.equal(tooLong.status, 413);
 });
 
 test("host guard rejects non-loopback Host headers (DNS rebinding)", async (t) => {

@@ -38,11 +38,13 @@ export function recordUsageEvent({
   totalTokens,
   cachedTokens,
   reasoningTokens,
+  sessionId,
+  threadId,
   at = Date.now(),
   filePath = USAGE_EVENTS_PATH,
 } = {}) {
   const event = {
-    meteringVersion: 1,
+    meteringVersion: 2,
     at: new Date(at).toISOString(),
     model: safeText(model, "unknown"),
     provider: safeText(provider, "unknown"),
@@ -54,6 +56,8 @@ export function recordUsageEvent({
     ...(safeCount(totalTokens) !== undefined ? { totalTokens: safeCount(totalTokens) } : {}),
     ...(safeCount(cachedTokens) !== undefined ? { cachedTokens: safeCount(cachedTokens) } : {}),
     ...(safeCount(reasoningTokens) !== undefined ? { reasoningTokens: safeCount(reasoningTokens) } : {}),
+    ...(safeText(sessionId, "") ? { sessionId: safeText(sessionId, "") } : {}),
+    ...(safeText(threadId, "") ? { threadId: safeText(threadId, "") } : {}),
   };
   try {
     mkdirSync(path.dirname(filePath), { recursive: true });
