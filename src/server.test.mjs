@@ -8,6 +8,11 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createApp, createServices, startServer, initAutostartDefault, codexModelCatalog } from "./server.mjs";
 import { OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE } from "./profiles.mjs";
 
+// Bare-path tests exercise the app wiring, not the caller-key guard. Enforcement
+// is ON by default since 0.1.10, so this file opts out explicitly; the default
+// enforcement behavior is covered in server-gateway.test.mjs.
+process.env.MODELDOCK_REQUIRE_CALLER_KEY = "0";
+
 const TEST_PROFILE = { ...OPENCODE_GO_PROFILE };
 
 function baseConfig() {

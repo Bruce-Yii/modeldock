@@ -8,6 +8,11 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createApp, createServices } from "./server.mjs";
 import { OPENCODE_GO_PROFILE } from "./profiles.mjs";
 
+// Bare-path relay tests exercise the routed gateway, not the caller-key guard.
+// Enforcement is ON by default since 0.1.10, so these tests opt out explicitly;
+// the default-enforcement behavior itself is covered by its own test below.
+process.env.MODELDOCK_REQUIRE_CALLER_KEY = "0";
+
 const TEST_PROFILE = { ...OPENCODE_GO_PROFILE };
 
 function baseConfig() {
@@ -314,9 +319,32 @@ test("caller-key routes: correct key relays, wrong key and enforced bare path 40
   assert.equal(models.status, 200, "the keyed models path serves the catalog");
 
   process.env.MODELDOCK_REQUIRE_CALLER_KEY = "1";
-  t.after(() => { delete process.env.MODELDOCK_REQUIRE_CALLER_KEY; });
+  t.after(() => { process.env.MODELDOCK_REQUIRE_CALLER_KEY = "0"; });
   const bare = await fetch(`${instance.base}/v1/responses`, { method: "POST", headers, body });
   assert.equal(bare.status, 401, "bare path is refused once enforcement is on");
+});
+
+test("caller-key enforcement defaults to on: bare paths 401 without an explicit opt-out", async (t) => {
+  const upstream = createServer((req, res) => {
+    res.setHeader("content-type", "text/event-stream");
+    res.end('data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1}}}\n\ndata: [DONE]\n\n');
+  });
+  const port = await listen(upstream);
+  t.after(() => upstream.close());
+  const instance = await startApp({ goBaseUrl: `http://127.0.0.1:${port}`, opencodeBaseUrl: `http://127.0.0.1:${port}` });
+  t.after(instance.stop);
+  const body = JSON.stringify({ model: "deepseek-v4-flash", stream: true, input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }] });
+  const headers = { "content-type": "application/json" };
+
+  delete process.env.MODELDOCK_REQUIRE_CALLER_KEY;
+  t.after(() => { process.env.MODELDOCK_REQUIRE_CALLER_KEY = "0"; });
+  const bare = await fetch(`${instance.base}/v1/responses`, { method: "POST", headers, body });
+  assert.equal(bare.status, 401, "the bare path is refused by default");
+  const bareImages = await fetch(`${instance.base}/images/generations`, { method: "POST", headers, body });
+  assert.equal(bareImages.status, 401, "the bare native-image path is refused by default");
+  const keyed = await fetch(`${instance.base}/c/test-caller-key-0123456789abcdefghij/v1/responses`, { method: "POST", headers, body });
+  assert.equal(keyed.status, 200, "the keyed path still relays by default");
+  await keyed.text();
 });
 
 test("zstd-encoded request bodies are decompressed before the relay", { skip: typeof (await import("node:zlib")).zstdCompressSync !== "function" }, async (t) => {

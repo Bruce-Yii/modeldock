@@ -1,5 +1,6 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -11,8 +12,46 @@ import path from "node:path";
 // protocol changes, while a hostile page cannot learn it.
 
 export const CALLER_PATH_PREFIX = "/c";
-const KEY_FILE = path.join(os.homedir(), ".modeldock", "caller-key");
 const KEY_PATTERN = /^[A-Za-z0-9_-]{32,}$/;
+
+// The key file follows MODELDOCK_STATE_DIR when set (mock installs and tests
+// redirect it to a throwaway root) and defaults to ~/.modeldock/caller-key,
+// which is where every real install already looks.
+function keyFilePath() {
+  const base = process.env.MODELDOCK_STATE_DIR
+    ? path.resolve(process.env.MODELDOCK_STATE_DIR)
+    : path.join(os.homedir(), ".modeldock");
+  return path.join(base, "caller-key");
+}
+
+// The persisted key is a bearer capability: restrict the file to the current
+// user (POSIX 0600; Windows: remove inherited ACLs, grant the user Full
+// Control). Same intent as codex-router's file-security.mjs. Failure is never
+// fatal - the key still works for this process lifetime.
+let windowsSid;
+function currentWindowsSid() {
+  if (windowsSid) return windowsSid;
+  const script = "[Console]::Out.Write([Security.Principal.WindowsIdentity]::GetCurrent().User.Value)";
+  windowsSid = execFileSync(
+    "powershell.exe",
+    ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
+    { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+  ).trim();
+  if (!windowsSid) throw new Error("Could not resolve the current Windows user SID.");
+  return windowsSid;
+}
+
+function protectPrivateFile(target) {
+  chmodSync(target, 0o600);
+  if (process.platform !== "win32") return target;
+  const sid = currentWindowsSid();
+  execFileSync(
+    "icacls.exe",
+    [target, "/inheritance:r", "/grant:r", `*${sid}:(F)`],
+    { stdio: "ignore" },
+  );
+  return target;
+}
 
 export function validCallerKey(value) {
   return typeof value === "string" && KEY_PATTERN.test(value);
@@ -28,10 +67,17 @@ export function callerKeyEqual(actual, expected) {
 // Load the persisted key, minting one on first use. The key is generated
 // locally and is not a provider credential; losing it just means re-enabling
 // the Codex switch to write the new URL.
-export function loadOrCreateCallerKey(filePath = KEY_FILE) {
+export function loadOrCreateCallerKey(filePath = keyFilePath()) {
   try {
     const existing = readFileSync(filePath, "utf8").trim();
-    if (validCallerKey(existing)) return existing;
+    if (validCallerKey(existing)) {
+      try {
+        protectPrivateFile(filePath);
+      } catch {
+        // Hardening must never take the gateway down.
+      }
+      return existing;
+    }
   } catch {
     // Missing or unreadable: mint below.
   }
@@ -39,6 +85,11 @@ export function loadOrCreateCallerKey(filePath = KEY_FILE) {
   try {
     mkdirSync(path.dirname(filePath), { recursive: true });
     writeFileSync(filePath, `${key}\n`, "utf8");
+    try {
+      protectPrivateFile(filePath);
+    } catch {
+      // Hardening must never take the gateway down.
+    }
   } catch {
     // Unwritable state dir: the key still works for this process lifetime.
   }

@@ -40,10 +40,14 @@ test("nativeMerge defaults to the ChatGPT sign-in state when MODELDOCK_NATIVE_ME
   const home = mkdtempSync(path.join(os.tmpdir(), "modeldock-config-auth-"));
   const previousHome = process.env.MODELDOCK_CODEX_HOME;
   const previousMerge = process.env.MODELDOCK_NATIVE_MERGE;
-  const previousEnvFile = process.env.MODELDOCK_ENV_FILE;
-  process.env.MODELDOCK_CODEX_HOME = home;
-  process.env.MODELDOCK_ENV_FILE = path.join(home, "isolated.env");
-  try {
+   const previousEnvFile = process.env.MODELDOCK_ENV_FILE;
+   process.env.MODELDOCK_CODEX_HOME = home;
+   process.env.MODELDOCK_ENV_FILE = path.join(home, "isolated.env");
+   // An earlier loadConfig in this process may have applied the repo .env (the
+   // dev fallback for envFileFor), which can carry MODELDOCK_NATIVE_MERGE and
+   // would leak into this test. The unset case must start from an empty env.
+   delete process.env.MODELDOCK_NATIVE_MERGE;
+   try {
     assert.equal(loadConfig().nativeMerge, false, "no ChatGPT sign-in means native GPT models stay unpublished");
     writeFileSync(path.join(home, "auth.json"), JSON.stringify({ tokens: { access_token: "sk-test" } }), "utf8");
     assert.equal(loadConfig().nativeMerge, true, "a detected sign-in keeps the subscriber-native merge");

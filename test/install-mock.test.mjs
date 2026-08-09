@@ -18,6 +18,7 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 // scripts/install.sh (via sh). Each platform gets a real end-to-end mock install.
 const isWindows = process.platform === "win32";
 const installerScript = isWindows ? "install.ps1" : "install.sh";
+const uninstallScript = isWindows ? "uninstall.ps1" : "uninstall.sh";
 const launcherName = isWindows ? "start-hidden.ps1" : "start-hidden.sh";
 const runInstaller = (installer, env) =>
   isWindows
@@ -26,6 +27,7 @@ const runInstaller = (installer, env) =>
         stdio: ["ignore", "pipe", "pipe"],
       })
     : spawn("sh", [installer], { env, stdio: ["ignore", "pipe", "pipe"] });
+const runUninstall = (installer, env) => runInstaller(installer, env);
 
 function listen(server) {
   return new Promise((resolve, reject) => {
@@ -38,6 +40,33 @@ async function fetchText(url) {
   const res = await fetch(url);
   const text = await res.text();
   return { status: res.status, text };
+}
+
+// The gateway persists its caller key inside MODELDOCK_STATE_DIR (default
+// ~/.modeldock/caller-key); the mock install redirects the state dir into its
+// throwaway root. The managed Codex config routes through /c/<key>/v1, so the
+// routing probe uses the keyed URL built from that same key file.
+function readCallerKey(stateDir) {
+  const keyFile = path.join(stateDir, "caller-key");
+  try {
+    const key = readFileSync(keyFile, "utf8").trim();
+    return /^[A-Za-z0-9_-]{32,}$/.test(key) ? key : "";
+  } catch {
+    return "";
+  }
+}
+
+async function relayProbe(port, callerKey) {
+  const prefix = callerKey ? `/c/${callerKey}` : "";
+  return fetch(`http://127.0.0.1:${port}${prefix}/v1/responses`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: "deepseek-v4-flash",
+      stream: true,
+      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "ping" }] }],
+    }),
+  });
 }
 
 async function waitForHealth(port, tries = 40) {
@@ -173,16 +202,8 @@ function startFakeUpstream(tag) {
   });
 }
 
-async function assertRoutingWorks(port, upstreamTag) {
-  const res = await fetch(`http://127.0.0.1:${port}/v1/responses`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: "deepseek-v4-flash",
-      stream: true,
-      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "ping" }] }],
-    }),
-  });
+async function assertRoutingWorks(port, upstreamTag, callerKey) {
+  const res = await relayProbe(port, callerKey);
   const text = await res.text();
   assert.equal(res.status, 200, `relay should return 200 (got ${res.status})`);
   assert.match(text, new RegExp(upstreamTag), `relay should carry the upstream output through`);
@@ -655,7 +676,14 @@ test("mock install lifecycle: first start, second start routes, login relaunch",
   await assertGatewayMcpTools(appPort);
   await assertBridgeTools(path.join(installDir, "dist", "mcp-standalone.mjs"), `http://127.0.0.1:${appPort}`, memoryDir);
   assertCatalogTools(installedCatalog);
-  await assertRoutingWorks(appPort, "modeldock-relay-ok");
+  // Caller-key enforcement is on by default, so routing must go through the
+  // keyed /c/<key>/v1 URL (what the managed Codex config points at) while the
+  // bare path is rejected.
+  const callerKey = readCallerKey(path.join(installDir, ".modeldock"));
+  await assertRoutingWorks(appPort, "modeldock-relay-ok", callerKey);
+  const bare = await relayProbe(appPort, "");
+  assert.equal(bare.status, 401, "bare /v1 relay should be rejected when caller-key enforcement is on by default");
+  await bare.text();
 
   // 6. The gateway is up, so it has written its owner record. Assert it landed in
   //    the throwaway root and not in the user's home: this test is stopped with a
@@ -707,7 +735,7 @@ test("mock install lifecycle: first start, second start routes, login relaunch",
   const secondHealth = await waitForHealth(appPort);
   assert.ok(secondHealth.up, `gateway should come up on second start\n${secondOut}\n${secondErr}`);
   assert.equal(secondHealth.status, 200);
-  await assertRoutingWorks(appPort, "modeldock-relay-ok");
+  await assertRoutingWorks(appPort, "modeldock-relay-ok", callerKey);
   await assertGatewayMcpTools(appPort);
   assertCatalogTools(installedCatalog);
 
@@ -741,7 +769,7 @@ test("mock install lifecycle: first start, second start routes, login relaunch",
   const relaunchHealth = await waitForHealth(appPort);
   assert.ok(relaunchHealth.up, `gateway should come up through the login entry\n${relaunchOut}\n${relaunchErr}`);
   assert.equal(relaunchHealth.status, 200);
-  await assertRoutingWorks(appPort, "modeldock-relay-ok");
+  await assertRoutingWorks(appPort, "modeldock-relay-ok", callerKey);
   await assertGatewayMcpTools(appPort);
 
   // 9. Stop the final gateway so cleanup can remove the temp install dir.
@@ -974,4 +1002,46 @@ test("mock install: rejects a Node download whose SHA256 does not match", async 
     !existsSync(path.join(installDir, "node", `v${nodeVer}`)),
     "no bundled node should be installed after a bad hash",
   );
+});
+
+test("uninstall preserves the memory vault and never kills a foreign listener", async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "modeldock-uninstall-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const stateDir = path.join(root, ".modeldock");
+  const memoryDir = path.join(stateDir, "memory");
+  mkdirSync(memoryDir, { recursive: true });
+  writeFileSync(path.join(memoryDir, "memory.db"), "sqlite-bytes");
+  writeFileSync(path.join(stateDir, "caller-key"), "not-a-real-key\n");
+  writeFileSync(path.join(stateDir, "autostart-initialized"), "2026-01-01\n");
+
+  const probe = createServer();
+  const port = await listen(probe);
+  await new Promise((resolve) => probe.close(resolve));
+  // A recorded owner that is not a listener on the port must never be killed.
+  // 2147483647 is the largest possible pid and cannot be alive on any runner.
+  writeFileSync(ownerFilePath(port, root), JSON.stringify({ pid: 2147483647, root, port }));
+
+  const env = {
+    ...process.env,
+    MODELDOCK_ROOT: stateDir,
+    MODELDOCK_STATE_DIR: stateDir,
+    MODELDOCK_PORT: String(port),
+    ...(isWindows
+      ? {
+          MODELDOCK_AUTOSTART_KEY: `HKCU\\Software\\ModelDockTests\\uninstall-${randomUUID()}`,
+          MODELDOCK_AUTOSTART_NAME: "ModelDock",
+        }
+      : {}),
+  };
+  const child = runUninstall(path.join(repoRoot, "scripts", uninstallScript), env);
+  let out = "";
+  let err = "";
+  child.stdout.on("data", (d) => (out += d));
+  child.stderr.on("data", (d) => (err += d));
+  const exitCode = await new Promise((resolve) => child.on("close", resolve));
+  assert.equal(exitCode, 0, `uninstall failed:\n${out}\n${err}`);
+  assert.ok(existsSync(path.join(memoryDir, "memory.db")), "uninstall must preserve the memory vault");
+  assert.ok(!existsSync(path.join(stateDir, "caller-key")), "runtime state files should be cleared");
+  assert.ok(!existsSync(path.join(stateDir, "autostart-initialized")), "the autostart mark should be cleared");
+  assert.match(out + err, /preserved/i, "uninstall should say the memory vault is preserved");
 });
