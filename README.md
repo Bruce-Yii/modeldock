@@ -23,6 +23,10 @@ native GPT passthrough and live token, latency, and trace observability.
   <img src="assets/dashboard-banner.png" alt="Vision, audio, video and memory - empower DeepSeek with full observability" width="70%" />
 </p>
 
+<p align="center">
+  <img src="assets/memory-banner.png" alt="Three-tier memory: project, global, expert - reward 50% to 80%, time 4h15m to 2h24m" width="70%" />
+</p>
+
 ## Why Model Dock For Codex
 
 DeepSeek V4 Flash is fast and cheap, but it cannot see, speak, or listen, and
