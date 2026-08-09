@@ -30,7 +30,9 @@ without rewriting the conversation history:
 - **Hear** - the `hear` tool transcribes an audio file back to text.
 - **Search** - the `web_search_exa` tool queries the web through Exa.
 - **Remember** - `store_memory` and `recall_memory` give the model a lightweight
-  cross-session memory, so decisions and baselines survive between sessions.
+  cross-session memory, so decisions and baselines survive between sessions. It
+  is opt-in: set `MODELDOCK_MEMORY=1` in `~/.modeldock/.env` and restart to
+  enable it.
 
 The bridge is a thin local gateway: the Responses stream passes through
 untouched, and multi-turn tool loops, streaming, and long-session compaction
@@ -123,6 +125,25 @@ sh ~/.modeldock/scripts/recover.sh
 After either configuration change, fully quit and restart Codex. The recovery
 menu does not remove ModelDock or delete the backup.
 
+## Uninstall
+
+Removes ModelDock while keeping your data: stops only the gateway owned by this
+installation, drops the login autostart entry, clears the install state (the
+memory vault and the Codex config backups are kept), and removes the gateway
+log.
+
+Windows:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.modeldock\scripts\uninstall.ps1"
+```
+
+macOS or Linux:
+
+```sh
+sh ~/.modeldock/scripts/uninstall.sh
+```
+
 ## Disclaimer
 
 Model Dock For Codex is an independent, community-maintained project. It is
@@ -155,7 +176,7 @@ DeepSeek V4 Flash 又快又便宜，但它看不见、听不到、不会说话�
 - **说话** - `speak` 工具把文本合成本地音频文件。
 - **听写** - `hear` 工具把音频文件转写成文本。
 - **搜索** - `web_search_exa` 工具通过 Exa 查询网络。
-- **记住** - `store_memory` 和 `recall_memory` 给模型一份轻量跨会话记忆，决策和基线在会话之间也能保留。
+- **记住** - `store_memory` 和 `recall_memory` 给模型一份轻量跨会话记忆，决策和基线在会话之间也能保留。此功能为可选：在 `~/.modeldock/.env` 中设置 `MODELDOCK_MEMORY=1` 并重启即可启用。
 
 桥接层是轻量本地网关：Responses 流原样透传，多轮工具循环、流式输出和长会话压缩都与原生通道一致。
 
@@ -232,6 +253,23 @@ sh ~/.modeldock/scripts/recover.sh
 
 任一路线变更后，请完全退出并重启 Codex。恢复菜单不会删除 ModelDock 或备份。
 
+### 卸载
+
+卸载会保留你的数据：只停止本安装拥有的网关、移除登录自启动项、清理安装状态
+（记忆库和 Codex 配置备份会保留），并删除网关日志。
+
+Windows：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.modeldock\scripts\uninstall.ps1"
+```
+
+macOS 或 Linux：
+
+```sh
+sh ~/.modeldock/scripts/uninstall.sh
+```
+
 ---
 
 ## 日本語
@@ -242,7 +280,7 @@ OpenCode Go と DeepSeek 公式 API をつなぎます。
 DeepSeek V4 Flash は速くて安い一方、画像を見られず、話せず、聞けず、
 それが経由する OpenCode Go の Responses エンドポイントには検索機能も
 ありません（DeepSeek 公式エンドポイントにはあります）。Model Dock For
-Codex はこれら 4 つをツールとして追加し、会話履歴は書き換えません：
+Codex はこれら 5 つをツールとして追加し、会話履歴は書き換えません：
 
 - **見る** - 画像を Codex に貼り付けると、リクエストは設定で選択した
   ビジョンモデルにルーティングされます。スクリーンショットや
@@ -250,6 +288,9 @@ Codex はこれら 4 つをツールとして追加し、会話履歴は書き�
 - **話す** - `speak` ツールがテキストをローカル音声ファイルに変換します。
 - **聞く** - `hear` ツールが音声ファイルをテキストに書き起こします。
 - **検索** - `web_search_exa` ツールが Exa 経由でウェブ検索します。
+- **記憶** - `store_memory` と `recall_memory` で軽量なクロスセッション記憶を
+  提供します。オプトインです：`~/.modeldock/.env` で `MODELDOCK_MEMORY=1` を
+  設定して再起動すると有効になります。
 
 ブリッジは Responses ストリームをバッファリングも再合成もせずそのまま転送
 します。書き換えは文書化された最小限のものだけです：コンパクトタスクが
@@ -340,6 +381,25 @@ sh ~/.modeldock/scripts/recover.sh
 どちらの設定変更後も、Codex を完全に終了して再起動してください。リカバリメニューは
 ModelDock やバックアップを削除しません。
 
+### アンインストール
+
+ModelDock を削除しますが、データは保持します：このインストールが所有する
+ゲートウェイだけを停止し、ログイン時の自動起動エントリを削除し、インストール
+状態をクリアします（メモリボールトと Codex 設定のバックアップは保持）。
+ゲートウェイのログも削除されます。
+
+Windows：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.modeldock\scripts\uninstall.ps1"
+```
+
+macOS / Linux：
+
+```sh
+sh ~/.modeldock/scripts/uninstall.sh
+```
+
 ---
 
 ## Français
@@ -350,7 +410,7 @@ mince pont Responses vers OpenCode Go et l'API officielle DeepSeek.
 DeepSeek V4 Flash est rapide et économique, mais il ne voit pas, ne parle pas,
 n'écoute pas, et l'endpoint Responses d'OpenCode Go par lequel il passe n'a pas
 de recherche intégrée (l'endpoint officiel DeepSeek en a une). Model Dock For
-Codex ajoute ces quatre capacités comme outils, sans réécrire l'historique de
+Codex ajoute ces cinq capacités comme outils, sans réécrire l'historique de
 conversation :
 
 - **Voir** - collez une image dans Codex et la requête est routée vers le modèle
@@ -359,6 +419,9 @@ conversation :
 - **Parler** - l'outil `speak` transforme un texte en fichier audio local.
 - **Écouter** - l'outil `hear` transcrit un fichier audio en texte.
 - **Chercher** - l'outil `web_search_exa` interroge le web via Exa.
+- **Se souvenir** - `store_memory` et `recall_memory` offrent au modèle une
+  mémoire légère entre sessions. C'est optionnel : définissez
+  `MODELDOCK_MEMORY=1` dans `~/.modeldock/.env` et redémarrez pour l'activer.
 
 Le pont relaie le flux Responses sans bufferiser ni resynthétiser le SSE. Ses
 seules réécritures sont chirurgicales et documentées : les lignes d'outils
@@ -452,6 +515,25 @@ Après toute modification de configuration, quittez complètement Codex et
 redémarrez-le. Le menu de récupération ne supprime ni ModelDock ni les
 sauvegardes.
 
+### Désinstallation
+
+Supprime ModelDock en conservant vos données : arrête uniquement la passerelle
+appartenant à cette installation, retire l'entrée de démarrage automatique,
+efface l'état d'installation (la mémoire et les sauvegardes de configuration
+Codex sont conservées) et supprime le journal de la passerelle.
+
+Windows :
+
+```powershell
+powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.modeldock\scripts\uninstall.ps1"
+```
+
+macOS ou Linux :
+
+```sh
+sh ~/.modeldock/scripts/uninstall.sh
+```
+
 ---
 
 ## Español
@@ -462,7 +544,7 @@ Responses hacia OpenCode Go y la API oficial de DeepSeek.
 DeepSeek V4 Flash es rápido y barato, pero no ve, no habla, no escucha y el
 endpoint Responses de OpenCode Go por el que pasa no tiene búsqueda integrada
 (el endpoint oficial de DeepSeek sí la tiene). Model Dock For Codex añade estas
-cuatro capacidades como herramientas, sin reescribir el historial de la
+cinco capacidades como herramientas, sin reescribir el historial de la
 conversación:
 
 - **Ver** - pega una imagen en Codex y la solicitud se enruta al modelo de
@@ -472,6 +554,9 @@ conversación:
   local.
 - **Escuchar** - la herramienta `hear` transcribe un archivo de audio a texto.
 - **Buscar** - la herramienta `web_search_exa` consulta la web mediante Exa.
+- **Recordar** - `store_memory` y `recall_memory` dan al modelo una memoria
+  ligera entre sesiones. Es opcional: define `MODELDOCK_MEMORY=1` en
+  `~/.modeldock/.env` y reinicia para activarla.
 
 El puente retransmite el flujo Responses sin almacenar ni resintetizar SSE. Sus
 únicas reescrituras son quirúrgicas y documentadas: las filas de herramientas
@@ -561,3 +646,22 @@ sh ~/.modeldock/scripts/recover.sh
 
 Tras cualquier cambio de configuración, sal por completo de Codex y reinícialo.
 El menú de recuperación no elimina ModelDock ni las copias de seguridad.
+
+### Desinstalación
+
+Elimina ModelDock conservando tus datos: detiene solo la puerta de enlace que
+pertenece a esta instalación, quita la entrada de inicio automático, limpia el
+estado de instalación (se conservan la memoria y las copias de seguridad de la
+configuración de Codex) y elimina el registro de la puerta de enlace.
+
+Windows:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.modeldock\scripts\uninstall.ps1"
+```
+
+macOS o Linux:
+
+```sh
+sh ~/.modeldock/scripts/uninstall.sh
+```
