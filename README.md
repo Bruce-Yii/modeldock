@@ -19,6 +19,10 @@ native GPT passthrough and live token, latency, and trace observability.
   <img src="assets/dashboard.png" alt="ModelDock dashboard" width="100%" />
 </p>
 
+<p align="center">
+  <img src="assets/model_picker.png" alt="ModelDock models in the Codex model picker" width="100%" />
+</p>
+
 ## Why Model Dock For Codex
 
 DeepSeek V4 Flash is fast and cheap, but it cannot see, speak, or listen, and
