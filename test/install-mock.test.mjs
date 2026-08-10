@@ -1051,7 +1051,7 @@ test("mock install: rejects a Node download whose SHA256 does not match", async 
       const text =
         `${createHash("sha256").update(bundle).digest("hex")}  modeldock.mjs\n` +
         `${createHash("sha256").update(fakeBridge).digest("hex")}  mcp-standalone.mjs\n`;
-      res.writeHead(200, { "content-type": "text/plain" });
+      res.writeHead(200, { "content-type": "application/octet-stream" });
       res.end(text);
     } else if (url === "/index.json") {
       res.writeHead(200, { "content-type": "application/json" });
