@@ -8,8 +8,8 @@ import zlib from "node:zlib";
 import { createMcpExpressApp } from "@modelcontextprotocol/express";
 import { loadConfig, publicConfig, writeEnvFile, envFileFor, migrateEnvSecrets, isPlaceholderToken } from "./config.mjs";
 import { catalogFor } from "./catalog.mjs";
-import { nativeModelSlugs, refreshNativeCatalog } from "./native-catalog.mjs";
-import { readNativeAliases, writeNativeAliases, nativeSlugForExternal } from "./native-alias.mjs";
+import { nativeModelSlugs, refreshNativeCatalog, readNativeCatalog } from "./native-catalog.mjs";
+import { readNativeAliases, writeNativeAliases, nativeSlugForExternal, RESERVED_NATIVE_SLOTS } from "./native-alias.mjs";
 import { MediaStore } from "./media-store.mjs";
 import { Metrics } from "./metrics.mjs";
 import { NATIVE_IMAGE_PATHS, relayNativeImage, relayResponses as relayGatewayResponses } from "./gateway.mjs";
@@ -268,6 +268,11 @@ function settingsPayload(services) {
   const { config, autostart, modelSelection } = services;
   const mainToken = config.tokens?.["opencode-go"] || "";
   const deepseekToken = config.tokens?.["deepseek-official"] || "";
+  const native = readNativeCatalog(config);
+  const slots = (native?.models || [])
+    .filter((model) => typeof model?.slug === "string" && !RESERVED_NATIVE_SLOTS.has(model.slug))
+    .sort((left, right) => Number(left.priority ?? 999) - Number(right.priority ?? 999))
+    .map((model) => ({ slug: model.slug, display: model.display_name || model.slug }));
   return {
     tokenConfigured: Boolean(mainToken || deepseekToken),
     providers: [
@@ -285,6 +290,10 @@ function settingsPayload(services) {
       mainModel: modelSelection?.mainModel || config.mainModel,
       visionModel: modelSelection?.visionModel || config.visionModel,
       visionFallbackModel: config.visionFallbackModel || "",
+    },
+    nativeAlias: {
+      assignments: config.nativeAliasAssignments || {},
+      slots,
     },
     autostart: {
       supported: Boolean(autostart?.supported?.()),
@@ -1242,6 +1251,25 @@ export function createApp(services = createServices()) {
         // same atomic writeEnvFile call as the provider tokens, so a rejected
         // provider probe never leaves a partially-updated .env behind.
         updates.EXA_API_KEY = checked.value;
+      }
+      if (body.nativeAliasAssignments !== undefined) {
+        const raw = body.nativeAliasAssignments;
+        if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+          throw Object.assign(new Error("nativeAliasAssignments must be an object of { nativeSlug: externalSlug }."), { code: "invalid_native_alias_assignments" });
+        }
+        const clean = {};
+        for (const [nativeSlug, externalSlug] of Object.entries(raw)) {
+          if (externalSlug === null || externalSlug === undefined || externalSlug === "") continue;
+          if (typeof nativeSlug !== "string" || typeof externalSlug !== "string") {
+            throw Object.assign(new Error("nativeAliasAssignments values must be strings."), { code: "invalid_native_alias_assignments" });
+          }
+          clean[nativeSlug] = externalSlug;
+        }
+        updates.MODELDOCK_NATIVE_ALIASES = JSON.stringify(clean);
+        config.nativeAliasAssignments = clean;
+        // Rebuild the catalog so the pinned slots take effect immediately (the
+        // alias file and the picker catalog both derive from the assignments).
+        services.writeCatalogFile();
       }
       if (Object.keys(updates).length) {
         for (const [envKey, provider, label] of [

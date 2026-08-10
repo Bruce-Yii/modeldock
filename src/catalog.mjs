@@ -119,7 +119,7 @@ export function buildLoginFreeCatalog(catalog, config) {
     const s = score(left) - score(right);
     return s || Number(left.priority ?? 999) - Number(right.priority ?? 999);
   });
-  const assignments = buildNativeAliasAssignments(native.models, ranked);
+  const assignments = buildNativeAliasAssignments(native.models, ranked, config.nativeAliasAssignments);
   const aliasedSlugs = new Set(assignments.map(({ model }) => model.slug));
   const aliases = Object.fromEntries(
     assignments.map(({ nativeModel, model }) => [nativeModel.slug, model.slug]),

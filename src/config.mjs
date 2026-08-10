@@ -417,6 +417,19 @@ export function loadConfig() {
     nativeAliasesFile: process.env.MODELDOCK_NATIVE_ALIASES_FILE
       ? path.resolve(process.env.MODELDOCK_NATIVE_ALIASES_FILE)
       : "",
+    // User-pinned slot assignments (native slug -> external slug). Entries win
+    // over the automatic priority fill; unspecified slots stay automatic. JSON
+    // object, e.g. {"gpt-5.6-sol":"deepseek-v4-flash","gpt-5.4":"glm-5"}.
+    nativeAliasAssignments: (() => {
+      const raw = process.env.MODELDOCK_NATIVE_ALIASES;
+      if (!raw) return {};
+      try {
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+      } catch {
+        return {};
+      }
+    })(),
     // SSE compatibility layer: opencode-go's Responses adapters stream a full
     // lifecycle only for a few models; the rest emit delta events without their
     // output_item parents (and sometimes without response.completed), which the

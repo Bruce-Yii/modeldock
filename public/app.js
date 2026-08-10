@@ -969,10 +969,49 @@ async function openSettings() {
     $("settings-status").textContent = "";
     renderAutostart(data);
     renderCustomSection(data.custom);
+    renderAliasSlots(data);
     if (typeof dialog.showModal === "function") dialog.showModal();
     else dialog.setAttribute("open", "");
   } catch (error) {
     window.alert(error.message);
+  }
+}
+
+// --- Login-free picker slot pins ---
+async function renderAliasSlots(data) {
+  const list = $("alias-slots-list");
+  if (!list) return;
+  const alias = data.nativeAlias || { assignments: {}, slots: [] };
+  const slots = alias.slots || [];
+  if (!slots.length) {
+    list.innerHTML = "";
+    return;
+  }
+  let models = [];
+  try {
+    const response = await fetch("/api/models", { cache: "no-store" });
+    if (response.ok) models = (await response.json()).options || [];
+  } catch {
+    models = [];
+  }
+  const bare = (id) => String(id || "").split("@")[0];
+  const optionHtml = (m) => `<option value="${m.id}">${m.label || m.id}</option>`;
+  const optionsHtml = [`<option value="">${t("settings.aliasAuto")}</option>`]
+    .concat(models.map(optionHtml))
+    .join("");
+  list.innerHTML = slots
+    .map((slot) => `
+      <label class="field">
+        <div class="field-head"><span>${slot.display || slot.slug}</span></div>
+        <select class="alias-slot-select" data-slot="${slot.slug}" aria-label="Picker slot ${slot.slug}">${optionsHtml}</select>
+      </label>`)
+    .join("");
+  for (const select of list.querySelectorAll(".alias-slot-select")) {
+    const pinned = alias.assignments[select.dataset.slot];
+    if (pinned) {
+      const match = models.find((m) => m.id === pinned || bare(m.id) === bare(pinned));
+      if (match) select.value = match.id;
+    }
   }
 }
 
@@ -1164,6 +1203,15 @@ async function saveSettings() {
     const ds = $("settings-deepseek-token").value.trim();
     if (go) body.opencodeGoToken = go;
     if (ds) body.deepseekApiKey = ds;
+    const aliasSelects = document.querySelectorAll(".alias-slot-select");
+    if (aliasSelects.length) {
+      const assignments = {};
+      for (const select of aliasSelects) {
+        const value = select.value.trim();
+        if (value) assignments[select.dataset.slot] = value;
+      }
+      body.nativeAliasAssignments = assignments;
+    }
     if (!Object.keys(body).length) {
       closeSettings();
       return;

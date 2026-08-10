@@ -55,6 +55,39 @@ test("buildNativeAliasAssignments handles empty inputs", () => {
   assert.deepEqual(buildNativeAliasAssignments(null, EXTERNAL), []);
 });
 
+test("explicit pins win and the rest fill automatically", () => {
+  const many = [
+    ...EXTERNAL,
+    { slug: "glm-5", display_name: "OpenCode Go - GLM 5", priority: 15 },
+  ];
+  const assignments = buildNativeAliasAssignments(NATIVE, many, { "gpt-5.6-luna": "glm-5" });
+  const bySlot = Object.fromEntries(assignments.map(({ nativeModel, model }) => [nativeModel.slug, model.slug]));
+  assert.equal(bySlot["gpt-5.6-luna"], "glm-5", "the pinned slot uses the pinned model");
+  assert.equal(assignments.length, 3, "every native slot still filled");
+  assert.ok(!Object.values(bySlot).includes("glm-5") || bySlot["gpt-5.6-luna"] === "glm-5");
+  const others = Object.entries(bySlot).filter(([slot]) => slot !== "gpt-5.6-luna");
+  assert.ok(others.length === 2, "remaining slots auto-filled");
+});
+
+test("explicit pins accept owner-qualified and bare external slugs", () => {
+  const qualified = buildNativeAliasAssignments(NATIVE, EXTERNAL, { "gpt-5.6-sol": "deepseek-v4-flash@opencode-go" });
+  assert.equal(qualified.find((a) => a.nativeModel.slug === "gpt-5.6-sol").model.slug, "deepseek-v4-flash");
+  const bare = buildNativeAliasAssignments(NATIVE, EXTERNAL, { "gpt-5.6-sol": "deepseek-v4-flash" });
+  assert.equal(bare.find((a) => a.nativeModel.slug === "gpt-5.6-sol").model.slug, "deepseek-v4-flash");
+});
+
+test("explicit pins to unknown slots or models are skipped, not fatal", () => {
+  const assignments = buildNativeAliasAssignments(NATIVE, EXTERNAL, {
+    "gpt-5.6-sol": "does-not-exist",
+    "not-a-slot": "deepseek-v4-flash",
+    "": "deepseek-v4-flash",
+    "gpt-5.6-luna": "",
+  });
+  assert.equal(assignments.length, 3, "unknown pins are ignored, auto fill takes over");
+  const used = assignments.map(({ nativeModel }) => nativeModel.slug);
+  assert.ok(used.includes("gpt-5.6-sol") && used.includes("gpt-5.6-luna"));
+});
+
 test("alias file round-trips versioned mappings", () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-alias-file-"));
   try {

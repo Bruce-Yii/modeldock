@@ -26,9 +26,18 @@ export function nativeAliasesPath(config) {
 // shows first are used first. A missing native capture yields no slots:
 // external models then stay on their canonical slugs (today's behavior for CLI
 // users, who never needed aliases).
-const RESERVED_NATIVE_SLOTS = new Set(["codex-auto-review"]);
+export const RESERVED_NATIVE_SLOTS = new Set(["codex-auto-review"]);
 
-export function buildNativeAliasAssignments(nativeModels, externalModels) {
+function bareSlug(slug) {
+  const at = String(slug || "").indexOf("@");
+  return at > 0 ? String(slug).slice(0, at) : String(slug || "");
+}
+
+// Pair external models onto the captured native slug slots. `explicit` lets the
+// user pin specific slots (native slug -> external slug, either in canonical or
+// owner-qualified form); pinned slots win, the remaining slots are filled
+// automatically from the leftover external models in their given order.
+export function buildNativeAliasAssignments(nativeModels, externalModels, explicit = {}) {
   const slots = (Array.isArray(nativeModels) ? nativeModels : [])
     .filter((model) => (
       typeof model?.slug === "string"
@@ -38,9 +47,27 @@ export function buildNativeAliasAssignments(nativeModels, externalModels) {
       const priority = Number(left.priority ?? 999) - Number(right.priority ?? 999);
       return priority || String(left.slug).localeCompare(String(right.slug));
     });
-  return (Array.isArray(externalModels) ? externalModels : [])
-    .slice(0, slots.length)
-    .map((model, index) => ({ nativeModel: slots[index], model }));
+  const externals = Array.isArray(externalModels) ? externalModels : [];
+  const assignments = [];
+  const usedSlots = new Set();
+  const usedExternals = new Set();
+  if (explicit && typeof explicit === "object" && !Array.isArray(explicit)) {
+    for (const [nativeSlug, externalSlug] of Object.entries(explicit)) {
+      if (typeof externalSlug !== "string" || !externalSlug) continue;
+      const slot = slots.find((model) => model.slug === nativeSlug);
+      const external = externals.find((model) => bareSlug(model.slug) === bareSlug(externalSlug));
+      if (!slot || !external) continue;
+      assignments.push({ nativeModel: slot, model: external });
+      usedSlots.add(slot.slug);
+      usedExternals.add(external.slug);
+    }
+  }
+  const remainingSlots = slots.filter((model) => !usedSlots.has(model.slug));
+  const remainingExternals = externals.filter((model) => !usedExternals.has(model.slug));
+  for (let index = 0; index < Math.min(remainingSlots.length, remainingExternals.length); index += 1) {
+    assignments.push({ nativeModel: remainingSlots[index], model: remainingExternals[index] });
+  }
+  return assignments;
 }
 
 // The alias file is tiny and rewritten whenever the catalog changes, so it is
