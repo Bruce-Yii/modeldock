@@ -254,6 +254,21 @@ export class SseCompatState {
     };
     return synthesizeEvent("response.incomplete", { type: "response.incomplete", response });
   }
+
+  // Synthesize the terminal for an upstream that stayed silent past the stall
+  // threshold. response.failed (code upstream_stall_timeout) tells the client
+  // the turn did not finish; no heartbeat frames exist to keep the wire alive
+  // (the client was measured to reject them, 2026-08-10).
+  stallFailedEvent(stallTimeoutMs) {
+    return synthesizeEvent("response.failed", {
+      type: "response.failed",
+      response: {
+        id: this.responseId || "",
+        status: "failed",
+        error: { code: "upstream_stall_timeout", message: `upstream was silent for ${stallTimeoutMs}ms` },
+      },
+    });
+  }
 }
 
 // Pipe `upstreamBody` to the client, synthesizing missing lifecycle events.
@@ -266,14 +281,16 @@ export class SseCompatState {
 // a clean EOF ends the turn, so a missing `response.completed` is still
 // synthesized rather than misreported as a truncation (models that drop the
 // terminal envelope, e.g. glm-5.1, must not be flagged as interrupted).
-export async function pipeCompatStream(upstreamBody, res, tee, markFirstResponse, state = new SseCompatState()) {
+export async function pipeCompatStream(upstreamBody, res, tee, markFirstResponse, state = new SseCompatState(), opts = {}) {
   if (!upstreamBody) {
     res.end();
-    return { bytes: 0, interrupted: false, truncated: false, synthesized: 0 };
+    return { bytes: 0, interrupted: false, truncated: false, synthesized: 0, stalled: false };
   }
+  const stallTimeoutMs = Number(opts.stallTimeoutMs) > 0 ? Number(opts.stallTimeoutMs) : 0;
   let bytes = 0;
   let interrupted = false;
   let truncated = false;
+  let stalled = false;
   let synthesized = 0;
   let sseBuffer = "";
   let outStream = null;
@@ -326,10 +343,46 @@ export async function pipeCompatStream(upstreamBody, res, tee, markFirstResponse
     const settle = (error) => {
       if (settled) return;
       settled = true;
+      clearStallTimer();
       if (error) reject(error);
       else resolve();
     };
+    // Stall safety net: restart the timer on every upstream byte; when it
+    // fires the upstream has been silent for the whole window and the turn is
+    // ended with response.failed instead of hanging the client forever.
+    let stallTimer = null;
+    const clearStallTimer = () => {
+      if (stallTimer) {
+        clearTimeout(stallTimer);
+        stallTimer = null;
+      }
+    };
+    const armStallTimer = () => {
+      if (!stallTimeoutMs) return;
+      clearStallTimer();
+      stallTimer = setTimeout(() => {
+        if (settled || state.completed) return;
+        stalled = true;
+        truncated = true;
+        tee?.end?.();
+        emit([
+          ...state.ensureCreated(),
+          ...state.closeOpenParts(),
+          ...state.closeOpenItems(),
+          state.stallFailedEvent(stallTimeoutMs),
+        ]);
+        try {
+          res.end();
+        } catch {
+          res.destroy();
+        }
+        stream.destroy();
+        settle();
+      }, stallTimeoutMs);
+    };
+    armStallTimer();
     stream.on("data", (chunk) => {
+      armStallTimer();
       if (!firstResponseMarked) {
         firstResponseMarked = true;
         markFirstResponse?.();
@@ -381,5 +434,5 @@ export async function pipeCompatStream(upstreamBody, res, tee, markFirstResponse
       settle();
     });
   });
-  return { bytes, interrupted, truncated, synthesized };
+  return { bytes, interrupted, truncated, stalled, synthesized };
 }

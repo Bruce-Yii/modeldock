@@ -440,6 +440,12 @@ export function loadConfig() {
     sseCompat: !["0", "false", "off"].includes(
       String(process.env.MODELDOCK_SSE_COMPAT || "").toLowerCase(),
     ),
+    // Stall safety net for SSE-compat streams: when the upstream stays silent
+    // for this long (no bytes at all), end the turn with response.failed
+    // (upstream_stall_timeout) instead of leaving the client hanging. 0 disables.
+    // Threshold has full-model backing (worst pre-first-event silence 31.2s);
+    // the client itself showed no fixed 10s timeout (24.5s turns complete).
+    sseStallTimeoutMs: integer("MODELDOCK_SSE_STALL_TIMEOUT_MS", 90_000, { min: 0, max: 600_000 }),
     mcpTransport,
     visionTimeoutMs: integer("MODELDOCK_VISION_TIMEOUT_MS", 90_000, { min: 1_000, max: 300_000 }),
     mediaTtlMs: integer("MODELDOCK_MEDIA_TTL_MS", 3_600_000, { min: 60_000 }),

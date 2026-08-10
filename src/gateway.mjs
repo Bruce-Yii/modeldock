@@ -1693,7 +1693,9 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       // SSE-compat layer: synthesize the lifecycle events (created /
       // output_item.added / content_part.added / ...) that opencode-go's
       // Responses adapters drop for most models. Content is never rewritten.
-      const result = await pipeCompatStream(upstreamBody, res, tee, markFirstResponse);
+      const result = await pipeCompatStream(upstreamBody, res, tee, markFirstResponse, undefined, {
+        stallTimeoutMs: config.sseStallTimeoutMs,
+      });
       bytesOut = result.bytes;
       interrupted = result.interrupted;
       truncated = result.truncated;

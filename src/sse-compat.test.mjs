@@ -222,3 +222,77 @@ test("client abort marks the stream interrupted without writing a terminal", asy
   assert.ok(!text.includes("response.incomplete"), "no terminal written to a gone client");
   assert.ok(!text.includes("response.completed"), "no terminal written to a gone client");
 });
+
+test("silent upstream past the stall window ends with response.failed (upstream_stall_timeout)", async () => {
+  const state = new SseCompatState();
+  const res = { write: () => true, end: () => {}, once: () => res, on: () => res, removeListener: () => res };
+  const chunks = [];
+  res.write = (chunk) => { chunks.push(Buffer.from(chunk).toString("utf8")); return true; };
+  // A stream that stays open forever without emitting anything.
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(Buffer.from(`event: response.created\r\ndata: ${JSON.stringify({
+        type: "response.created", response: { id: "r1", status: "in_progress" },
+      })}\r\n\r\n`));
+    },
+  });
+  const result = await pipeCompatStream(body, res, null, null, state, { stallTimeoutMs: 150 });
+  const parsed = parseSse(chunks.join(""));
+  const failed = parsed.find((e) => e.type === "response.failed");
+  assert.equal(result.stalled, true, "stall flagged");
+  assert.equal(result.truncated, true, "stall counts as a truncated turn");
+  assert.ok(failed, "response.failed synthesized");
+  assert.equal(failed.response.status, "failed");
+  assert.equal(failed.response.error.code, "upstream_stall_timeout");
+});
+
+test("upstream data resets the stall timer", async () => {
+  const state = new SseCompatState();
+  const res = { write: () => true, end: () => {}, once: () => res, on: () => res, removeListener: () => res };
+  const chunks = [];
+  res.write = (chunk) => { chunks.push(Buffer.from(chunk).toString("utf8")); return true; };
+  const delta = (text) => `event: response.output_text.delta\r\ndata: ${JSON.stringify({
+    type: "response.output_text.delta", item_id: "i1", output_index: 0, content_index: 0, delta: text,
+  })}\r\n\r\n`;
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(Buffer.from(delta("a")));
+      setTimeout(() => controller.enqueue(Buffer.from(delta("b"))), 120);
+      setTimeout(() => controller.close(), 240);
+    },
+  });
+  // 200ms window: data at 0ms and 120ms keeps resetting it, so no stall fires.
+  const result = await pipeCompatStream(body, res, null, null, state, { stallTimeoutMs: 200 });
+  const parsed = parseSse(chunks.join(""));
+  assert.equal(result.stalled, false, "no stall while data flows");
+  assert.ok(parsed.some((e) => e.type === "response.completed"), "stream completed normally");
+  assert.ok(!parsed.some((e) => e.type === "response.failed"), "no failed event");
+});
+
+test("stallTimeoutMs 0 disables the stall safety net", async () => {
+  const state = new SseCompatState();
+  const chunks = [];
+  const onceHandlers = {};
+  const res = {
+    write: (chunk) => { chunks.push(Buffer.from(chunk).toString("utf8")); return true; },
+    end: () => {},
+    on: () => res,
+    once: (ev, fn) => { (onceHandlers[ev] ??= []).push(fn); return res; },
+    removeListener: () => res,
+  };
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(Buffer.from(`event: response.created\r\ndata: ${JSON.stringify({
+        type: "response.created", response: { id: "r1", status: "in_progress" },
+      })}\r\n\r\n`));
+    },
+  });
+  // Never closes, but no timer is armed: the promise would only settle on
+  // res close, so simulate the client abort after a short wait.
+  const pending = pipeCompatStream(body, res, null, null, state, { stallTimeoutMs: 0 });
+  await new Promise((r) => setTimeout(r, 120));
+  for (const fn of onceHandlers.close ?? []) fn();
+  const result = await pending;
+  assert.equal(result.stalled, false, "no stall timer armed");
+  assert.equal(result.interrupted, true, "only the client abort settled the stream");
+});
