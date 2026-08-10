@@ -70,7 +70,7 @@ test("searchWeb passes through and parses Exa response", async () => {
     config: {
       exaMcpUrl: "https://mcp.exa.ai/mcp",
       exaApiKey: "",
-      goToken: "t",
+      tokens: { "opencode-go": "t" },
       goBaseUrl: "https://go.example.com/v1",
       visionTimeoutMs: 90_000,
       visionModel: "v",
@@ -108,7 +108,7 @@ test("searchWeb appends exaApiKey as query param when configured", async () => {
     config: {
       exaMcpUrl: "https://mcp.exa.ai/mcp",
       exaApiKey: "secret-key",
-      goToken: "t",
+      tokens: { "opencode-go": "t" },
       goBaseUrl: "https://go.example.com/v1",
       visionTimeoutMs: 90_000,
       visionModel: "v",
@@ -135,7 +135,7 @@ test("searchWeb surfaces upstream errors and redacts bearer tokens", async () =>
     config: {
       exaMcpUrl: "https://mcp.exa.ai/mcp",
       exaApiKey: "k",
-      goToken: "t",
+      tokens: { "opencode-go": "t" },
       goBaseUrl: "https://go.example.com/v1",
       visionTimeoutMs: 90_000,
       visionModel: "v",
@@ -177,7 +177,7 @@ test("inspectVision reads a local path, registers it, and calls the vision model
     config: {
       exaMcpUrl: "https://mcp.exa.ai/mcp",
       exaApiKey: "",
-      goToken: "t",
+      tokens: { "opencode-go": "t" },
       goBaseUrl: "https://go.example.com/v1",
       visionTimeoutMs: 90_000,
       visionModel: "mimo-v2.5-free",
@@ -225,7 +225,7 @@ test("inspectVision caches the transcription and skips the upstream on repeat", 
     config: {
       exaMcpUrl: "https://mcp.exa.ai/mcp",
       exaApiKey: "",
-      goToken: "t",
+      tokens: { "opencode-go": "t" },
       goBaseUrl: "https://go.example.com/v1",
       visionTimeoutMs: 90_000,
       visionModel: "mimo-v2.5-free",
@@ -261,7 +261,7 @@ test("inspectVision rejects a missing path and a missing ref", async (t) => {
     config: {
       exaMcpUrl: "https://mcp.exa.ai/mcp",
       exaApiKey: "",
-      goToken: "t",
+      tokens: { "opencode-go": "t" },
       goBaseUrl: "https://go.example.com/v1",
       visionTimeoutMs: 90_000,
       visionModel: "mimo-v2.5-free",
@@ -297,7 +297,7 @@ test("inspectVision degrades one bad image instead of failing the whole turn", a
     config: {
       exaMcpUrl: "https://mcp.exa.ai/mcp",
       exaApiKey: "",
-      goToken: "t",
+      tokens: { "opencode-go": "t" },
       goBaseUrl: "https://go.example.com/v1",
       visionTimeoutMs: 90_000,
       visionModel: "mimo-v2.5-free",
@@ -336,7 +336,7 @@ test("inspectVision reports a combined failure message when every image is bad",
     config: {
       exaMcpUrl: "https://mcp.exa.ai/mcp",
       exaApiKey: "",
-      goToken: "t",
+      tokens: { "opencode-go": "t" },
       goBaseUrl: "https://go.example.com/v1",
       visionTimeoutMs: 90_000,
       visionModel: "mimo-v2.5-free",

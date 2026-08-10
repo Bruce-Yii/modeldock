@@ -292,11 +292,6 @@ export function loadConfig() {
   const codexHome = path.resolve(process.env.MODELDOCK_CODEX_HOME || process.env.CODEX_HOME || path.join(os.homedir(), ".codex"));
   const profileId = (process.env.MODELDOCK_PROFILE || "opencode-go").trim().toLowerCase();
   const profile = profileById(profileId);
-  // Codex config backups only ever hold OpenCode Go bearer tokens; never reuse them for
-  // another provider (an opencode token sent to api.deepseek.com would be a leak).
-  const discovered = process.env[profile.tokenEnvName]
-    ? { token: process.env[profile.tokenEnvName], source: "environment" }
-    : (profileId === "opencode-go" ? discoverCodexGoToken(codexHome) : { token: "", source: "missing" });
 
   // Load-side write protection: a placeholder or unreadable token in .env is
   // treated as unset and (for OpenCode Go) falls back to the Codex config
@@ -310,7 +305,16 @@ export function loadConfig() {
   if (ignoredTokens.length) {
     recordSettingsEvent({ action: "env_placeholder_ignored", providers: ignoredTokens, ok: false, error: "placeholder_token_ignored" });
   }
-  const opencodeGoToken = rawOpencodeToken && !isPlaceholderToken(rawOpencodeToken) ? rawOpencodeToken : discoverCodexGoToken(codexHome).token;
+  // The effective OpenCode token: a non-placeholder env value wins, otherwise
+  // the Codex config backup. Token and source come from the same decision so
+  // the dashboard's tokenSource never claims "environment" for a token that
+  // actually came from the backup (a placeholder env value is ignored). The Go
+  // camp is profile-independent: a DeepSeek main model still routes its
+  // vision/web harness through it, so discovery applies to every profile.
+  const opencodeEnvValid = Boolean(rawOpencodeToken) && !isPlaceholderToken(rawOpencodeToken);
+  const backupOpenCode = discoverCodexGoToken(codexHome);
+  const opencodeGoToken = opencodeEnvValid ? rawOpencodeToken : backupOpenCode.token;
+  const opencodeGoSource = opencodeEnvValid ? "environment" : backupOpenCode.source;
   const deepseekToken = rawDeepseekToken && !isPlaceholderToken(rawDeepseekToken) ? rawDeepseekToken : "";
   // Custom endpoint (dashboard "Custom model" section): a user-configured
   // Responses provider. Empty until the Add flow writes these keys into .env.
@@ -381,8 +385,7 @@ export function loadConfig() {
     // Zen free tier (trial): the fixed free models route here instead of zen/go.
     // Overridable so sandbox/CI can point trial at a mock upstream.
     zenBaseUrl: normalizedBaseUrl(process.env.MODELDOCK_ZEN_BASE_URL || "https://opencode.ai/zen/v1"),
-    goToken: discovered.token,
-    goTokenSource: discovered.source,
+    goTokenSource: opencodeGoSource,
     tokens,
     customBaseUrl,
     customApiKey,
@@ -459,8 +462,10 @@ export function publicConfig(config) {
     visionModel: config.visionModel,
     visionFallbackModel: config.visionFallbackModel,
     exaMcpUrl: config.exaMcpUrl,
-    tokenConfigured: Boolean(config.goToken),
-    tokenSource: config.goTokenSource || (config.goToken ? "configured" : "missing"),
+    // Provider tokens live in one place: the per-provider map. goToken was the
+    // pre-multi-provider single field and is gone; readers must use tokens.
+    tokenConfigured: Boolean(config.tokens?.["opencode-go"]),
+    tokenSource: config.goTokenSource || (config.tokens?.["opencode-go"] ? "configured" : "missing"),
     debug: {
       enabled: Boolean(config.debug?.enabled),
       noReasoning: Boolean(config.debug?.noReasoning),

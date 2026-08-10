@@ -265,7 +265,7 @@ function statusPayload({ config, metrics, mediaStore, routeAffinity, modelSelect
 
 function settingsPayload(services) {
   const { config, autostart, modelSelection } = services;
-  const mainToken = config.tokens?.["opencode-go"] || config.goToken || "";
+  const mainToken = config.tokens?.["opencode-go"] || "";
   const deepseekToken = config.tokens?.["deepseek-official"] || "";
   return {
     tokenConfigured: Boolean(mainToken || deepseekToken),
@@ -625,7 +625,7 @@ async function probeVisionCandidates(profile, candidates, config) {
 
 async function refreshProfileModels(profile, config) {
   if (!profile || profile.id !== "opencode-go") return;
-  const opencodeToken = config.tokens?.["opencode-go"] || config.goToken;
+  const opencodeToken = config.tokens?.["opencode-go"];
   if (!opencodeToken) return;
   if (!config.goBaseUrl.includes("opencode.ai")) return;
   // Model catalog refresh, opt-in via MODELDOCK_MODEL_PROBE_ENABLED=1. The shipped
@@ -667,6 +667,14 @@ export function createServices(config = loadConfig()) {
   // loadConfig always supplies `tokens`; test fixtures build config objects by
   // hand, so make the runtime copy self-consistent before routes mutate it.
   mutableConfig.tokens = mutableConfig.tokens || {};
+  // Provider tokens have a single source of truth: the per-provider map.
+  // The legacy boot-time goToken mirror (hand-built test configs, older
+  // persisted shapes) is folded into it here and dropped, so no reader can
+  // disagree with the just-saved token again.
+  if (mutableConfig.goToken && !mutableConfig.tokens["opencode-go"]) {
+    mutableConfig.tokens["opencode-go"] = mutableConfig.goToken;
+  }
+  delete mutableConfig.goToken;
   const metrics = new Metrics({ recentLimit: mutableConfig.recentLimit });
   const mediaStore = new MediaStore({
     ttlMs: mutableConfig.mediaTtlMs,
@@ -1087,9 +1095,12 @@ export function createApp(services = createServices()) {
         nativeMerge: config.nativeMerge !== false,
         mode: status.enabled ? (config.trialMode ? "trial" : "on") : "off",
         tokenConfigured: {
-          "opencode-go": Boolean(config.goToken),
+          "opencode-go": Boolean(config.tokens?.["opencode-go"]),
           "deepseek-official": Boolean(config.tokens?.["deepseek-official"]),
         },
+        // Any provider token unlocks the ON mode (the wizard's Apply gate); the
+        // trial pair still requires the OpenCode token specifically.
+        anyTokenConfigured: Boolean(Object.values(config.tokens || {}).some(Boolean)),
         autostart: settings.autostart,
       });
     } catch (error) {
@@ -1226,6 +1237,11 @@ export function createApp(services = createServices()) {
         }
         writeEnvFile(updates, config.envFile);
         config.tokens["opencode-go"] = updates.OPENCODE_GO_TOKEN || config.tokens["opencode-go"];
+        if (updates.OPENCODE_GO_TOKEN) {
+          // The per-provider map is the single token source; only the audit
+          // "where did it come from" hint needs updating in-session.
+          config.goTokenSource = "configured";
+        }
         config.tokens["deepseek-official"] = updates.DEEPSEEK_API_KEY || config.tokens["deepseek-official"];
         if (updates.EXA_API_KEY) config.exaApiKey = updates.EXA_API_KEY;
       }
@@ -1449,7 +1465,7 @@ if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToP
   console.log(`Dashboard: ${instance.url}/`);
   console.log(`Responses: ${instance.url}/v1/responses`);
   console.log("MCP: caller-key-protected endpoint configured for Codex");
-  const missingTokens = Object.entries(instance.services.config.tokens || { "opencode-go": instance.services.config.goToken })
+  const missingTokens = Object.entries(instance.services.config.tokens || {})
     .filter(([, token]) => !token)
     .map(([provider]) => provider);
   if (missingTokens.length) console.warn(`Tokens missing for provider(s): ${missingTokens.join(", ")}; the dashboard is available but those upstream calls will return 503.`);

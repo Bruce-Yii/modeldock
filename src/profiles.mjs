@@ -392,7 +392,7 @@ export function modelEntryFor(config, model) {
 
 export function tokenFor(config, model) {
   const provider = providerForModel(config, model);
-  return config?.tokens?.[provider] || config?.goToken || "";
+  return config?.tokens?.[provider] || "";
 }
 
 export { OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE };

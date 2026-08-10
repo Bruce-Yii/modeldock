@@ -57,7 +57,7 @@ export async function startMcpServer(config = loadConfig(), {
 
   app.all("/mcp", (req, res) => mcpHandler(req, res, req.body));
   app.get("/healthz", (_req, res) => {
-    const tokenReady = Boolean(config.goToken || (config.tokens && Object.values(config.tokens).some(Boolean)));
+    const tokenReady = Boolean(config.tokens && Object.values(config.tokens).some(Boolean));
     return res.status(tokenReady ? 200 : 503).json({ ok: tokenReady });
   });
 
@@ -80,7 +80,7 @@ export async function startMcpServer(config = loadConfig(), {
 if (process.argv[1] && process.argv[1].replace(/\\/g, "/").endsWith("src/mcp-server.mjs")) {
   const instance = await startMcpServer();
   console.log(`ModelDock MCP sidecar listening at ${instance.url}/mcp`);
-  const missingTokens = Object.entries(instance.services.config.tokens || { "opencode-go": instance.services.config.goToken })
+  const missingTokens = Object.entries(instance.services.config.tokens || {})
     .filter(([, token]) => !token)
     .map(([provider]) => provider);
   if (missingTokens.length) console.warn(`Tokens missing for provider(s): ${missingTokens.join(", ")}; vision calls will fail until configured.`);

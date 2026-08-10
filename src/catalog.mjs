@@ -166,7 +166,6 @@ export function enabledProvidersFor(config) {
   for (const [provider, token] of Object.entries(tokens)) {
     if (token) ids.add(provider);
   }
-  if (config.goToken) ids.add("opencode-go");
   return ids;
 }
 

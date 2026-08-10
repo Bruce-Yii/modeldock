@@ -697,15 +697,19 @@
 
   function recommendationFor() {
     const goToken = Boolean(state.onboard?.tokenConfigured?.["opencode-go"]);
+    // ON mode can be served by any provider token (the dashboard lets the user
+    // pick which provider owns the main model); TRIAL pins the zen-free pair,
+    // which only the OpenCode token can authenticate.
+    const anyToken = Boolean(state.onboard?.anyTokenConfigured);
     if (state.goTier === "paid") {
       return state.hasGpt
         ? {
-          mode: "on", nativeMerge: true, tokenNeeded: !goToken, variant: "on",
+          mode: "on", nativeMerge: true, tokenNeeded: !anyToken, variant: "on",
           title: L("reco.paidGpt"),
           bullets: [L("reco.onMode"), L("reco.catalogFull"), L("reco.nativeOn")],
         }
         : {
-          mode: "on", nativeMerge: false, tokenNeeded: !goToken, variant: "on",
+          mode: "on", nativeMerge: false, tokenNeeded: !anyToken, variant: "on",
           title: L("reco.paidNoGpt"),
           bullets: [L("reco.onMode"), L("reco.catalogFull"), L("reco.nativeOff")],
         };
@@ -1006,7 +1010,7 @@
   // in the same sitting. settingsIntent keeps the watchdog from closing it.
   function promptSettingsIfNoToken() {
     if (state.promptedSettings) return;
-    if (state.onboard?.tokenConfigured?.["opencode-go"]) return;
+    if (state.onboard?.anyTokenConfigured) return;
     state.promptedSettings = true;
     setTimeout(() => {
       openSettings();

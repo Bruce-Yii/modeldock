@@ -13,7 +13,6 @@ function configStub() {
     mediaMaxBytes: 1024 * 1024,
     mediaMaxEntries: 8,
     visionModel: "gpt-5.6-luna",
-    goToken: "go-token",
     tokens: { "opencode-go": "go-token" },
     profileId: "opencode-go",
   };
@@ -148,7 +147,6 @@ test("MCP sidecar healthz reflects token configuration", async () => {
     await instance.stop();
   }
   const noToken = configStub();
-  noToken.goToken = "";
   noToken.tokens = { "opencode-go": "" };
   const instance2 = await startMcpServer(noToken, { port: 0 });
   try {

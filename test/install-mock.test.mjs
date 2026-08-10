@@ -641,7 +641,10 @@ test("mock install lifecycle: first start, second start routes, login relaunch",
     // A valid token + local upstream make /healthz return 200 and let the routing
     // leg relay a real request; memory is enabled so the MCP tool surface includes
     // recall_memory / store_memory.
-    OPENCODE_GO_TOKEN: "test-token",
+    // Realistic token shape: isPlaceholderToken requires >= 12 chars, and the
+    // unified tokens map drops shorter values (a 10-char "test-token" made the
+    // installed gateway report 503 even though the env carried a token).
+    OPENCODE_GO_TOKEN: "sk-mock-opencode-token-123456",
     MODELDOCK_UPSTREAM_BASE_URL: fakeUpstream.url,
     MODELDOCK_MEMORY: "1",
     MODELDOCK_MEMORY_DIR: memoryDir,

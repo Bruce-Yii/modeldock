@@ -368,6 +368,83 @@ test("onboarding endpoint prefills, completes, and persists the flag across mode
   assert.equal(survived.onboarded, true, "trial/off mode switches do not reset the onboarding flag");
 });
 
+test("a just-saved OpenCode token is visible to the wizard's onboarding check in the same session", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-server-onboard-token-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const envFile = path.join(dir, "modeldock.env");
+  const instance = await startApp({
+    goToken: null,
+    envFile,
+    settingsEventsFile: path.join(dir, "settings-events.jsonl"),
+  });
+  t.after(instance.stop);
+
+  const before = await (await fetch(`${instance.base}/api/onboarding`)).json();
+  assert.deepEqual(before.tokenConfigured, { "opencode-go": false, "deepseek-official": false },
+    "onboarding starts token-less so the wizard blocks apply");
+  assert.equal(before.anyTokenConfigured, false);
+
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async (url, options) => {
+      if (String(url) === "https://go.example.com/v1/responses") {
+        return { ok: true, status: 200, json: async () => ({ id: "resp_probe", usage: { input_tokens: 5, output_tokens: 1 } }) };
+      }
+      return originalFetch(url, options);
+    };
+    const saved = await fetch(`${instance.base}/api/settings`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ opencodeGoToken: "sk-opencode-saved-token-123456" }),
+    });
+    assert.equal(saved.status, 200);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  // The wizard re-polls /api/onboarding when the settings dialog closes; the
+  // token must be visible immediately, not only after a gateway restart.
+  const after = await (await fetch(`${instance.base}/api/onboarding`)).json();
+  assert.deepEqual(after.tokenConfigured, { "opencode-go": true, "deepseek-official": false },
+    "a just-saved OpenCode token is visible to the wizard's token check");
+  assert.equal(after.anyTokenConfigured, true);
+});
+
+test("onboarding unlocks apply with any provider token, not only the OpenCode one", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-server-onboard-any-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const envFile = path.join(dir, "modeldock.env");
+  const instance = await startApp({
+    goToken: null,
+    envFile,
+    settingsEventsFile: path.join(dir, "settings-events.jsonl"),
+  });
+  t.after(instance.stop);
+
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async (url, options) => {
+      if (String(url) === "https://api.deepseek.com/v1/responses") {
+        return { ok: true, status: 200, json: async () => ({ id: "resp_probe", usage: { input_tokens: 5, output_tokens: 1 } }) };
+      }
+      return originalFetch(url, options);
+    };
+    const saved = await fetch(`${instance.base}/api/settings`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ deepseekApiKey: "sk-deepseek-only-12345678" }),
+    });
+    assert.equal(saved.status, 200);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  const onboard = await (await fetch(`${instance.base}/api/onboarding`)).json();
+  assert.deepEqual(onboard.tokenConfigured, { "opencode-go": false, "deepseek-official": true });
+  assert.equal(onboard.anyTokenConfigured, true,
+    "a DeepSeek-only install still unlocks ON mode in the wizard's apply gate");
+});
+
 test("api/events streams an initial snapshot", async (t) => {
   const instance = await startApp();
   t.after(instance.stop);

@@ -36,6 +36,47 @@ test("zenBaseUrl resolves from MODELDOCK_ZEN_BASE_URL with the trailing slash no
   }
 });
 
+test("a placeholder OPENCODE_GO_TOKEN falls back to the Codex backup and reports its real source", () => {
+  const home = mkdtempSync(path.join(os.tmpdir(), "modeldock-config-token-src-"));
+  const previousHome = process.env.MODELDOCK_CODEX_HOME;
+  const previousEnvFile = process.env.MODELDOCK_ENV_FILE;
+  const previousToken = process.env.OPENCODE_GO_TOKEN;
+  const previousEvents = process.env.MODELDOCK_SETTINGS_EVENTS_FILE;
+  try {
+    process.env.MODELDOCK_CODEX_HOME = home;
+    process.env.MODELDOCK_ENV_FILE = path.join(home, "isolated.env");
+    process.env.MODELDOCK_SETTINGS_EVENTS_FILE = path.join(home, "settings-events.jsonl");
+    // A placeholder env token must be ignored: the effective token and its
+    // reported source come from the same decision (here: the Codex backup).
+    process.env.OPENCODE_GO_TOKEN = "x";
+    writeFileSync(
+      path.join(home, "config.toml"),
+      '[model_providers.opencode_go]\nexperimental_bearer_token = "backup-token"\n',
+      "utf8",
+    );
+    const config = loadConfig();
+    assert.equal(config.tokens["opencode-go"], "backup-token",
+      "a placeholder env token must not shadow the backup token");
+    assert.equal(config.goTokenSource, "codex-config-backup",
+      "the source must match where the effective token actually came from");
+    // A real env token wins and reports "environment".
+    process.env.OPENCODE_GO_TOKEN = "sk-opencode-env-valid-123456";
+    const real = loadConfig();
+    assert.equal(real.tokens["opencode-go"], "sk-opencode-env-valid-123456");
+    assert.equal(real.goTokenSource, "environment");
+  } finally {
+    if (previousHome === undefined) delete process.env.MODELDOCK_CODEX_HOME;
+    else process.env.MODELDOCK_CODEX_HOME = previousHome;
+    if (previousEnvFile === undefined) delete process.env.MODELDOCK_ENV_FILE;
+    else process.env.MODELDOCK_ENV_FILE = previousEnvFile;
+    if (previousToken === undefined) delete process.env.OPENCODE_GO_TOKEN;
+    else process.env.OPENCODE_GO_TOKEN = previousToken;
+    if (previousEvents === undefined) delete process.env.MODELDOCK_SETTINGS_EVENTS_FILE;
+    else process.env.MODELDOCK_SETTINGS_EVENTS_FILE = previousEvents;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("nativeMerge defaults to the ChatGPT sign-in state when MODELDOCK_NATIVE_MERGE is unset", () => {
   const home = mkdtempSync(path.join(os.tmpdir(), "modeldock-config-auth-"));
   const previousHome = process.env.MODELDOCK_CODEX_HOME;

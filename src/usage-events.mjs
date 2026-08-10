@@ -12,6 +12,12 @@ import path from "node:path";
 
 export const USAGE_EVENTS_PATH = path.join(os.homedir(), ".modeldock", "usage-events.jsonl");
 
+// Tests and packaging can redirect the metering file without touching the real
+// ~/.modeldock state (mirrors MODELDOCK_SETTINGS_EVENTS_FILE in settings-events.mjs).
+export function usageEventsPath() {
+  return process.env.MODELDOCK_USAGE_EVENTS_FILE || USAGE_EVENTS_PATH;
+}
+
 // A single rotation keeps the active file bounded without a log-management
 // dependency: when the file passes the cap it becomes `.1` (replacing the
 // previous `.1`), so at most two files exist.
@@ -41,7 +47,7 @@ export function recordUsageEvent({
   sessionId,
   threadId,
   at = Date.now(),
-  filePath = USAGE_EVENTS_PATH,
+  filePath = usageEventsPath(),
 } = {}) {
   const event = {
     meteringVersion: 2,
