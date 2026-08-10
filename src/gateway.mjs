@@ -1580,12 +1580,28 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   });
 
   try {
-    const upstream = await fetch(target.url, {
+    // Transient upstream failures (502/503/504) are retried exactly once with
+    // a 250ms backoff, and only before any byte reached the client. The
+    // gateway is stateless per turn (previous_response_id was removed above),
+    // so a retry cannot re-run stateful side effects. 429/4xx/500 are never
+    // retried: quota and request-shape errors are not transient.
+    let upstream = await fetch(target.url, {
       method: "POST",
       headers: upstreamHeaders(target),
       body: JSON.stringify({ ...normalizedPayload, model: upstreamModel }),
       signal,
     });
+    if (!upstream.ok && !res.headersSent && [502, 503, 504].includes(upstream.status)) {
+      await upstream.body?.cancel?.();
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      metrics?.recordRetry?.({ provider: target.provider, status: upstream.status });
+      upstream = await fetch(target.url, {
+        method: "POST",
+        headers: upstreamHeaders(target),
+        body: JSON.stringify({ ...normalizedPayload, model: upstreamModel }),
+        signal,
+      });
+    }
     const upstreamBytes = Buffer.byteLength(JSON.stringify(normalizedPayload));
     if (!upstream.ok) {
       markFirstResponse();

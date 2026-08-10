@@ -27,6 +27,8 @@ export class Metrics extends EventEmitter {
       imageAttachments: 0,
       directVisionRoutes: 0,
       lunaToolContinuations: 0,
+      retries: 0,
+      retriesByStatus: {},
     };
     this.web = emptyBucket();
     this.vision = { ...emptyBucket(), fallback: 0, byModel: {} };
@@ -100,6 +102,15 @@ export class Metrics extends EventEmitter {
   recordVisionModel(model, fallbackUsed) {
     this.vision.byModel[model] = (this.vision.byModel[model] || 0) + 1;
     if (fallbackUsed) this.vision.fallback += 1;
+  }
+
+  // A transient upstream failure was retried (502/503/504 before any bytes
+  // reached the client). Counted so the dashboard can surface retry activity.
+  recordRetry({ provider = "", status = 0 } = {}) {
+    this.responses.retries += 1;
+    const key = String(status || "unknown");
+    this.responses.retriesByStatus[key] = (this.responses.retriesByStatus[key] || 0) + 1;
+    this.emit("change");
   }
 
   snapshot(extra = {}) {

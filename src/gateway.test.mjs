@@ -1544,3 +1544,97 @@ test("compactFailureReport names unpaired tool items and any server-side state k
   assert.ok(!serialized.includes("secret output"), "tool output text must never be recorded");
   assert.ok(!serialized.includes("secret prompt"), "prompt text must never be recorded");
 });
+
+test("relayResponses retries a 503 once before any bytes reach the client", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const finishResults = [];
+  const retryCalls = [];
+  const metrics = {
+    begin: () => (result) => finishResults.push(result),
+    recordResponseTransform: () => {},
+    recordResponseUsage: () => {},
+    recordRetry: (r) => retryCalls.push(r),
+  };
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    if (calls === 1) {
+      return new Response(JSON.stringify({ error: { message: "Service Unavailable" } }), {
+        status: 503,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    return new Response(
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(Buffer.from("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[]}}\n\n"));
+          controller.close();
+        },
+      }),
+      { status: 200, headers: { "content-type": "text/event-stream" } },
+    );
+  };
+  try {
+    const result = await relayResponses(
+      { model: "deepseek-v4-flash", input: "hi" },
+      res,
+      {
+        config: configStub(),
+        metrics,
+        routeAffinity: new RouteAffinity(),
+        knownModels: new Set(["deepseek-v4-flash"]),
+        mainModel: "deepseek-v4-flash",
+        visionModel: "gpt-5.6-luna",
+      },
+    );
+    assert.equal(calls, 2, "transient 503 retried exactly once");
+    assert.equal(result.ok, true, "retried turn succeeds");
+    assert.equal(retryCalls.length, 1, "retry recorded in metrics");
+    assert.equal(retryCalls[0].status, 503);
+    assert.equal(retryCalls[0].provider, "opencode-go");
+    assert.ok(!Buffer.concat(sink.chunks).toString("utf8").includes("Service Unavailable"), "503 body never reached the client");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("relayResponses does not retry a 429 (quota is not transient)", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const metrics = {
+    begin: () => () => {},
+    recordResponseTransform: () => {},
+    recordResponseUsage: () => {},
+    recordRetry: () => assert.fail("must not retry a 429"),
+  };
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return new Response(JSON.stringify({ error: { message: "quota exceeded" } }), {
+      status: 429,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  try {
+    const result = await relayResponses(
+      { model: "deepseek-v4-flash", input: "hi" },
+      res,
+      {
+        config: configStub(),
+        metrics,
+        routeAffinity: new RouteAffinity(),
+        knownModels: new Set(["deepseek-v4-flash"]),
+        mainModel: "deepseek-v4-flash",
+        visionModel: "gpt-5.6-luna",
+      },
+    );
+    assert.equal(calls, 1, "429 not retried");
+    assert.equal(result.ok, false);
+    assert.equal(result.httpStatus, 429);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
