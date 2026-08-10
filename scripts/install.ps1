@@ -421,10 +421,14 @@ if (Test-Path -LiteralPath $envFile) {
   if ($line -and [int]::TryParse(($line.Line -replace '^MODELDOCK_PORT=', ''), [ref]$parsed) -and $parsed -gt 0) { $port = $parsed }
 }
 
-# Start-at-login repair: when the autostart decision mark exists but the Run key
-# is gone (registry cleanup, earlier toggle-off that deleted the key), re-write
-# the login entry before restarting the gateway. A missing mark means no decision
-# was ever recorded, so an explicit off is never silently overridden.
+# Start-at-login repair: when a start-at-login decision was recorded (the mark
+# exists) but the Run key is gone - registry cleanup, or an earlier toggle-off that
+# deleted the key - re-write the login entry before restarting the gateway.
+# By design autostart is a re-asserted default: the gateway re-enables it on every
+# version change (see initAutostartDefault), and this repair restores it on every
+# recover run as well. A toggle-off is therefore NOT permanent across a recover or
+# an update - to keep it off, turn it off again afterward. Only a missing mark (no
+# decision ever recorded) is left untouched.
 $autostartKeyName = if ($env:MODELDOCK_AUTOSTART_KEY) { $env:MODELDOCK_AUTOSTART_KEY } else { "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" }
 $autostartValueName = if ($env:MODELDOCK_AUTOSTART_NAME) { $env:MODELDOCK_AUTOSTART_NAME } else { "ModelDock" }
 $autostartStateDir = if ($env:MODELDOCK_STATE_DIR) { $env:MODELDOCK_STATE_DIR } else { $root }
