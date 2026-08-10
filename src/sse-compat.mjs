@@ -111,6 +111,21 @@ export class SseCompatState {
       return out;
     }
     if (kind === "response.output_item.done") {
+      if (!this.openItem?.announced) {
+        // done without its added parent (some upstreams emit only the terminal
+        // item): synthesize the parent from the done payload so the client never
+        // sees a reference to an item it was never told about.
+        const item = parsed?.item;
+        if (item && typeof item === "object") {
+          this.outputIndex = typeof parsed?.output_index === "number" ? parsed.output_index : this.outputIndex + 1;
+          this.openItem = { id: item.id || this.id("item"), type: item.type || "message", announced: true };
+          out.push(synthesizeEvent("response.output_item.added", {
+            type: "response.output_item.added",
+            output_index: this.outputIndex,
+            item: { ...item, status: "in_progress" },
+          }));
+        }
+      }
       this.openItem = null;
       this.openPart = null;
       return out;
