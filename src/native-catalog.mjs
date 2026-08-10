@@ -132,14 +132,42 @@ export async function codexVersion() {
   }
 }
 
+// Version binding (codex-router captured_with semantics): a capture is bound to
+// the app build that produced it via both the CLI version string and the
+// version-hashed binary path (the %LOCALAPPDATA%\OpenAI\Codex\bin\<hash> dir
+// changes on every app update, even when the version number does not). A cache
+// bound to a different build is recaptured; a matching one is kept untouched
+// (the refresh timer then skips an expensive `codex debug models` run).
+// Missing/legacy metadata (no captured_bin) recaptures once so old caches
+// upgrade to the new binding format.
+export function shouldRecapture(cached, currentVersion, currentBin) {
+  if (!cached || !Array.isArray(cached?.models) || cached.models.length === 0) return true;
+  if (currentBin) {
+    if (typeof cached.captured_bin !== "string") return true;
+    if (cached.captured_bin !== currentBin) return true;
+  }
+  if (currentVersion && typeof cached.captured_with === "string" && cached.captured_with !== currentVersion) return true;
+  return false;
+}
+
 // Ask the Codex desktop CLI for its bundled native catalog and cache it. A
-// capture is versioned by the app build; a stale capture is replaced on the
-// next refresh. Returns the captured models, or null when the CLI is missing
-// or the capture failed (the catalog then simply keeps the last good cache).
-export async function refreshNativeCatalog(config) {
-  if (!(await resolveCodexBinary())) return null;
+// capture is versioned by the app build; a stale capture is replaced when the
+// app build changes, and kept (with an explicit warning) when a recapture
+// fails - "stale is the best we have" (codex-router). `deps` injects the CLI
+// interactions for tests; production callers pass only `config`.
+// Returns the captured models, or null when the CLI is missing or the capture
+// failed (the catalog then keeps the last good cache).
+export async function refreshNativeCatalog(config, deps = {}) {
+  const resolveBin = deps.resolveCodexBinary || resolveCodexBinary;
+  const getVersion = deps.codexVersion || codexVersion;
+  const capture = deps.runCodex || runCodex;
+  const binary = await resolveBin();
+  if (!binary) return null;
+  const version = await getVersion();
+  const cached = readNativeCatalog(config);
+  if (!shouldRecapture(cached, version, binary)) return cached.models;
   try {
-    const output = await runCodex(["debug", "models", "--bundled"]);
+    const output = await capture(["debug", "models", "--bundled"]);
     const parsed = JSON.parse(output);
     if (!Array.isArray(parsed?.models) || parsed.models.length === 0) return null;
     const file = nativeCatalogPath(config);
@@ -147,13 +175,20 @@ export async function refreshNativeCatalog(config) {
     const temporary = `${file}.tmp.${process.pid}`;
     writeFileSync(
       temporary,
-      JSON.stringify({ captured_with: await codexVersion(), models: parsed.models }, null, 2),
+      JSON.stringify({ captured_with: version, captured_bin: binary, models: parsed.models }, null, 2),
       "utf8",
     );
     renameSync(temporary, file);
     return parsed.models;
   } catch (error) {
-    console.log(`[gate] native model catalog refresh failed: ${error.message}`);
+    const stale = cached || readNativeCatalog(config);
+    if (stale) {
+      console.log(
+        `[gate] native catalog refresh failed: ${error.message}; keeping stale capture (captured_with=${stale.captured_with ?? "?"}, captured_bin=${stale.captured_bin ?? "?"}) - stale is the best we have`,
+      );
+    } else {
+      console.log(`[gate] native model catalog refresh failed: ${error.message}`);
+    }
     return null;
   }
 }
