@@ -540,60 +540,75 @@ test("WebSocket upgrades are declined with 426 so Codex falls back to HTTP", asy
   assert.equal(health.status, 200);
 });
 
-test("initAutostartDefault enables login autostart on first run and records the decision", async (t) => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-autostart-default-"));
-  t.after(() => rm(dir, { recursive: true, force: true }));
+function fakeAutostart({ enabled = false, fail = false } = {}) {
   const calls = [];
-  const autostart = {
+  return {
+    calls,
     supported: () => true,
-    enabled: () => false,
+    enabled: () => enabled,
     async refresh() {},
     async setEnabled(value) {
       calls.push(value);
+      if (fail) throw new Error("registry denied");
       return { enabled: value, supported: true };
     },
   };
+}
 
-  assert.equal(await initAutostartDefault(autostart, { stateDir: dir }), true);
-  assert.deepEqual(calls, [true], "first run enables autostart");
-  assert.equal(await readFile(path.join(dir, "autostart-initialized"), "utf8").then(Boolean), true);
+test("initAutostartDefault enables login autostart on first run and records the version", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-autostart-default-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const autostart = fakeAutostart();
+
+  assert.equal(await initAutostartDefault(autostart, { stateDir: dir, version: "1.2.3" }), true);
+  assert.deepEqual(autostart.calls, [true], "first run enables autostart");
+  const mark = JSON.parse(await readFile(path.join(dir, "autostart-initialized"), "utf8"));
+  assert.equal(mark.version, "1.2.3", "the marker records the version that made the decision");
 });
 
-test("initAutostartDefault never re-enables after the decision is recorded", async (t) => {
+test("initAutostartDefault never re-enables at the same version", async (t) => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-autostart-marked-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
-  await writeFile(path.join(dir, "autostart-initialized"), "once\n", "utf8");
-  let setCalls = 0;
-  const autostart = {
-    supported: () => true,
-    enabled: () => false,
-    async refresh() {},
-    async setEnabled() {
-      setCalls += 1;
-      return { enabled: true, supported: true };
-    },
-  };
+  await writeFile(path.join(dir, "autostart-initialized"), `${JSON.stringify({ at: new Date().toISOString(), version: "1.2.3" })}\n`, "utf8");
+  const autostart = fakeAutostart();
 
-  assert.equal(await initAutostartDefault(autostart, { stateDir: dir }), false);
-  assert.equal(setCalls, 0, "an existing mark means the user's preference is respected");
+  assert.equal(await initAutostartDefault(autostart, { stateDir: dir, version: "1.2.3" }), false);
+  assert.equal(autostart.calls.length, 0, "a same-version restart respects the recorded state");
+});
+
+test("initAutostartDefault re-enables exactly once per new version", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-autostart-upgrade-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const autostart = fakeAutostart();
+
+  assert.equal(await initAutostartDefault(autostart, { stateDir: dir, version: "1.2.3" }), true);
+  assert.equal(await initAutostartDefault(autostart, { stateDir: dir, version: "1.2.3" }), false, "no repeat at the same version");
+  assert.equal(await initAutostartDefault(autostart, { stateDir: dir, version: "1.2.4" }), true, "a new version re-enables once");
+  assert.equal(await initAutostartDefault(autostart, { stateDir: dir, version: "1.2.4" }), false, "no repeat at the new version either");
+  assert.deepEqual(autostart.calls, [true, true], "re-enabling happens exactly once per version");
+});
+
+test("initAutostartDefault migrates a legacy timestamp marker for the new version", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-autostart-legacy-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await writeFile(path.join(dir, "autostart-initialized"), "2026-08-07T19:31:16.438Z\n", "utf8");
+  const autostart = fakeAutostart();
+
+  assert.equal(await initAutostartDefault(autostart, { stateDir: dir, version: "1.2.4" }), true, "a legacy marker re-enables for the new version");
+  assert.deepEqual(autostart.calls, [true], "the legacy install is upgraded to the default-on decision");
+  const mark = JSON.parse(await readFile(path.join(dir, "autostart-initialized"), "utf8"));
+  assert.equal(mark.version, "1.2.4", "the legacy marker is upgraded with the version");
 });
 
 test("initAutostartDefault records the mark even when autostart is already enabled", async (t) => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-autostart-already-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
-  let setCalls = 0;
-  const autostart = {
-    supported: () => true,
-    enabled: () => true,
-    async refresh() {},
-    async setEnabled() {
-      setCalls += 1;
-      return { enabled: true, supported: true };
-    },
-  };
+  const autostart = fakeAutostart({ enabled: true });
 
-  assert.equal(await initAutostartDefault(autostart, { stateDir: dir }), true);
-  assert.equal(setCalls, 0, "already enabled needs no registry write");
+  assert.equal(await initAutostartDefault(autostart, { stateDir: dir, version: "1.2.3" }), true);
+  assert.equal(autostart.calls.length, 0, "already enabled needs no registry write");
+  const mark = JSON.parse(await readFile(path.join(dir, "autostart-initialized"), "utf8"));
+  assert.equal(mark.version, "1.2.3", "the already-enabled state is recorded with the version");
 });
 
 test("initAutostartDefault leaves no mark when the platform is unsupported or enabling fails", async (t) => {
@@ -611,15 +626,8 @@ test("initAutostartDefault leaves no mark when the platform is unsupported or en
   assert.equal(await initAutostartDefault(unsupported, { stateDir: dir }), false);
   await assert.rejects(readFile(path.join(dir, "autostart-initialized"), "utf8"));
 
-  const failing = {
-    supported: () => true,
-    enabled: () => false,
-    async refresh() {},
-    async setEnabled() {
-      throw new Error("registry denied");
-    },
-  };
-  assert.equal(await initAutostartDefault(failing, { stateDir: dir }), false);
+  const failing = fakeAutostart({ fail: true });
+  assert.equal(await initAutostartDefault(failing, { stateDir: dir, version: "1.2.3" }), false);
   await assert.rejects(readFile(path.join(dir, "autostart-initialized"), "utf8"));
 });
 

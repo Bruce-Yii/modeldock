@@ -1,7 +1,7 @@
 import path from "node:path";
 import os from "node:os";
 import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
-import { access, mkdir, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import express from "express";
 import zlib from "node:zlib";
@@ -17,7 +17,7 @@ import { createMcpNodeHandler } from "./mcp.mjs";
 import { memoryStoreFor } from "./memory.mjs";
 import { CodexConfigSwitcher } from "./config-switcher.mjs";
 import { createAutostart } from "./autostart.mjs";
-import { createUpdater } from "./update.mjs";
+import { createUpdater, localVersion } from "./update.mjs";
 import { clearOwnerFile, describeOwnerConflict, writeOwnerFile } from "./instance-owner.mjs";
 import { CALLER_PATH_PREFIX, callerBasePath, callerKeyEqual, loadOrCreateCallerKey } from "./caller-key.mjs";
 import { validateProviderToken } from "./token-validate.mjs";
@@ -1260,21 +1260,38 @@ export function createApp(services = createServices()) {
   return { app: outer, close: () => mcpHandler.close?.(), services };
 }
 
-// New installs start with login autostart ON. The decision is recorded in a state
-// file so a later explicit off stays off across restarts; only the very first run
-// auto-enables. Safe to call repeatedly: it no-ops once the mark exists.
+// New installs, and every version change (reinstall or self-update), default to
+// login autostart ON. The marker records both the decision and the version that
+// made it: within the same version an explicit off stays off across restarts,
+// and re-enabling happens at most once per version, so the dashboard toggle
+// keeps working and nothing re-registers repeatedly. Safe to call repeatedly.
 export async function initAutostartDefault(autostart, {
   stateDir = path.join(os.homedir(), ".modeldock"),
   markName = "autostart-initialized",
+  version = localVersion(),
 } = {}) {
   if (!autostart?.supported?.()) return false;
   await autostart.refresh?.().catch(() => {});
   const mark = path.join(stateDir, markName);
+  const current = String(version || "").trim();
+  let recorded = "legacy";
   try {
-    await access(mark);
-    return false;
+    recorded = String(JSON.parse(await readFile(mark, "utf8"))?.version || "");
   } catch {
-    // First run: default autostart ON.
+    // Missing marker: first run. Legacy (timestamp-only) marker: predates
+    // version tracking. Both count as "not yet decided for this version".
+  }
+  if (current === "") {
+    // No version to compare against (e.g. a bundle built without the version
+    // define and no package.json): keep the historical one-shot behavior.
+    try {
+      await access(mark);
+      return false;
+    } catch {
+      // First run: fall through and enable once.
+    }
+  } else if (recorded === current) {
+    return false; // Same version: the marker reflects the user's current state.
   }
   try {
     if (!autostart.enabled?.()) {
@@ -1282,7 +1299,7 @@ export async function initAutostartDefault(autostart, {
       if (!result?.enabled) return false;
     }
     await mkdir(stateDir, { recursive: true });
-    await writeFile(mark, `${new Date().toISOString()}\n`, "utf8");
+    await writeFile(mark, `${JSON.stringify({ at: new Date().toISOString(), version: current })}\n`, "utf8");
     console.log("[modeldock] autostart initialized (default: on)");
     return true;
   } catch (error) {
