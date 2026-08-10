@@ -559,7 +559,10 @@ test("mock install lifecycle: first start, second start routes, login relaunch",
       const text =
         `${createHash("sha256").update(asset).digest("hex")}  modeldock.mjs\n` +
         `${createHash("sha256").update(bridgeAsset).digest("hex")}  mcp-standalone.mjs\n`;
-      res.writeHead(200, { "content-type": "text/plain" });
+      // GitHub serves extension-less release assets as application/octet-stream,
+      // and Windows PowerShell 5.1 then returns .Content as byte[] - the
+      // installer must decode it as text or the checksum lookup fails.
+      res.writeHead(200, { "content-type": "application/octet-stream" });
       res.end(text);
     } else if (req.url.startsWith("/skills/content-to-video/")) {
       const rel = req.url.slice("/skills/content-to-video/".length).split("/");
@@ -905,7 +908,7 @@ test("mock install: auto-download a bundled Node 22 LTS when none is suitable", 
       const text =
         `${createHash("sha256").update(bundle).digest("hex")}  modeldock.mjs\n` +
         `${createHash("sha256").update(fakeBridge).digest("hex")}  mcp-standalone.mjs\n`;
-      res.writeHead(200, { "content-type": "text/plain" });
+      res.writeHead(200, { "content-type": "application/octet-stream" });
       res.end(text);
     } else if (url === "/index.json") {
       res.writeHead(200, { "content-type": "application/json" });

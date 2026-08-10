@@ -155,7 +155,16 @@ Write-Host ("  saved {0} ({1:N2} MB)" -f $bridge, ((Get-Item $bridge).Length / 1
 # behind. MODELDOCK_SUMS_URL redirects the lookup (mock-install tests).
 $sumsUrl = if ($env:MODELDOCK_SUMS_URL) { $env:MODELDOCK_SUMS_URL } else { "https://github.com/$repo/releases/latest/download/SHA256SUMS" }
 function Assert-Downloaded([string]$file, [string]$name) {
-  $sumsText = (Invoke-WebRequest -UseBasicParsing -Uri $sumsUrl -TimeoutSec 60).Content
+  # GitHub serves release assets without a text extension as
+  # application/octet-stream, and Windows PowerShell 5.1 then exposes .Content
+  # as a byte[] instead of a string. Normalize to UTF-8 text before matching,
+  # or every checksum lookup would fail with "no entry" against the real feed.
+  $sumsResponse = Invoke-WebRequest -UseBasicParsing -Uri $sumsUrl -TimeoutSec 60
+  $sumsText = if ($sumsResponse.Content -is [byte[]]) {
+    [System.Text.Encoding]::UTF8.GetString([byte[]]$sumsResponse.Content)
+  } else {
+    [string]$sumsResponse.Content
+  }
   $line = ($sumsText -split "`r?`n") | Where-Object { $_ -match "(?i)^[0-9a-f]{64}\s+\*?$([regex]::Escape($name))\s*$" } | Select-Object -First 1
   if (-not $line) {
     Remove-Item -LiteralPath $file -Force
