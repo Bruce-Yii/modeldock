@@ -7,7 +7,10 @@
 # (config.toml.modeldock-backup-*) is also kept for recovery.
 set -eu
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
-STATE_DIR="${MODELDOCK_ROOT:-$HOME/.modeldock}"
+# Runtime state (owner records, caller key, catalog, memory) follows
+# MODELDOCK_STATE_DIR everywhere else; MODELDOCK_ROOT only ever names the
+# install directory. Honour both so a custom state dir is cleaned up too.
+STATE_DIR="${MODELDOCK_STATE_DIR:-${MODELDOCK_ROOT:-$HOME/.modeldock}}"
 LOG="$ROOT/modeldock.log"
 PORT="${MODELDOCK_PORT:-4097}"
 
@@ -18,9 +21,41 @@ OWNER_PID=""
 if [ -f "$OWNER_FILE" ]; then
   OWNER_PID=$(sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$OWNER_FILE" | head -n 1)
 fi
-if [ -n "$OWNER_PID" ] && kill -0 "$OWNER_PID" 2>/dev/null; then
+
+find_listener_pid() {
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -nP -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null | head -n 1 || true
+  elif command -v ss >/dev/null 2>&1; then
+    ss -tlnpH "sport = :$PORT" 2>/dev/null | grep -o 'pid=[0-9]*' | head -n 1 | cut -d= -f2 || true
+  elif command -v fuser >/dev/null 2>&1; then
+    fuser "$PORT/tcp" 2>/dev/null | tr ' ' '\n' | sed '/^$/d' | head -n 1 || true
+  else
+    true
+  fi
+}
+
+# Confirm the recorded PID is really our gateway before killing it: after a reboot
+# the owner file can name a PID that has since been reused by an unrelated process.
+# Accept it only if it is the current listener on our port, or its command line
+# references this install root.
+owner_is_ours() {
+  pid="$1"
+  [ -n "$pid" ] || return 1
+  listener="$(find_listener_pid)"
+  [ -n "$listener" ] && [ "$listener" = "$pid" ] && return 0
+  cmd="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+  case "$cmd" in
+    *"$ROOT"*) return 0 ;;
+    *"$STATE_DIR"*) return 0 ;;
+  esac
+  return 1
+}
+
+if [ -n "$OWNER_PID" ] && kill -0 "$OWNER_PID" 2>/dev/null && owner_is_ours "$OWNER_PID"; then
   kill "$OWNER_PID" 2>/dev/null || true
   echo "Stopped gateway process $OWNER_PID"
+elif [ -n "$OWNER_PID" ] && kill -0 "$OWNER_PID" 2>/dev/null; then
+  echo "WARNING: recorded PID $OWNER_PID is not listening on port $PORT and does not look like this install; not killing (possible PID reuse)."
 else
   echo "WARNING: no live ModelDock-owned gateway found on port $PORT; nothing was stopped."
 fi

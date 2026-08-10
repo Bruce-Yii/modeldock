@@ -24,7 +24,7 @@ test("publishes a complete Codex model catalog schema", () => {
     // the provider-grouped order would put a native GPT model first.
     nativeCatalogFile: path.join(os.tmpdir(), "modeldock-test-native-missing.json"),
   });
-  assert.equal(catalog.models[0].slug, "deepseek-v4-flash");
+  assert.equal(catalog.models[0].slug, "deepseek-v4-flash@opencode-go");
   assert.equal(catalog.models[0].supports_reasoning_summaries, true);
   assert.match(catalog.models[0].base_instructions, /coding agent/);
   assert.equal(catalog.models[0].model_messages.instructions_variables.personality_pragmatic, "");

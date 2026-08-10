@@ -36,13 +36,23 @@ if [ -f "$ENV_FILE" ]; then
 fi
 
 find_listener_pid() {
+  pid=""
   if command -v lsof >/dev/null 2>&1; then
-    lsof -nP -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null | head -n 1 || true
-  elif command -v fuser >/dev/null 2>&1; then
-    fuser "$PORT/tcp" 2>/dev/null | tr ' ' '\n' | sed '/^$/d' | head -n 1 || true
-  else
-    true
+    pid="$(lsof -nP -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null | head -n 1 || true)"
+    if [ -n "$pid" ]; then printf '%s\n' "$pid"; return; fi
   fi
+  if command -v ss >/dev/null 2>&1; then
+    # Minimal Linux images (Debian/Ubuntu containers) ship neither lsof nor
+    # psmisc, but do ship ss. Without this branch the old PID is never found and
+    # the new gateway dies with EADDRINUSE while the stale one keeps answering.
+    pid="$(ss -tlnpH "sport = :$PORT" 2>/dev/null | grep -o 'pid=[0-9]*' | head -n 1 | cut -d= -f2 || true)"
+    if [ -n "$pid" ]; then printf '%s\n' "$pid"; return; fi
+  fi
+  if command -v fuser >/dev/null 2>&1; then
+    pid="$(fuser "$PORT/tcp" 2>/dev/null | tr ' ' '\n' | sed '/^$/d' | head -n 1 || true)"
+    if [ -n "$pid" ]; then printf '%s\n' "$pid"; return; fi
+  fi
+  true
 }
 
 resolve_node() {
@@ -85,6 +95,11 @@ if [ ! -f "$SERVER" ]; then
 fi
 
 OLD_PID="$(find_listener_pid)"
+if curl -sS -o /dev/null --max-time 2 "http://127.0.0.1:$PORT/healthz" 2>/dev/null \
+    && [ -z "$OLD_PID" ]; then
+  status "ERROR: port $PORT is active but its listener PID could not be identified; refusing a fake restart"
+  exit 3
+fi
 
 check_owner() {
   [ -n "$OLD_PID" ] || return 0
@@ -122,7 +137,10 @@ wait_for_health() {
   old_pid="${1:-}"
   i=0
   while [ "$i" -lt 40 ]; do
-    if curl -fsS --max-time 2 "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1; then
+    # No -f: a 503 (gateway up but no token yet) still proves the process is
+    # listening. -f would treat that as a failure and loop until the timeout,
+    # reporting a healthy fresh install as "did not start".
+    if curl -sS -o /dev/null --max-time 2 "http://127.0.0.1:$PORT/healthz" 2>/dev/null; then
       new_pid="$(find_listener_pid)"
       if [ -z "$old_pid" ] || [ -z "$new_pid" ] || [ "$new_pid" != "$old_pid" ]; then
         status "restart.sh: gateway healthy at http://127.0.0.1:$PORT"
@@ -184,6 +202,7 @@ if [ -f "$LOG" ] && [ "$(wc -c < "$LOG")" -gt 33554432 ]; then
 fi
 
 nohup "$NODE_BIN" "$SERVER" >>"$LOG" 2>&1 &
+NEW_PID=$!
 status "restart.sh: started gateway from $ROOT (logs: $LOG)"
 
 if wait_for_health "$OLD_PID"; then
@@ -191,6 +210,8 @@ if wait_for_health "$OLD_PID"; then
 fi
 
 status "ERROR: gateway did not become healthy within 10s"
+kill "$NEW_PID" 2>/dev/null || true
+wait "$NEW_PID" 2>/dev/null || true
 if [ -f "$LOG" ]; then
   tail -n 10 "$LOG" >&2 || true
 fi

@@ -89,7 +89,10 @@ function catalogEntry({ slug, displayName, description, compHash, inputModalitie
   };
 }
 
-function modelCatalogDefaults({ mainModel, displayName, description, compHash, inputModalities, supportsSearchTool, baseInstructions, defaultReasoningLevel = "high", supportedReasoningLevels = [ { effort: "low", description: "Fast responses with lighter reasoning" }, { effort: "high", description: "Deeper reasoning for complex work" }, { effort: "xhigh", description: "Extra-deep reasoning for hard problems" } ], availableModels = [] }) {
+function modelCatalogDefaults({ profileId, mainModel, displayName, description, compHash, inputModalities, supportsSearchTool, baseInstructions, defaultReasoningLevel = "high", supportedReasoningLevels = [ { effort: "low", description: "Fast responses with lighter reasoning" }, { effort: "high", description: "Deeper reasoning for complex work" }, { effort: "xhigh", description: "Extra-deep reasoning for hard problems" } ], availableModels = [] }) {
+  // The main entry is owner-qualified like every other published entry, even when
+  // the caller passed a bare reference (a legacy .env or a test fixture).
+  const qualifiedMain = publishedSlugFor(profileId, mainModel);
   const base = { compHash, supportsSearchTool, baseInstructions, defaultReasoningLevel, supportedReasoningLevels };
   // The selected main model may belong to a provider other than the active
   // profile (e.g. a dashboard-added custom endpoint set as main). Label its
@@ -117,7 +120,7 @@ function modelCatalogDefaults({ mainModel, displayName, description, compHash, i
     for (const model of profile.availableModels || []) {
       if (!model?.id || model.status === "unavailable") continue;
       const slug = publishedSlugFor(entry.id, model);
-      if (slug === mainModel || rest.some((m) => m.slug === slug)) continue;
+      if (slug === qualifiedMain || rest.some((m) => m.slug === slug)) continue;
       rest.push({
         slug,
         displayName: `${entry.label} - ${model.label || model.id}`,
@@ -129,7 +132,7 @@ function modelCatalogDefaults({ mainModel, displayName, description, compHash, i
   }
   return {
     models: [
-      catalogEntry({ ...base, slug: mainModel, displayName: ownerQualifiedDisplayName(mainModel) || displayName, description, inputModalities, priority: 1, contextWindow: contextWindowFor(mainModel) }),
+      catalogEntry({ ...base, slug: qualifiedMain, displayName: ownerQualifiedDisplayName(qualifiedMain) || displayName, description, inputModalities, priority: 1, contextWindow: contextWindowFor(qualifiedMain) }),
       ...rest.map((model, index) => catalogEntry({
         ...base,
         slug: model.slug,
@@ -199,6 +202,7 @@ const OPENCODE_GO_PROFILE = {
 
   modelCatalog({ mainModel, visionModel, baseInstructions }) {
     return modelCatalogDefaults({
+      profileId: OPENCODE_GO_PROFILE.id,
       mainModel,
       // The same "Provider - Model" label the rest of the catalog uses, so the
       // main entry does not render differently in the App picker.
@@ -241,6 +245,7 @@ const DEEPSEEK_OFFICIAL_PROFILE = {
 
   modelCatalog({ mainModel, baseInstructions }) {
     return modelCatalogDefaults({
+      profileId: DEEPSEEK_OFFICIAL_PROFILE.id,
       mainModel,
       displayName: "DeepSeek V4 (Official)",
       description: "DeepSeek official Responses endpoint through ModelDock.",
@@ -272,6 +277,7 @@ const CUSTOM_PROFILE = {
   availableModels: [],
   modelCatalog({ mainModel, baseInstructions }) {
     return modelCatalogDefaults({
+      profileId: CUSTOM_PROFILE.id,
       mainModel,
       displayName: "Custom endpoint",
       description: "User-configured custom Responses endpoint through ModelDock.",
@@ -333,20 +339,20 @@ export const PROVIDER_SEPARATOR = "@";
 // keep resolving without a suffix.
 const DEFAULT_PROFILE_ID = "opencode-go";
 
-// The slug under which a model id is published in the Codex catalog. Bare ids stay
-// with the default profile so existing Codex configs keep resolving; a duplicate in
-// another provider, or a model whose bare id must stay reserved (gpt-5.6-luna is
-// also a native GPT picker slot), carries the @provider suffix. Accepts either a
-// profile model object or a bare id string, so the catalog builder and config
-// loading share one rule.
+// The slug under which a model id is published in the Codex catalog. Every model a
+// profile owns is published owner-qualified: the @provider suffix is a routing
+// address that names the upstream, so the picker label, the catalog grouping, and
+// the route can never disagree about which provider a model belongs to. A bare id
+// survives only as a legacy reference (an older config.toml or a stored thread
+// selection): it is never published and routes to the default provider (see
+// providerForModel). Accepts either a profile model object or a bare id string, so
+// the catalog builder and config loading share one rule.
 export function publishedSlugFor(profileId, model) {
   const id = typeof model === "string" ? model : model?.id;
   if (!id) return model;
-  const entry = profileById(profileId || DEFAULT_PROFILE_ID).availableModels?.find((candidate) => candidate.id === id);
-  const ownerQualified = Boolean(entry?.ownerQualified || (typeof model === "object" && model?.ownerQualified));
-  const owned = profileId !== DEFAULT_PROFILE_ID
-    && (profileById(DEFAULT_PROFILE_ID).availableModels || []).some((candidate) => candidate.id === id);
-  return owned || ownerQualified ? `${id}${PROVIDER_SEPARATOR}${profileId || DEFAULT_PROFILE_ID}` : id;
+  const pid = profileId || DEFAULT_PROFILE_ID;
+  const owned = profileById(pid).availableModels?.some((candidate) => candidate.id === id);
+  return owned ? `${id}${PROVIDER_SEPARATOR}${pid}` : id;
 }
 
 export function bareModelId(model) {
@@ -362,33 +368,26 @@ export function providerForModel(config, model) {
     const tagged = String(model).slice(at + 1);
     if (PROFILES[tagged]) return tagged;
   }
-  // Resolve the active profile by id when the caller passed a partial object: several
-  // ids (deepseek-v4-flash, deepseek-v4-pro) exist in more than one catalog, and the
-  // active profile is what breaks the tie - a stub without availableModels would
-  // silently lose that tie-break and hand the model to the wrong provider.
-  const passed = config?.profile;
-  const current = passed?.availableModels
-    ? passed
-    : profileById(passed?.id || config?.profileId || "") || passed || null;
-  if (current?.availableModels?.some((entry) => entry.id === model)) return current.id;
-  for (const entry of profileOptions()) {
-    const candidate = profileById(entry.id);
-    if (candidate.availableModels?.some((modelEntry) => modelEntry.id === model)) return candidate.id;
-  }
-  return config?.profileId || "opencode-go";
+  // Bare id: legacy compatibility only. Bare ids were never published by any
+  // provider other than the default one, so a bare id left over from an older
+  // config or a stored thread selection routes there unconditionally instead of
+  // to the currently active profile - the picker label and the billing source
+  // must never disagree.
+  return DEFAULT_PROFILE_ID;
 }
 
 // Resolve the curated model entry (label, endpoint, zen flag, vision metadata) for a
 // bare model id. Used by the gateway to pick the upstream base URL per model.
 export function modelEntryFor(config, model) {
   const provider = providerForModel(config, model);
+  const bare = bareModelId(model);
+  const owned = profileById(provider).availableModels?.find((entry) => entry.id === bare);
+  if (owned) return owned;
   const passed = config?.profile;
   const current = passed?.availableModels
     ? passed
     : profileById(passed?.id || config?.profileId || "") || passed || null;
-  const found = current?.availableModels?.find((entry) => entry.id === model)
-    || profileById(provider).availableModels?.find((entry) => entry.id === model);
-  return found || null;
+  return current?.availableModels?.find((entry) => entry.id === bare) || null;
 }
 
 export function tokenFor(config, model) {

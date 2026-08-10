@@ -81,6 +81,11 @@ CREATE TABLE IF NOT EXISTS links (
 `;
 
 const GLOBAL_NODE = "global";
+// Revisions kept per source item before older superseded history is pruned,
+// and the number of memory events retained (both are soft-history limits; the
+// newest data is never touched).
+const MAX_REVISIONS_KEPT = 10;
+const MAX_EVENTS_KEPT = 2000;
 const KNOWN_MEMORY_FILES = [
   { name: "MEMORY.md", trustClass: "trusted_instruction" },
   { name: "memory_summary.md", trustClass: "agent_output" },
@@ -154,7 +159,12 @@ function splitUnits(text) {
 function matchesScope(scopePaths, cwd) {
   const paths = String(scopePaths || "").split("|").filter(Boolean);
   if (!paths.length) return true;
-  return paths.some((scopePath) => scopePath === cwd || cwd.startsWith(`${scopePath}\\`));
+  return paths.some((scopePath) => {
+    const base = String(scopePath);
+    // Scope paths may come from either platform's layout; match both separators
+    // so a POSIX project matches its subdirectories just like a Windows one.
+    return cwd === base || cwd.startsWith(`${base}/`) || cwd.startsWith(`${base}\\`);
+  });
 }
 
 function formatHits(hits) {
@@ -206,7 +216,9 @@ export class MemoryStore {
     if (this.dbs.has(nodeId)) return this.dbs.get(nodeId);
     const file = nodeDbPathFor(this.memoryDir, nodeId);
     if (!create && !existsSync(file)) return null;
-    const db = new DatabaseSync(file);
+    // Wait for the write lock instead of failing immediately when another
+    // process (a second Codex session on the same project) holds it.
+    const db = new DatabaseSync(file, { timeout: 5000 });
     db.exec("PRAGMA journal_mode = WAL");
     db.exec(MEMORY_SCHEMA);
     this.dbs.set(nodeId, db);
@@ -261,54 +273,123 @@ export class MemoryStore {
     const sha = createHash("sha256").update(text).digest("hex");
     const sourceDirAbs = sourceDir ? path.resolve(sourceDir) : "<global>";
     const db = this.#ensureNode(nodeId);
-    const sourceId = stableId("src", adapter, sourceDirAbs);
-    this.#upsert(db, "sources", sourceId, { adapter, native_location: sourceDirAbs, created_at: new Date().toISOString() });
+    // One write transaction per capture: a concurrent second writer (another
+    // session on the same scope) must never observe the "old revision marked
+    // superseded, new one not yet inserted" intermediate state.
+    db.exec("BEGIN IMMEDIATE");
+    let transactionOpen = true;
+    let result;
+    try {
+      const sourceId = stableId("src", adapter, sourceDirAbs);
+      this.#upsert(db, "sources", sourceId, { adapter, native_location: sourceDirAbs, created_at: new Date().toISOString() });
 
-    const itemSeed = itemKey || fileName;
-    const itemId = stableId("item", sourceId, itemSeed);
-    this.#upsert(db, "source_items", itemId, {
-      source_id: sourceId,
-      native_id: itemSeed,
-      path: filePath,
-      kind: adapter === "agent_written" ? "memory" : "file",
-    });
+      const itemSeed = itemKey || fileName;
+      const itemId = stableId("item", sourceId, itemSeed);
+      this.#upsert(db, "source_items", itemId, {
+        source_id: sourceId,
+        native_id: itemSeed,
+        path: filePath,
+        kind: adapter === "agent_written" ? "memory" : "file",
+      });
 
-    const previous = db
-      .prepare("SELECT id, revision, blob_sha256 FROM source_revisions WHERE source_item_id = ? ORDER BY revision DESC LIMIT 1")
-      .get(itemId);
-    if (previous && previous.blob_sha256 === sha) return { skipped: true, revision: previous.revision, sha };
+      const previous = db
+        .prepare("SELECT id, revision, blob_sha256 FROM source_revisions WHERE source_item_id = ? ORDER BY revision DESC LIMIT 1")
+        .get(itemId);
+      if (previous && previous.blob_sha256 === sha) {
+        db.exec("COMMIT");
+        transactionOpen = false;
+        return { skipped: true, revision: previous.revision, sha };
+      }
 
-    const revision = previous ? previous.revision + 1 : 1;
-    const revisionId = stableId("rev", itemId, revision);
-    const observedAt = new Date().toISOString();
-    db
-      .prepare("INSERT INTO source_revisions (id, source_item_id, revision, blob_sha256, size, observed_at, supersedes_revision_id) VALUES (?, ?, ?, ?, ?, ?, ?)")
-      .run(revisionId, itemId, revision, sha, Buffer.byteLength(text), observedAt, previous?.id || null);
-    if (previous) {
-      db.prepare("UPDATE content_units SET memory_state = 'superseded' WHERE source_revision_id = ?").run(previous.id);
+      const revision = previous ? previous.revision + 1 : 1;
+      const revisionId = stableId("rev", itemId, revision);
+      const observedAt = new Date().toISOString();
+      db
+        .prepare("INSERT INTO source_revisions (id, source_item_id, revision, blob_sha256, size, observed_at, supersedes_revision_id) VALUES (?, ?, ?, ?, ?, ?, ?)")
+        .run(revisionId, itemId, revision, sha, Buffer.byteLength(text), observedAt, previous?.id || null);
+      if (previous) {
+        db.prepare("UPDATE content_units SET memory_state = 'superseded' WHERE source_revision_id = ?").run(previous.id);
+      }
+
+      const fileScopes = extractScopes(text);
+      const insertUnit = db.prepare(
+        "INSERT INTO content_units (id, source_revision_id, kind, head, text, text_hash, locator, trust_class, memory_state, scope_paths, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'captured', ?, ?)",
+      );
+      const insertFts = db.prepare("INSERT INTO content_fts (id, head, text) VALUES (?, ?, ?)");
+      const sections = splitUnits(text);
+      let units = 0;
+      sections.forEach((section, index) => {
+        const body = section.body.join("\n").trim();
+        if (!body) return;
+        const unitId = stableId("cu", revisionId, index);
+        const textHash = createHash("sha256").update(body).digest("hex");
+        const locator = JSON.stringify({ source: fileName, heading: section.head, index });
+        const sectionScopes = section.body.some((line) => /applies_to/i.test(line))
+          ? extractScopes(section.body.join("\n"))
+          : fileScopes;
+        insertUnit.run(unitId, revisionId, "section", section.head, body, textHash, locator, trustClass, sectionScopes.join("|"), observedAt);
+        insertFts.run(unitId, section.head || "", body);
+        units += 1;
+      });
+      db.exec("COMMIT");
+      transactionOpen = false;
+      result = { skipped: false, revision, units, sha };
+    } catch (error) {
+      if (transactionOpen) {
+        try { db.exec("ROLLBACK"); } catch { /* preserve the transaction error */ }
+      }
+      throw error;
     }
+    // Pruning is soft maintenance after the durable capture. A busy global event
+    // database must not turn a committed memory write into an apparent failure;
+    // report the deferred maintenance condition to callers instead.
+    try {
+      this.#pruneNode(db);
+    } catch (error) {
+      result.maintenanceError = error.message;
+    }
+    return result;
+  }
 
-    const fileScopes = extractScopes(text);
-    const insertUnit = db.prepare(
-      "INSERT INTO content_units (id, source_revision_id, kind, head, text, text_hash, locator, trust_class, memory_state, scope_paths, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'captured', ?, ?)",
-    );
-    const insertFts = db.prepare("INSERT INTO content_fts (id, head, text) VALUES (?, ?, ?)");
-    const sections = splitUnits(text);
-    let units = 0;
-    sections.forEach((section, index) => {
-      const body = section.body.join("\n").trim();
-      if (!body) return;
-      const unitId = stableId("cu", revisionId, index);
-      const textHash = createHash("sha256").update(body).digest("hex");
-      const locator = JSON.stringify({ source: fileName, heading: section.head, index });
-      const sectionScopes = section.body.some((line) => /applies_to/i.test(line))
-        ? extractScopes(section.body.join("\n"))
-        : fileScopes;
-      insertUnit.run(unitId, revisionId, "section", section.head, body, textHash, locator, trustClass, sectionScopes.join("|"), observedAt);
-      insertFts.run(unitId, section.head || "", body);
-      units += 1;
-    });
-    return { skipped: false, revision, units, sha };
+  // Soft-history limits: drop superseded revisions older than the newest
+  // MAX_REVISIONS_KEPT (with their units and FTS rows) and cap the global
+  // event feed. Runs on every successful write, so the vault never grows
+  // without bound while the recent history stays fully intact.
+  #pruneNode(db) {
+    const pruneRevisions = () => {
+      const old = db
+        .prepare(`
+          SELECT sr.id FROM source_revisions sr
+          WHERE sr.revision <= (
+            SELECT MAX(revision) - ? FROM source_revisions s2 WHERE s2.source_item_id = sr.source_item_id
+          )
+        `)
+        .all(MAX_REVISIONS_KEPT);
+      if (!old.length) return;
+      const unitIds = db.prepare("SELECT id FROM content_units WHERE source_revision_id = ?");
+      const deleteFts = db.prepare("DELETE FROM content_fts WHERE id = ?");
+      const deleteUnit = db.prepare("DELETE FROM content_units WHERE id = ?");
+      const deleteRevision = db.prepare("DELETE FROM source_revisions WHERE id = ?");
+      for (const row of old) {
+        for (const unit of unitIds.all(row.id)) {
+          deleteFts.run(unit.id);
+          deleteUnit.run(unit.id);
+        }
+        deleteRevision.run(row.id);
+      }
+    };
+    db.exec("BEGIN");
+    try {
+      pruneRevisions();
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+    this.#tryEventWrite(() => this.db.exec(`
+      DELETE FROM memory_events
+      WHERE rowid NOT IN (SELECT rowid FROM memory_events ORDER BY rowid DESC LIMIT ${MAX_EVENTS_KEPT})
+    `));
   }
 
   // Explicit write path: the model asks to persist something from the
@@ -572,9 +653,26 @@ export class MemoryStore {
 
   #recordEvent(kind, scope, detail) {
     const id = stableId("evt", kind, scope, detail, Date.now());
-    this.db
-      .prepare("INSERT INTO memory_events (id, kind, scope, detail, created_at) VALUES (?, ?, ?, ?, ?)")
-      .run(id, kind, scope, JSON.stringify(detail), new Date().toISOString());
+    return this.#tryEventWrite(() => {
+      this.db
+        .prepare("INSERT INTO memory_events (id, kind, scope, detail, created_at) VALUES (?, ?, ?, ?, ?)")
+        .run(id, kind, scope, JSON.stringify(detail), new Date().toISOString());
+    });
+  }
+
+  #tryEventWrite(write) {
+    // The event feed is telemetry, not canonical memory. Do not inherit the
+    // five-second canonical-write timeout here: a locked event DB must neither
+    // fail nor delay a completed store/link operation.
+    this.db.exec("PRAGMA busy_timeout = 0");
+    try {
+      write();
+      return true;
+    } catch {
+      return false;
+    } finally {
+      this.db.exec("PRAGMA busy_timeout = 5000");
+    }
   }
 
   // Lightweight event feed for the memory page: newest first.

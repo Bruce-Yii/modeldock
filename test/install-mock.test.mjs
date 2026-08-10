@@ -554,6 +554,12 @@ test("mock install lifecycle: first start, second start routes, login relaunch",
         "content-length": bridgeAsset.length,
       });
       res.end(bridgeAsset);
+    } else if (req.url === "/SHA256SUMS") {
+      const text =
+        `${createHash("sha256").update(asset).digest("hex")}  modeldock.mjs\n` +
+        `${createHash("sha256").update(bridgeAsset).digest("hex")}  mcp-standalone.mjs\n`;
+      res.writeHead(200, { "content-type": "text/plain" });
+      res.end(text);
     } else if (req.url.startsWith("/skills/content-to-video/")) {
       const rel = req.url.slice("/skills/content-to-video/".length).split("/");
       const file = path.join(skillRoot, ...rel);
@@ -615,6 +621,7 @@ test("mock install lifecycle: first start, second start routes, login relaunch",
     MODELDOCK_ROOT: installDir,
     MODELDOCK_RELEASE_URL: releaseUrl,
     MODELDOCK_BRIDGE_URL: `http://127.0.0.1:${assetPort}/mcp-standalone.mjs`,
+    MODELDOCK_SUMS_URL: `http://127.0.0.1:${assetPort}/SHA256SUMS`,
     MODELDOCK_SKILL_BASE_URL: skillBaseUrl,
     MODELDOCK_CODEX_HOME: codexHome,
     MODELDOCK_PORT: String(appPort),
@@ -893,6 +900,12 @@ test("mock install: auto-download a bundled Node 22 LTS when none is suitable", 
     } else if (url === "/mcp-standalone.mjs") {
       res.writeHead(200, { "content-type": "application/octet-stream", "content-length": fakeBridge.length });
       res.end(fakeBridge);
+    } else if (url === "/SHA256SUMS") {
+      const text =
+        `${createHash("sha256").update(bundle).digest("hex")}  modeldock.mjs\n` +
+        `${createHash("sha256").update(fakeBridge).digest("hex")}  mcp-standalone.mjs\n`;
+      res.writeHead(200, { "content-type": "text/plain" });
+      res.end(text);
     } else if (url === "/index.json") {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(indexJson);
@@ -933,6 +946,7 @@ test("mock install: auto-download a bundled Node 22 LTS when none is suitable", 
     MODELDOCK_ROOT: installDir,
     MODELDOCK_RELEASE_URL: `http://127.0.0.1:${serverPort}/modeldock.mjs`,
     MODELDOCK_BRIDGE_URL: `http://127.0.0.1:${serverPort}/mcp-standalone.mjs`,
+    MODELDOCK_SUMS_URL: `http://127.0.0.1:${serverPort}/SHA256SUMS`,
     MODELDOCK_NODE_BASE_URL: `http://127.0.0.1:${serverPort}`,
     MODELDOCK_FORCE_NODE_DOWNLOAD: "1",
     // The Windows fixture node.exe is a text file; executing it would make Windows
@@ -1028,6 +1042,13 @@ test("mock install: rejects a Node download whose SHA256 does not match", async 
     } else if (url === "/mcp-standalone.mjs") {
       res.writeHead(200, { "content-type": "application/octet-stream", "content-length": fakeBridge.length });
       res.end(fakeBridge);
+    } else if (url === "/SHA256SUMS") {
+      const bundle = readFileSync(path.join(repoRoot, "dist", "modeldock.mjs"));
+      const text =
+        `${createHash("sha256").update(bundle).digest("hex")}  modeldock.mjs\n` +
+        `${createHash("sha256").update(fakeBridge).digest("hex")}  mcp-standalone.mjs\n`;
+      res.writeHead(200, { "content-type": "text/plain" });
+      res.end(text);
     } else if (url === "/index.json") {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(indexJson);
@@ -1062,6 +1083,7 @@ test("mock install: rejects a Node download whose SHA256 does not match", async 
     MODELDOCK_ROOT: installDir,
     MODELDOCK_RELEASE_URL: `http://127.0.0.1:${serverPort}/modeldock.mjs`,
     MODELDOCK_BRIDGE_URL: `http://127.0.0.1:${serverPort}/mcp-standalone.mjs`,
+    MODELDOCK_SUMS_URL: `http://127.0.0.1:${serverPort}/SHA256SUMS`,
     MODELDOCK_NODE_BASE_URL: `http://127.0.0.1:${serverPort}`,
     MODELDOCK_FORCE_NODE_DOWNLOAD: "1",
     MODELDOCK_PORT: String(appPort),

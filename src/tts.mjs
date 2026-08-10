@@ -5,6 +5,9 @@
 // synthesized file path is returned to the model so it can be surfaced in the
 // conversation (same pattern as vision_inspect image refs).
 
+import { tmpdir } from "node:os";
+import path from "node:path";
+
 const INSTALL_TIMEOUT_MS = 180_000;
 const SPEAK_TIMEOUT_MS = 120_000;
 
@@ -50,18 +53,23 @@ export async function ttsInstall() {
   return probeInstalled();
 }
 
+export function ttsOutputPath(output = "tts-output.webm") {
+  const requested = String(output || "tts-output.webm");
+  // The MCP contract explicitly supports an absolute destination. Relative
+  // values remain confined to tmpdir and lose any traversal components.
+  return path.isAbsolute(requested)
+    ? path.normalize(requested)
+    : path.join(tmpdir(), path.basename(requested) || "tts-output.webm");
+}
+
 export async function ttsSpeak({ text = "", voice = "zh-CN-XiaoxiaoNeural", output = "tts-output.webm" } = {}) {
   if (!text.trim()) throw new Error("speak requires a text payload");
   const ok = await probeInstalled();
   if (!ok) throw new Error("msedge-tts is not installed; install it first (dashboard Web tile or `npm install msedge-tts`)");
   const { writeFile } = await import("node:fs/promises");
-  const { tmpdir } = await import("node:os");
-  const path = await import("node:path");
   const { MsEdgeTTS, OUTPUT_FORMAT } = await import("msedge-tts");
   const TTS = MsEdgeTTS || (await import("msedge-tts")).default;
-  const target = path.isAbsolute(output)
-    ? output
-    : path.join(tmpdir(), output);
+  const target = ttsOutputPath(output);
   const tts = new TTS();
   await tts.setMetadata(voice, OUTPUT_FORMAT.WEBM_24KHZ_16BIT_MONO_OPUS);
   const { audioStream } = await tts.toStream(text);

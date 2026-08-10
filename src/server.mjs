@@ -1,6 +1,6 @@
 import path from "node:path";
 import os from "node:os";
-import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import express from "express";
@@ -106,14 +106,29 @@ function withTierLabel(model) {
   return decorated;
 }
 
-// The slugs the Codex catalog publishes: every provider's models, with the owner suffix
-// where a bare id would be ambiguous. Used to decide whether a client-chosen model is
-// one this gate can actually serve.
+// Bare ids an older install could still reference: every model the default
+// provider (opencode-go) owns that is not a reserved native slot. gpt-5.6-luna is
+// excluded because its bare id belongs to the native GPT pipeline, not to us.
+function legacyBareIds(config) {
+  const ids = new Set();
+  const defaultProfile = profileById("opencode-go");
+  for (const model of defaultProfile?.availableModels || []) {
+    if (model?.id && !model.ownerQualified && model.status !== "unavailable") ids.add(model.id);
+  }
+  return ids;
+}
+
+// The slugs this gate can serve: every provider's published catalog plus the
+// legacy bare ids above. Used to decide whether a client-chosen model is one this
+// gate can route (anything else is native GPT traffic). The legacy bare ids keep
+// an old thread selection on the routed path (providerForModel sends it to
+// opencode-go) instead of letting isNativeModel misroute it to ChatGPT.
 function publishedModelIds(config) {
   const ids = new Set();
   for (const model of codexModelCatalog(config).models || []) {
     if (model?.slug) ids.add(model.slug);
   }
+  for (const id of legacyBareIds(config)) ids.add(id);
   return ids;
 }
 
@@ -308,6 +323,28 @@ function configMutationGuard(config) {
   };
 }
 
+// The MCP tool endpoint is reached by Codex / the stdio bridge, which are not
+// browsers and send no Origin header. Reject any request that DOES carry a
+// cross-origin Origin so a malicious web page (or a DNS-rebinding attack that
+// makes itself same-host) cannot drive vision_inspect/speak against this loopback
+// gateway. A full caller-key on /mcp would also stop non-browser local processes;
+// that is a larger change (the base URL written into config.toml would have to
+// carry the key) and is tracked separately.
+function crossOriginGuard(config) {
+  const allowedOrigins = new Set([
+    `http://${urlHost(config.host)}:${config.port}`,
+    `http://127.0.0.1:${config.port}`,
+    `http://localhost:${config.port}`,
+  ]);
+  return (req, res, next) => {
+    const origin = req.get("origin");
+    if (origin && !allowedOrigins.has(origin)) {
+      return res.status(403).json({ error: { type: "origin_not_allowed", message: "Cross-origin requests are not allowed on this endpoint." } });
+    }
+    return next();
+  };
+}
+
 function recordConfigAction(metrics, operation, result) {
   const now = Date.now();
   metrics.recent.unshift({
@@ -455,6 +492,16 @@ async function probeImageSupport(modelId, config) {
 // image escalation, affinity).
 async function relayGatewayRequest(req, res, services) {
   const { config, metrics, mediaStore, routeAffinity, modelSelection } = services;
+  // Abort the upstream call when Codex disconnects (user hits stop, or its own
+  // timeout fires). Without this, a client that drops during the pre-first-byte
+  // "thinking" wait or a buffered leg (compaction arrayBuffer, free non-stream
+  // text) leaves the upstream fetch running to completion - burning tokens - and
+  // Codex's retry then issues a duplicate. The streaming leg already tears down
+  // on res "close"; the signal covers the phases before/around it.
+  const controller = new AbortController();
+  res.on("close", () => {
+    if (!res.writableFinished) controller.abort();
+  });
   const result = await relayGatewayResponses(req.body, res, {
     config,
     metrics,
@@ -467,6 +514,7 @@ async function relayGatewayRequest(req, res, services) {
     // The native passthrough leg forwards these to ChatGPT's backend untouched.
     incomingHeaders: req.headers,
     requestUrl: req.originalUrl,
+    signal: controller.signal,
   });
   if (result?.route?.reason === "client_selected" && modelSelection && result.route.model !== modelSelection.mainModel) {
     modelSelection.mainModel = result.route.model;
@@ -680,7 +728,9 @@ export function createServices(config = loadConfig()) {
   });
   const autostart = createAutostart();
   autostart.refresh().catch(() => {});
-  const updater = createUpdater();
+  // Re-check periodically so the Update button stays current without a restart;
+  // the check is fire-and-forget and costs one small API call every 6h.
+  const updater = createUpdater({ autoCheckMs: 6 * 60 * 60 * 1000 });
   updater.check().catch(() => {});
   const routeAffinity = new RouteAffinity();
   const runtime = { profile: mutableConfig.profile, profileId: mutableConfig.profileId };
@@ -702,7 +752,12 @@ export function createServices(config = loadConfig()) {
         visionModel: modelSelection.visionModel,
       });
       mkdirSync(path.dirname(catalogFile), { recursive: true });
-      writeFileSync(catalogFile, JSON.stringify(catalog, null, 2), "utf8");
+      // Atomic replace: Codex reads this file on its own schedule, so a
+      // half-written JSON must never be observable. Same-directory rename is
+      // atomic on both Windows and POSIX.
+      const tmp = `${catalogFile}.${process.pid}.tmp`;
+      writeFileSync(tmp, JSON.stringify(catalog, null, 2), "utf8");
+      renameSync(tmp, catalogFile);
       return catalog.models?.length || 0;
     } catch (error) {
       console.log(`[gate] model catalog file write failed: ${error.message}`);
@@ -754,14 +809,35 @@ export function createServices(config = loadConfig()) {
 // pre-set req.body, so this outer middleware drains + decompresses zstd bodies
 // itself and hands the parsed JSON through. gzip/deflate/br stay with
 // body-parser, which supports them natively.
-function zstdRequestDecoder() {
-  const canZstd = typeof zlib.zstdDecompressSync === "function";
+function isCallerKeyEnforced() {
+  const raw = String(process.env.MODELDOCK_REQUIRE_CALLER_KEY || "").toLowerCase();
+  return raw === "" || !["0", "false", "off"].includes(raw);
+}
+
+function protectedRelayPath(pathname) {
+  return pathname === "/v1/responses"
+    || pathname === "/responses"
+    || pathname === "/v1/responses/compact"
+    || pathname === "/responses/compact"
+    || [...NATIVE_IMAGE_PATHS].includes(pathname);
+}
+
+function zstdRequestDecoder(callerKey) {
+  const canZstd = typeof zlib.zstdDecompress === "function";
   const maxInput = 16 * 1024 * 1024;
   const maxOutput = 64 * 1024 * 1024;
   return (req, res, next) => {
     if (String(req.headers["content-encoding"] || "").toLowerCase() !== "zstd") return next();
     if (!canZstd) {
       return res.status(415).json({ error: { type: "unsupported_encoding", message: "zstd request bodies require Node 23.8+ (run ModelDock on Node 24)." } });
+    }
+    const pathname = String(req.url || "").split("?", 1)[0];
+    const keyMatch = pathname.match(/^\/c\/([^/]+)/);
+    if (keyMatch && (!callerKey || !callerKeyEqual(keyMatch[1], callerKey))) {
+      return res.status(401).json({ error: { type: "invalid_caller_key", message: "Unknown caller key." } });
+    }
+    if (!keyMatch && protectedRelayPath(pathname) && isCallerKeyEnforced()) {
+      return res.status(401).json({ error: { type: "caller_key_required", message: "This gateway requires the keyed base URL." } });
     }
     const chunks = [];
     let received = 0;
@@ -779,18 +855,22 @@ function zstdRequestDecoder() {
     req.on("error", next);
     req.on("end", () => {
       if (tooLarge) return;
-      try {
-        const body = zlib.zstdDecompressSync(Buffer.concat(chunks));
-        if (body.length > maxOutput) {
-          return res.status(413).json({ error: { type: "payload_too_large", message: `zstd request decompresses beyond the ${maxOutput}-byte limit` } });
+      zlib.zstdDecompress(Buffer.concat(chunks), { maxOutputLength: maxOutput }, (error, body) => {
+        if (error) {
+          if (error.code === "ERR_BUFFER_TOO_LARGE") {
+            return res.status(413).json({ error: { type: "payload_too_large", message: `zstd request decompresses beyond the ${maxOutput}-byte limit` } });
+          }
+          return res.status(400).json({ error: { type: "bad_request", message: `zstd request decode failed: ${error.message}` } });
         }
-        req.headers["content-encoding"] = "identity";
-        req.headers["content-length"] = String(body.length);
-        req.body = JSON.parse(body.toString("utf8"));
-        next();
-      } catch (error) {
-        res.status(400).json({ error: { type: "bad_request", message: `zstd request decode failed: ${error.message}` } });
-      }
+        try {
+          req.headers["content-encoding"] = "identity";
+          req.headers["content-length"] = String(body.length);
+          req.body = JSON.parse(body.toString("utf8"));
+          next();
+        } catch (decodeError) {
+          res.status(400).json({ error: { type: "bad_request", message: `zstd request decode failed: ${decodeError.message}` } });
+        }
+      });
     });
   };
 }
@@ -816,7 +896,7 @@ export function createApp(services = createServices()) {
     },
   });
 
-  app.all("/mcp", (req, res) => mcpHandler(req, res, req.body));
+  app.all("/mcp", crossOriginGuard(config), (req, res) => mcpHandler(req, res, req.body));
   // Capability-key routes: the base_url written into config.toml carries the key
   // (/c/<key>/v1), so Codex authenticates implicitly while a hostile local web
   // page (which can POST to loopback but cannot read ~/.modeldock) cannot.
@@ -842,8 +922,7 @@ export function createApp(services = createServices()) {
   // the upstream tokens this process holds. MODELDOCK_REQUIRE_CALLER_KEY=0 (or
   // off/false) re-opens the bare paths for legacy configs.
   const callerKeyEnforced = () => {
-    const raw = String(process.env.MODELDOCK_REQUIRE_CALLER_KEY || "").toLowerCase();
-    return raw === "" || !["0", "false", "off"].includes(raw);
+    return isCallerKeyEnforced();
   };
   const bareRelay = (req, res) => {
     if (callerKeyEnforced()) {
@@ -953,13 +1032,19 @@ export function createApp(services = createServices()) {
           result = await configSwitcher.enable();
           if (mode === "trial") {
             config.trialMode = true;
-            services.modelSelection.mainModel = TRIAL_MAIN_MODEL;
-            services.modelSelection.visionModel = TRIAL_VISION_MODEL;
-            services.configSwitcher.model = TRIAL_MAIN_MODEL;
+            // The catalog is fully owner-qualified, so the selected pair is
+            // stored and persisted in its published form too - a bare trial id
+            // would make the dashboard selected value disagree with the picker
+            // until the next restart.
+            const trialMain = publishedSlugFor(config.profileId, TRIAL_MAIN_MODEL);
+            const trialVision = publishedSlugFor(config.profileId, TRIAL_VISION_MODEL);
+            services.modelSelection.mainModel = trialMain;
+            services.modelSelection.visionModel = trialVision;
+            services.configSwitcher.model = trialMain;
             const trialEnv = {
               MODELDOCK_TRIAL: "1",
-              MODELDOCK_MAIN_MODEL: TRIAL_MAIN_MODEL,
-              MODELDOCK_VISION_MODEL: TRIAL_VISION_MODEL,
+              MODELDOCK_MAIN_MODEL: trialMain,
+              MODELDOCK_VISION_MODEL: trialVision,
             };
             if (nativeMerge !== undefined) trialEnv.MODELDOCK_NATIVE_MERGE = nativeMerge ? "1" : "0";
             writeEnvFile(trialEnv, config.envFile);
@@ -1021,14 +1106,18 @@ export function createApp(services = createServices()) {
   app.get("/api/profiles", (req, res) => res.json({ selected: config.profileId, options: profileOptions() }));
   app.post("/api/models", mutateConfig, (req, res) => {
     const current = services.modelSelection;
-    let nextMain = req.body?.mainModel === undefined ? current.mainModel : req.body.mainModel;
-    let nextVision = req.body?.visionModel === undefined ? current.visionModel : req.body.visionModel;
+    // Resolve a bare id to its published form first: the options list is fully
+    // owner-qualified, so a legacy/dashboard submission of "kimi-k2.5" must match
+    // the "kimi-k2.5@opencode-go" entry instead of 400ing on an exact-id lookup.
+    const qualify = (id) => publishedSlugFor(config.profileId, id);
+    let nextMain = qualify(req.body?.mainModel === undefined ? current.mainModel : req.body.mainModel);
+    let nextVision = qualify(req.body?.visionModel === undefined ? current.visionModel : req.body.visionModel);
     const nextProvider = req.body?.provider;
     // Trial mode pins the free pair and the opencode-go provider; only the mode
     // switch can move models while it is active.
     if (config.trialMode) {
-      nextMain = TRIAL_MAIN_MODEL;
-      nextVision = TRIAL_VISION_MODEL;
+      nextMain = qualify(TRIAL_MAIN_MODEL);
+      nextVision = qualify(TRIAL_VISION_MODEL);
     }
     if (!config.trialMode && nextProvider !== undefined && nextProvider !== config.profileId) {
       const known = profileOptions().some((entry) => entry.id === nextProvider);
@@ -1255,7 +1344,7 @@ export function createApp(services = createServices()) {
   // (which is registered inside createMcpExpressApp and cannot be reordered).
   const outer = express();
   outer.disable("x-powered-by");
-  outer.use(zstdRequestDecoder());
+  outer.use(zstdRequestDecoder(services.callerKey));
   outer.use(app);
   return { app: outer, close: () => mcpHandler.close?.(), services };
 }

@@ -39,10 +39,18 @@ export function parseEnvFile(source) {
   return entries;
 }
 
+// The .env format is line-based, so a value carrying a newline would inject
+// additional KEY=VALUE lines that take effect on the next load (e.g. a crafted
+// custom-model id turning MODELDOCK_REQUIRE_CALLER_KEY off). No legitimate value
+// here (token, url, model id) contains a CR/LF, so strip them at every write.
+export function sanitizeEnvValue(value) {
+  return String(value).replace(/[\r\n]+/g, " ").trim();
+}
+
 export function serializeEnvFile(entries) {
   return Object.entries(entries)
     .filter(([, value]) => value !== undefined && value !== null)
-    .map(([key, value]) => `${key}=${value}`)
+    .map(([key, value]) => `${key}=${sanitizeEnvValue(value)}`)
     .join("\n") + "\n";
 }
 
@@ -90,8 +98,9 @@ export function writeEnvFile(updates, file = envFileFor()) {
     for (const line of lines) {
       const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=/);
       if (match && updated.has(match[1])) {
-        // Secrets are stored encrypted on disk; everything else stays as given.
-        const value = isSecretKey(match[1]) ? encryptSecret(updates[match[1]]) : updates[match[1]];
+        // Secrets are stored encrypted on disk; everything else stays as given
+        // (minus any CR/LF, which would inject extra .env lines - see sanitizeEnvValue).
+        const value = isSecretKey(match[1]) ? encryptSecret(updates[match[1]]) : sanitizeEnvValue(updates[match[1]]);
         next.push(`${match[1]}=${value}`);
         updated.delete(match[1]);
       } else {
@@ -99,7 +108,7 @@ export function writeEnvFile(updates, file = envFileFor()) {
       }
     }
     for (const key of updated) {
-      const value = isSecretKey(key) ? encryptSecret(updates[key]) : updates[key];
+      const value = isSecretKey(key) ? encryptSecret(updates[key]) : sanitizeEnvValue(updates[key]);
       next.push(`${key}=${value}`);
     }
     const content = next.join("\n").replace(/\n+$/, "\n");

@@ -116,6 +116,47 @@ test("defaults off, backs up on enable, and restores exact config on disable", a
   assert.doesNotMatch(await readFile(configPath, "utf8"), /mcp_servers\.modeldock/, "restore removes the ModelDock MCP section");
 });
 
+test("re-enable after a crash that left the config managed does not poison the backup chain", async (t) => {
+  const { codexHome, configPath, switcher } = await fixture(t);
+  await switcher.enable();
+  assert.match(await readFile(configPath, "utf8"), /openai_base_url = "http:\/\/127\.0\.0\.1:4097\/v1"/);
+
+  // Simulate a crash between the config write and the state write of a *fresh*
+  // enable: the config is managed on disk but the switch state reads as disabled.
+  await rm(path.join(codexHome, "modeldock", "config-switch-state.json"), { force: true });
+  assert.equal((await switcher.status()).enabled, false);
+
+  // The re-enable must back up the pre-ModelDock baseline, not the managed file,
+  // so a later disable cannot restore a still-managed config.
+  const reEnabled = await switcher.enable();
+  const backup = await readFile(reEnabled.backupPath, "utf8");
+  assert.doesNotMatch(backup, /127\.0\.0\.1:4097/, "backup must not be the managed config");
+  assert.doesNotMatch(backup, /mcp_servers\.modeldock/);
+
+  await switcher.disable();
+  const restored = await readFile(configPath, "utf8");
+  assert.doesNotMatch(restored, /openai_base_url = "http:\/\/127\.0\.0\.1:4097/, "disable must return Codex to the native route");
+  assert.doesNotMatch(restored, /mcp_servers\.modeldock/);
+});
+
+test("crash recovery preserves that config.toml originally did not exist", async (t) => {
+  const codexHome = await mkdtemp(path.join(os.tmpdir(), "modeldock-config-switch-absent-"));
+  t.after(() => rm(codexHome, { recursive: true, force: true }));
+  const configPath = path.join(codexHome, "config.toml");
+  const switcher = new CodexConfigSwitcher({
+    codexHome,
+    baseUrl: "http://127.0.0.1:4097/v1",
+    model: "deepseek-v4-flash",
+  });
+
+  await switcher.enable();
+  assert.match(await readFile(configPath, "utf8"), /ModelDock original config existed: false/);
+  await rm(path.join(codexHome, "modeldock", "config-switch-state.json"), { force: true });
+  await switcher.enable();
+  await switcher.disable();
+  await assert.rejects(() => access(configPath), { code: "ENOENT" });
+});
+
 test("markOnboarded persists and survives enable/disable round trips", async (t) => {
   const { switcher } = await fixture(t);
   const fresh = await switcher.status();

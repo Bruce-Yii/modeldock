@@ -79,6 +79,9 @@ function responseStub(res) {
     setHeader(name, value) {
       this.headers[name] = value;
     },
+    getHeader(name) {
+      return this.headers[name];
+    },
     flushHeaders() {
       this.headersSent = true;
     },
@@ -452,6 +455,14 @@ test("upstreamTargetFor routes by owning provider", () => {
   assert.equal(ds.model, "deepseek-v4-flash");
   assert.equal(ds.url, "https://api.deepseek.com/responses");
   assert.equal(ds.token, "ds-token");
+
+  // A bare id is a legacy reference and always means the default provider, even
+  // when another profile is active: the picker label said OpenCode Go, so the
+  // billing source must be OpenCode Go too.
+  const legacyUnderDeepseekProfile = upstreamTargetFor({ ...config, profileId: "deepseek-official" }, "deepseek-v4-flash");
+  assert.equal(legacyUnderDeepseekProfile.provider, "opencode-go");
+  assert.equal(legacyUnderDeepseekProfile.url, "https://opencode.ai/zen/go/v1/responses");
+  assert.equal(legacyUnderDeepseekProfile.token, "go-token");
 });
 
 test("upstreamTargetFor routes zen free models to the zen/v1 responses endpoint", () => {
@@ -1051,11 +1062,44 @@ test("relayNativeImage forwards image generation to the native backend", async (
   }
 });
 
+test("relayNativeImage ends a mid-stream upstream failure as JSON, not SSE", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    return new Response(
+      new ReadableStream({
+        start(controller) {
+          // A partial image JSON body, then the upstream connection dies.
+          controller.enqueue(Buffer.from('{"data":[{"b64_json":"'));
+          controller.error(new Error("image burst Bearer sk-abc123456"));
+        },
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  };
+  try {
+    const result = await relayNativeImage(
+      { model: "gpt-image-2", prompt: "boom", size: "1024x1024" },
+      res,
+      { incomingHeaders: {}, requestUrl: "/c/key123/v1/images/generations" },
+    );
+    assert.equal(result.ok, false);
+    const forwarded = Buffer.concat(sink.chunks).toString("utf8");
+    assert.doesNotMatch(forwarded, /event: response\.failed/, "SSE events must not ride in a JSON response");
+    assert.match(forwarded, /"type":"upstream_failed"/);
+    assert.match(forwarded, /image burst/, "the failure reason reaches the client");
+    assert.doesNotMatch(forwarded, /sk-abc123456/, "bearer tokens are redacted");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("legacy provider/model slugs route to us instead of the native backend", async () => {
   const { normalizeLegacySlug } = await import("./gateway.mjs");
-  const known = new Set(["deepseek-v4-flash", "gpt-5.6-luna@opencode-go", "deepseek-v4-flash@deepseek-official"]);
+  const known = new Set(["deepseek-v4-flash@opencode-go", "gpt-5.6-luna@opencode-go", "deepseek-v4-flash@deepseek-official"]);
   // codex-router era merged-catalog ids persisted in old threads:
-  assert.equal(normalizeLegacySlug("opencode-go/deepseek-v4-flash", known), "deepseek-v4-flash");
+  assert.equal(normalizeLegacySlug("opencode-go/deepseek-v4-flash", known), "deepseek-v4-flash@opencode-go");
   assert.equal(normalizeLegacySlug("opencode-go/gpt-5.6-luna", known), "gpt-5.6-luna@opencode-go");
   assert.equal(normalizeLegacySlug("deepseek-official/deepseek-v4-flash", known), "deepseek-v4-flash@deepseek-official");
   // Unknown stays untouched (genuinely native or garbage - upstream decides):

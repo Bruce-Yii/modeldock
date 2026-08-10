@@ -23,6 +23,27 @@ test("recover.sh ships a start-at-login repair in both copies", () => {
   }
 });
 
+test("recovery restores a complete version snapshot through the canonical restart", () => {
+  const posix = readFileSync(new URL("../scripts/recover.sh", import.meta.url), "utf8");
+  const windows = readFileSync(new URL("../scripts/recover.ps1", import.meta.url), "utf8");
+  assert.match(posix, /\.modeldock-rollback\/current/);
+  assert.match(posix, /manifest\.json/);
+  assert.match(posix, /scripts\/restart\.sh/);
+  assert.doesNotMatch(posix, /modeldock\.mjs\.prev/);
+  assert.match(windows, /\.modeldock-rollback/);
+  assert.match(windows, /manifest\.json/);
+  assert.match(windows, /restored the complete previous version set/);
+  assert.doesNotMatch(windows, /modeldock\.mjs\.prev/);
+});
+
+test("restart.sh cascades listener discovery and refuses an unidentified healthy port", () => {
+  const restart = readFileSync(new URL("../scripts/restart.sh", import.meta.url), "utf8");
+  assert.match(restart, /if command -v lsof[\s\S]*if command -v ss[\s\S]*if command -v fuser/);
+  assert.doesNotMatch(restart, /elif command -v ss/);
+  assert.match(restart, /refusing a fake restart/);
+  assert.match(restart, /kill "\$NEW_PID"/);
+});
+
 test("install.sh warns loudly when the login agent cannot be loaded", () => {
   const install = readFileSync(new URL("../scripts/install.sh", import.meta.url), "utf8");
   assert.match(install, /ERROR: could not enable start at login/, "load failure must not be silent");

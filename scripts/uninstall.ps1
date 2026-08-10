@@ -6,7 +6,10 @@
 # (config.toml.modeldock-backup-*) is also kept for recovery.
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
-$stateDir = if ($env:MODELDOCK_ROOT) { $env:MODELDOCK_ROOT } else { Join-Path $HOME ".modeldock" }
+# Runtime state (owner records, caller key, catalog, memory) follows
+# MODELDOCK_STATE_DIR everywhere else; MODELDOCK_ROOT only ever names the
+# install directory. Honour both so a custom state dir is cleaned up too.
+$stateDir = if ($env:MODELDOCK_STATE_DIR) { $env:MODELDOCK_STATE_DIR } elseif ($env:MODELDOCK_ROOT) { $env:MODELDOCK_ROOT } else { Join-Path $HOME ".modeldock" }
 $log = Join-Path $root "modeldock.log"
 $port = if ($env:MODELDOCK_PORT) { [int]$env:MODELDOCK_PORT } else { 4097 }
 $runKey = if ($env:MODELDOCK_AUTOSTART_KEY) { $env:MODELDOCK_AUTOSTART_KEY } else { "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" }

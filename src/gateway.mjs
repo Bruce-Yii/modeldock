@@ -151,6 +151,26 @@ function endRelayStreamFailure(res, message) {
   }
 }
 
+// A stream that already sent headers cannot switch protocols mid-response:
+// terminate in the shape the client was told to expect. Responses SSE streams
+// end with a response.failed event (above); a JSON payload - e.g. the native
+// images endpoints answer application/json - ends with a JSON error object.
+// Writing SSE events into an application/json body leaves the client with a
+// body it cannot parse.
+function endRelayFailure(res, message) {
+  const contentType = String(res.getHeader?.("Content-Type") || "");
+  if (/text\/event-stream/i.test(contentType) || /ndjson|jsonl/i.test(contentType)) {
+    endRelayStreamFailure(res, message);
+    return;
+  }
+  try {
+    res.write(JSON.stringify({ error: { type: "upstream_failed", message } }));
+    res.end();
+  } catch {
+    res.destroy();
+  }
+}
+
 // Headers Codex's signed-in transport sends that the native backend needs.
 // Everything else (tokens for routed providers, loopback bookkeeping) stays out.
 const NATIVE_FORWARD_HEADERS = new Set([
@@ -676,9 +696,10 @@ function usageFromEvent(event) {
 export async function pipeGatewayStream(upstreamBody, res, tee, onFirstResponse) {
   if (!upstreamBody) {
     res.end();
-    return 0;
+    return { bytes: 0, interrupted: false };
   }
   let bytes = 0;
+  let interrupted = false;
   await new Promise((resolve, reject) => {
     const stream = Readable.fromWeb(upstreamBody);
     let firstResponseMarked = false;
@@ -702,12 +723,15 @@ export async function pipeGatewayStream(upstreamBody, res, tee, onFirstResponse)
     res.once("finish", () => settle());
     res.once("error", settle);
     res.once("close", () => {
-      if (!settled) stream.destroy();
+      if (!settled) {
+        interrupted = true;
+        stream.destroy();
+      }
       settle();
     });
     stream.pipe(res);
   });
-  return bytes;
+  return { bytes, interrupted };
 }
 
 // Classify a 200 zen-free response body that silently failed. Returns
@@ -847,10 +871,16 @@ export async function pipeFreeStream(upstreamBody, res, tee, failedMessage, onFi
       settle();
     });
     stream.once("error", settle);
-    res.once("drain", () => outStream?.resume());
-    res.once("finish", () => settle());
-    res.once("error", settle);
+    // "on", not "once": writeOut pauses the upstream on every backpressure event,
+    // so the drain that resumes it must fire every time too. With "once" the second
+    // pause never gets a matching resume and the stream (and the promise) hangs.
+    const onDrain = () => outStream?.resume();
+    res.on("drain", onDrain);
+    const cleanup = () => res.removeListener("drain", onDrain);
+    res.once("finish", () => { cleanup(); settle(); });
+    res.once("error", (error) => { cleanup(); settle(error); });
     res.once("close", () => {
+      cleanup();
       if (!settled) stream.destroy();
       settle();
     });
@@ -934,12 +964,15 @@ export async function relayNativeResponses(payload, res, services, { signal } = 
       res.setHeader("Cache-Control", "no-cache, no-transform");
       res.flushHeaders();
     }
-    const bytesOut = await pipeGatewayStream(upstream.body, res, tee, markFirstResponse);
+    const piped = await pipeGatewayStream(upstream.body, res, tee, markFirstResponse);
+    const bytesOut = piped.bytes;
+    const interrupted = piped.interrupted;
     markFirstResponse();
     finish?.({
-      ok: true,
-      httpStatus: upstream.status,
+      ok: !interrupted,
+      httpStatus: interrupted ? 499 : upstream.status,
       upstream: "openai",
+      error: interrupted ? "client disconnected" : undefined,
       bytesOut,
       inputTokens: usage?.input_tokens || 0,
       outputTokens: usage?.output_tokens || 0,
@@ -963,7 +996,7 @@ export async function relayNativeResponses(payload, res, services, { signal } = 
       model: payload.model,
       provider: "openai",
       route: "native_passthrough",
-      status: upstream.status,
+      status: interrupted ? 499 : upstream.status,
       durationMs: Date.now() - startedAt,
       inputTokens: usage?.input_tokens,
       outputTokens: usage?.output_tokens,
@@ -974,8 +1007,8 @@ export async function relayNativeResponses(payload, res, services, { signal } = 
       threadId,
     });
     return {
-      ok: true,
-      httpStatus: upstream.status,
+      ok: !interrupted,
+      httpStatus: interrupted ? 499 : upstream.status,
       route: { model: payload.model, reason: "native_passthrough" },
       usage,
       bytesOut,
@@ -1028,7 +1061,10 @@ export async function relayNativeImage(payload, res, services, { signal } = {}) 
       res.setHeader("Cache-Control", "no-cache, no-transform");
       res.flushHeaders();
     }
-    await pipeGatewayStream(upstream.body, res, null);
+    const piped = await pipeGatewayStream(upstream.body, res, null);
+    if (piped.interrupted) {
+      return { ok: false, httpStatus: 499, error: "client disconnected" };
+    }
     return { ok: true, httpStatus: upstream.status };
   } catch (error) {
     if (!res.headersSent) {
@@ -1036,7 +1072,7 @@ export async function relayNativeImage(payload, res, services, { signal } = {}) 
       res.setHeader("Content-Type", "application/json");
       res.end(JSON.stringify({ error: { type: "upstream_failed", message: redactBearer(error.message) } }));
     } else {
-      res.destroy();
+      endRelayFailure(res, redactBearer(error.message));
     }
     return { ok: false, httpStatus: 502, error: error.message };
   }
@@ -1241,9 +1277,10 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
       });
       return { ok: false, httpStatus: 502, route, error: "Compact response is too large." };
     }
-    const parsed = JSON.parse(bytes.toString("utf8"));
-    usage = extractResponseUsage(parsed);
     if (!upstream.ok) {
+      // Translate before parsing: a non-JSON upstream error (e.g. a proxy's HTML
+      // 502) must reach translateUpstreamError and writeCompactFailureReport, not
+      // throw out of a JSON.parse into the generic catch below.
       const translated = translateUpstreamError({ provider: target.provider, status: upstream.status, bodyText: redactBearer(bytes.toString("utf8")), free: target.free });
       writeCompactFailureReport(
         compactFailureReport(
@@ -1286,6 +1323,31 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
       return { ok: false, httpStatus: upstream.status, route, error: translated.body.error.message.slice(0, 400), upstreamBytes: bytes.length };
     }
 
+    let parsed;
+    try {
+      parsed = JSON.parse(bytes.toString("utf8"));
+    } catch {
+      // An OK response that is not JSON (a proxy's HTML, a truncated body): surface
+      // a translated provider error rather than throwing to the generic 502 catch.
+      const translated = translateUpstreamError({ provider: target.provider, status: 502, bodyText: redactBearer(bytes.toString("utf8")), free: target.free });
+      if (!res.headersSent) {
+        res.statusCode = 502;
+        res.setHeader("Content-Type", "application/json");
+        res.end(JSON.stringify(translated.body));
+      }
+      finish?.({ ok: false, httpStatus: 502, upstream: target.provider, error: translated.body.error.message.slice(0, 400) });
+      (services.recordUsage || recordUsageEvent)({
+        model: route.model,
+        provider: target.provider,
+        route: operation,
+        status: 502,
+        durationMs: Date.now() - startedAt,
+        sessionId,
+        threadId,
+      });
+      return { ok: false, httpStatus: 502, route, error: translated.body.error.message.slice(0, 400), upstreamBytes: bytes.length };
+    }
+    usage = extractResponseUsage(parsed);
     const summary = extractResponseText(parsed);
     if (v2) {
       if (payload.stream === false) {
@@ -1359,6 +1421,18 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
 // knownModels, visionModelOf } so the caller decides wiring.
 export async function relayResponses(payload, res, services, { signal } = {}) {
   const { config, metrics, mediaStore, routeAffinity, knownModels, incomingHeaders } = services;
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    const error = {
+      error: {
+        type: "bad_request",
+        message: "Expected a JSON Responses request body.",
+      },
+    };
+    res.statusCode = 400;
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify(error));
+    return { ok: false, httpStatus: 400, route: { model: "", reason: "bad_request" }, error };
+  }
   const { sessionId, threadId } = sessionIdsFrom(incomingHeaders);
   const requestedModel = normalizeLegacySlug(typeof payload.model === "string" ? payload.model : "", knownModels);
   if (requestedModel !== payload.model && requestedModel) payload = { ...payload, model: requestedModel };
@@ -1505,6 +1579,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     const freeEmptyError = target.free ? freeEmptyOutputError({ provider: target.provider }) : null;
     let upstreamBody = upstream.body;
     let freeEmpty = false;
+    let interrupted = false;
     if (target.free && normalizedPayload.stream !== true) {
       const raw = await upstream.text();
       let parsed = null;
@@ -1561,7 +1636,9 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       freeEmpty = result.empty;
       if (result.usage) usage = result.usage;
     } else {
-      bytesOut = await pipeGatewayStream(upstreamBody, res, tee, markFirstResponse);
+      const piped = await pipeGatewayStream(upstreamBody, res, tee, markFirstResponse);
+      bytesOut = piped.bytes;
+      interrupted = piped.interrupted;
     }
     markFirstResponse();
     if (completedResponse && routeAffinity) {
@@ -1624,9 +1701,10 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     // inputTokens/outputTokens ride on the trace record: the dashboard's
     // context-token waveform plots recent[].inputTokens per completed call.
     finish?.({
-      ok: true,
-      httpStatus: upstream.status,
+      ok: !interrupted,
+      httpStatus: interrupted ? 499 : upstream.status,
       upstream: target.provider,
+      error: interrupted ? "client disconnected" : undefined,
       bytesOut,
       inputTokens: traceUsage?.input_tokens || 0,
       outputTokens: traceUsage?.output_tokens || 0,
@@ -1652,7 +1730,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       model: normalizedPayload.model,
       provider: target.provider,
       route: route.reason,
-      status: upstream.status,
+      status: interrupted ? 499 : upstream.status,
       durationMs: Date.now() - startedAt,
       inputTokens: traceUsage?.input_tokens,
       outputTokens: traceUsage?.output_tokens,
@@ -1663,8 +1741,8 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       threadId,
     });
     return {
-      ok: true,
-      httpStatus: upstream.status,
+      ok: !interrupted,
+      httpStatus: interrupted ? 499 : upstream.status,
       route,
       usage: traceUsage,
       bytesOut,

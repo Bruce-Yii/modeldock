@@ -150,6 +150,35 @@ Write-Host "  downloading MCP stdio bridge..."
 Invoke-WebRequest -UseBasicParsing -Uri $bridgeUrl -OutFile $bridge
 Write-Host ("  saved {0} ({1:N2} MB)" -f $bridge, ((Get-Item $bridge).Length / 1MB))
 
+# Integrity: releases publish a SHA256SUMS covering every asset. Verify the two
+# files we just downloaded against it and refuse to leave a corrupt install
+# behind. MODELDOCK_SUMS_URL redirects the lookup (mock-install tests).
+$sumsUrl = if ($env:MODELDOCK_SUMS_URL) { $env:MODELDOCK_SUMS_URL } else { "https://github.com/$repo/releases/latest/download/SHA256SUMS" }
+function Assert-Downloaded([string]$file, [string]$name) {
+  $sumsText = (Invoke-WebRequest -UseBasicParsing -Uri $sumsUrl -TimeoutSec 60).Content
+  $line = ($sumsText -split "`r?`n") | Where-Object { $_ -match "(?i)^[0-9a-f]{64}\s+\*?$([regex]::Escape($name))\s*$" } | Select-Object -First 1
+  if (-not $line) {
+    Remove-Item -LiteralPath $file -Force
+    throw "SHA256SUMS has no entry for $name; refusing to keep an unverified download"
+  }
+  $expected = ($line -split '\s+')[0].ToLowerInvariant()
+  $hasher = [System.Security.Cryptography.SHA256]::Create()
+  try {
+    $actual = [System.BitConverter]::ToString(
+      $hasher.ComputeHash([System.IO.File]::ReadAllBytes($file))
+    ).Replace("-", "").ToLowerInvariant()
+  } finally {
+    $hasher.Dispose()
+  }
+  if ($actual -ne $expected) {
+    Remove-Item -LiteralPath $file -Force
+    throw "Checksum mismatch for $name (expected $expected, got $actual)"
+  }
+}
+Assert-Downloaded $bundle "modeldock.mjs"
+Assert-Downloaded $bridge "mcp-standalone.mjs"
+Write-Host "  release assets verified against SHA256SUMS"
+
 # Hidden launcher (same content as the repo's scripts/start-hidden.ps1). Written by the
 # installer so a single-file download still gets autostart + self-update restarts.
 $launcher = Join-Path $root "scripts\start-hidden.ps1"
@@ -193,6 +222,18 @@ if (-not $nodeExe) {
 # command starts with a quoted program path, so wrap the whole command in one extra
 # pair of quotes (the ""prog" args" form).
 $log = Join-Path $root "modeldock.log"
+# Rotate at startup, one previous generation (like codex-router's log-rotation):
+# the log is append-only for the life of the process, so a cap on growth can only
+# be applied between runs. 32 MB keeps roughly a month of daily use. Rotation is
+# best-effort: a previous gateway whose handles have not released must not fail
+# this hidden start.
+if ((Test-Path -LiteralPath $log) -and ((Get-Item -LiteralPath $log).Length -gt 32MB)) {
+  try {
+    Move-Item -LiteralPath $log -Destination "$log.1" -Force
+  } catch {
+    Write-Output "WARNING: could not rotate modeldock.log: $($_.Exception.Message)"
+  }
+}
 Start-Process -FilePath "cmd.exe" -ArgumentList "/c", "`"`"$nodeExe`" `"$server`" >> `"$log`" 2>&1`"" -WorkingDirectory $root -WindowStyle Hidden
 '@ | Out-File -FilePath $launcher -Encoding ascii
 
@@ -216,6 +257,14 @@ $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $PSScriptRoot
 $envFile = Join-Path $root ".env"
+
+# Status lines go to both stdout and stderr. Callers (CI, the model shell, the
+# dashboard) sometimes capture only one stream; a hidden launcher must never
+# fail silently.
+function Write-Status($message) {
+  Write-Output $message
+  [Console]::Error.WriteLine($message)
+}
 
 $port = 4097
 if (Test-Path $envFile) {
@@ -246,8 +295,8 @@ if ($listener) {
         $ownerRoot = [System.IO.Path]::GetFullPath($owner.root)
         $thisRoot = [System.IO.Path]::GetFullPath($root)
         if ($ownerRoot -ne $thisRoot) {
-          Write-Output "ERROR: port $port is owned by a gateway from '$ownerRoot' (PID $oldPid); this script runs from '$thisRoot'."
-          Write-Output "Re-run with -Force to take the port over deliberately."
+          Write-Status "ERROR: port $port is owned by a gateway from '$ownerRoot' (PID $oldPid); this script runs from '$thisRoot'."
+          Write-Status "Re-run with -Force to take the port over deliberately."
           exit 1
         }
       }
@@ -255,20 +304,56 @@ if ($listener) {
       # Unreadable owner file: fall through and behave as before.
     }
   }
-  Write-Output "restart.ps1: stopping gateway (PID $oldPid, port $port)"
+  Write-Status "restart.ps1: stopping gateway (PID $oldPid, port $port)"
   Stop-Process -Id $oldPid -Force
   for ($i = 0; $i -lt 20; $i += 1) {
     Start-Sleep -Milliseconds 250
     if (-not (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue)) { break }
   }
 } else {
-  Write-Output "restart.ps1: no gateway on port $port; starting fresh"
+  Write-Status "restart.ps1: no gateway on port $port; starting fresh"
 }
 
-$logDir = Join-Path $env:TEMP "modeldock"
-New-Item -ItemType Directory -Force -Path $logDir | Out-Null
-$stdout = Join-Path $logDir "gateway.log"
-$stderr = Join-Path $logDir "gateway.err.log"
+$log = Join-Path $root "modeldock.log"
+
+# The old gateway's stdout/stderr handles can linger for a moment after
+# Stop-Process. Wait for the log to become writable BEFORE rotating: an
+# in-place Move-Item on a still-locked file fails, and that failure used to
+# abort the restart. If it stays locked, fall back to a per-run log file so
+# the redirect never races the dying process's file handles.
+function Test-WritableFile($file) {
+  try {
+    $probe = [System.IO.File]::Open($file, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+    $probe.Close()
+    return $true
+  } catch {
+    return $false
+  }
+}
+$logsReady = $false
+for ($i = 0; $i -lt 20; $i += 1) {
+  if (Test-WritableFile $log) {
+    $logsReady = $true
+    break
+  }
+  Start-Sleep -Milliseconds 250
+}
+if (-not $logsReady) {
+  $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+  $log = Join-Path $root "modeldock-$stamp.log"
+  Write-Status "WARNING: modeldock.log was still locked; using per-run log ($log)"
+} elseif ((Test-Path -LiteralPath $log) -and ((Get-Item -LiteralPath $log).Length -gt 32MB)) {
+  # Rotate at startup, one previous generation (same policy as start-hidden.ps1):
+  # the log is append-only for the life of the process, so a cap on growth can
+  # only be applied between runs. 32 MB keeps roughly a month of daily use.
+  try {
+    Move-Item -LiteralPath $log -Destination "$log.1" -Force
+  } catch {
+    # Rotation is best-effort now that the lock wait passed; a raced lock must
+    # not turn a restart into a failure.
+    Write-Status "WARNING: could not rotate modeldock.log: $($_.Exception.Message)"
+  }
+}
 
 # Prefer an explicit path, then a bundled Node under <root>\node (the installer
 # downloads Node 22 LTS there when none is on PATH), then PATH.
@@ -287,7 +372,7 @@ if (-not $nodeExe) {
 }
 if (-not $nodeExe) { $nodeExe = (Get-Command node -ErrorAction SilentlyContinue).Source }
 if (-not $nodeExe) {
-  Write-Output "ERROR: node.exe not found; install Node 22+ or re-run the ModelDock installer"
+  Write-Status "ERROR: node.exe not found; install Node 22+ or re-run the ModelDock installer"
   exit 1
 }
 
@@ -297,30 +382,50 @@ if (-not $nodeExe) {
 $server = Join-Path $root "src\server.mjs"
 if (-not (Test-Path -LiteralPath $server)) { $server = Join-Path $root "dist\modeldock.mjs" }
 
-Start-Process -FilePath $nodeExe -ArgumentList $server -WorkingDirectory $root -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
-Write-Output "restart.ps1: started gateway from $root (logs: $logDir)"
+try {
+  # Quote both paths: an installed layout under a home dir with a space
+  # (e.g. "C:\Users\Chen Bao\.modeldock") would otherwise be split by node's
+  # CRT into two argv entries and fail with "Cannot find module". cmd.exe does
+  # the >> redirection so stdout and stderr share the same log file as the
+  # start-hidden launcher (and the "check modeldock.log" guidance).
+  Start-Process -FilePath "cmd.exe" -ArgumentList "/c", "`"`"$nodeExe`" `"$server`" >> `"$log`" 2>&1`"" -WorkingDirectory $root -WindowStyle Hidden
+} catch {
+  Write-Status "ERROR: failed to start gateway: $($_.Exception.Message)"
+  exit 1
+}
+Write-Status "restart.ps1: started gateway from $root (logs: $log)"
 
 for ($i = 0; $i -lt 40; $i += 1) {
   Start-Sleep -Milliseconds 250
   try {
-    $health = Invoke-RestMethod -Uri "http://127.0.0.1:$port/healthz" -TimeoutSec 2
-    if ($health.ok) {
-      Write-Output "restart.ps1: gateway healthy at http://127.0.0.1:$port"
+    Invoke-WebRequest -Uri "http://127.0.0.1:$port/healthz" -TimeoutSec 2 -UseBasicParsing | Out-Null
+    Write-Status "restart.ps1: gateway healthy at http://127.0.0.1:$port"
+    exit 0
+  } catch {
+    # A returned HTTP status (e.g. 503 before a token is configured) still proves
+    # the gateway is up and listening - only a connection failure means it is not.
+    if ($_.Exception.Response) {
+      Write-Status "restart.ps1: gateway up at http://127.0.0.1:$port (awaiting token)"
       exit 0
     }
-  } catch {
-    # Gateway still booting; keep polling.
+    # Otherwise still booting / connection refused; keep polling.
   }
 }
 
-Write-Output "ERROR: gateway did not become healthy within 10s"
-if (Test-Path $stderr) { Get-Content $stderr -Tail 10 -ErrorAction SilentlyContinue }
+Write-Status "ERROR: gateway did not become healthy within 10s"
+if (Test-Path $log) {
+  $tail = Get-Content $log -Tail 10 -ErrorAction SilentlyContinue
+  if ($tail) { $tail | ForEach-Object { [Console]::Error.WriteLine($_) } }
+}
 exit 1
 '@ | Out-File -FilePath $restart -Encoding ascii
 
 # Manual recovery menu: restart the gateway or restore the native Codex route.
 $recover = Join-Path $root "scripts\recover.ps1"
 @'
+# ModelDock manual recovery menu.
+# Choose gateway restart or restore the last native Codex configuration.
+
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 $port = 4097
@@ -328,13 +433,19 @@ $envFile = Join-Path $root ".env"
 if (Test-Path -LiteralPath $envFile) {
   $line = Select-String -Path $envFile -Pattern '^MODELDOCK_PORT=' | Select-Object -First 1
   $parsed = 0
-  if ($line -and [int]::TryParse(($line.Line -replace '^MODELDOCK_PORT=', ''), [ref]$parsed) -and $parsed -gt 0) { $port = $parsed }
+  if ($line -and [int]::TryParse(($line.Line -replace '^MODELDOCK_PORT=', ''), [ref]$parsed) -and $parsed -gt 0) {
+    $port = $parsed
+  }
 }
 
-# Start-at-login repair: when the autostart decision mark exists but the Run key
-# is gone (registry cleanup, earlier toggle-off that deleted the key), re-write
-# the login entry before restarting the gateway. A missing mark means no decision
-# was ever recorded, so an explicit off is never silently overridden.
+# Start-at-login repair: when a start-at-login decision was recorded (the mark
+# exists) but the Run key is gone - registry cleanup, or an earlier toggle-off that
+# deleted the key - re-write the login entry before restarting the gateway.
+# By design autostart is a re-asserted default: the gateway re-enables it on every
+# version change (see initAutostartDefault), and this repair restores it on every
+# recover run as well. A toggle-off is therefore NOT permanent across a recover or
+# an update - to keep it off, turn it off again afterward. Only a missing mark (no
+# decision ever recorded) is left untouched.
 $autostartKeyName = if ($env:MODELDOCK_AUTOSTART_KEY) { $env:MODELDOCK_AUTOSTART_KEY } else { "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" }
 $autostartValueName = if ($env:MODELDOCK_AUTOSTART_NAME) { $env:MODELDOCK_AUTOSTART_NAME } else { "ModelDock" }
 $autostartStateDir = if ($env:MODELDOCK_STATE_DIR) { $env:MODELDOCK_STATE_DIR } else { $root }
@@ -365,45 +476,151 @@ function Repair-Autostart {
   } finally { if ($runKey) { $runKey.Close() } }
 }
 
+function Restore-PreviousUpdate {
+  $rollbackRoot = Join-Path $root ".modeldock-rollback"
+  $marker = Join-Path $rollbackRoot "current"
+  if (-not (Test-Path -LiteralPath $marker -PathType Leaf)) { return $false }
+  $name = [System.IO.File]::ReadAllText($marker).Trim()
+  if (-not $name -or [System.IO.Path]::GetFileName($name) -ne $name) { throw "invalid update rollback marker" }
+  $rollbackDir = Join-Path $rollbackRoot $name
+  $manifestPath = Join-Path $rollbackDir "manifest.json"
+  $manifest = [System.IO.File]::ReadAllText($manifestPath) | ConvertFrom-Json
+  $rootPrefix = [System.IO.Path]::GetFullPath($root).TrimEnd('\') + '\'
+  $rollbackPrefix = [System.IO.Path]::GetFullPath($rollbackDir).TrimEnd('\') + '\'
+  $prepared = @()
+  $applied = 0
+  try {
+    foreach ($entry in $manifest.files) {
+      $relative = ([string]$entry.path).Replace('/', '\')
+      $target = [System.IO.Path]::GetFullPath((Join-Path $root $relative))
+      if (-not $target.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "rollback path escaped install root: $relative"
+      }
+      $stage = "$target.rollback-stage-$PID"
+      $current = "$target.rollback-current-$PID"
+      Remove-Item -LiteralPath $stage, $current -Force -ErrorAction SilentlyContinue
+      [System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($target)) | Out-Null
+      $currentExisted = Test-Path -LiteralPath $target -PathType Leaf
+      if ($currentExisted) { Copy-Item -LiteralPath $target -Destination $current -Force }
+      $restore = [bool]$entry.existed
+      if ($restore) {
+        $source = [System.IO.Path]::GetFullPath((Join-Path $rollbackDir $relative))
+        if (-not $source.StartsWith($rollbackPrefix, [System.StringComparison]::OrdinalIgnoreCase) -or
+            -not (Test-Path -LiteralPath $source -PathType Leaf)) {
+          throw "rollback file is missing: $relative"
+        }
+        Copy-Item -LiteralPath $source -Destination $stage -Force
+      }
+      $prepared += [pscustomobject]@{ Target = $target; Stage = $stage; Current = $current; CurrentExisted = $currentExisted; Restore = $restore }
+    }
+    foreach ($item in $prepared) {
+      if ($item.Restore) {
+        if (Test-Path -LiteralPath $item.Target -PathType Leaf) {
+          [System.IO.File]::Replace($item.Stage, $item.Target, $null)
+        } else {
+          Move-Item -LiteralPath $item.Stage -Destination $item.Target
+        }
+      } elseif (Test-Path -LiteralPath $item.Target) {
+        Remove-Item -LiteralPath $item.Target -Force
+      }
+      $applied += 1
+    }
+  } catch {
+    for ($index = $applied - 1; $index -ge 0; $index -= 1) {
+      $item = $prepared[$index]
+      if ($item.CurrentExisted) { Copy-Item -LiteralPath $item.Current -Destination $item.Target -Force }
+      else { Remove-Item -LiteralPath $item.Target -Force -ErrorAction SilentlyContinue }
+    }
+    throw
+  } finally {
+    foreach ($item in $prepared) {
+      Remove-Item -LiteralPath $item.Stage, $item.Current -Force -ErrorAction SilentlyContinue
+    }
+  }
+  return $true
+}
+
 function Restart-Gateway {
   Repair-Autostart
-  & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root "scripts\restart.ps1")
-  if ($LASTEXITCODE -ne 0) { throw "gateway restart failed" }
+  $restart = Join-Path $root "scripts\restart.ps1"
+  if (-not (Test-Path -LiteralPath $restart)) {
+    throw "restart.ps1 is missing from $root"
+  }
+  & powershell -NoProfile -ExecutionPolicy Bypass -File $restart
+  if ($LASTEXITCODE -ne 0) {
+    # A bundle and its bridge/lifecycle helpers are one versioned unit. Restore
+    # the complete snapshot transactionally before retrying the old restart.
+    if (Restore-PreviousUpdate) {
+      Write-Output "New installed version did not become healthy; restored the complete previous version set."
+      & powershell -NoProfile -ExecutionPolicy Bypass -File $restart
+      if ($LASTEXITCODE -eq 0) { return }
+    }
+    throw "gateway restart failed"
+  }
 }
+
 function Restore-Native {
+  $uri = "http://127.0.0.1:$port/api/config/disable"
   try {
-    Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$port/api/config/disable" -TimeoutSec 3 | Out-Null
+    Invoke-RestMethod -Method Post -Uri $uri -TimeoutSec 3 | Out-Null
     Write-Output "Codex native route restored through the running gateway."
     return
-  } catch { Write-Output "Gateway is unavailable; restoring from the local backup." }
+  } catch {
+    Write-Output "Gateway is unavailable; restoring from the local backup."
+  }
+
   $codexHome = if ($env:MODELDOCK_CODEX_HOME) { $env:MODELDOCK_CODEX_HOME } elseif ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE ".codex" }
   $statePath = Join-Path $codexHome "modeldock\config-switch-state.json"
   if (-not (Test-Path -LiteralPath $statePath)) { throw "ModelDock switch state was not found: $statePath" }
   $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
-  if (-not $state.enabled) { Write-Output "Codex is already on the native route."; return }
+  if (-not $state.enabled) {
+    Write-Output "Codex is already on the native route."
+    return
+  }
   $backup = [System.IO.Path]::GetFullPath([string]$state.backupPath)
   if (-not (Test-Path -LiteralPath $backup)) { throw "ModelDock backup is missing: $backup" }
   $config = Join-Path $codexHome "config.toml"
   if (Test-Path -LiteralPath $config) {
-    Copy-Item -LiteralPath $config -Destination "$config.native-recovery-$(Get-Date -Format yyyyMMdd-HHmmss).bak"
-    if (-not $state.originalExisted) { Remove-Item -LiteralPath $config -Force } else { Copy-Item -LiteralPath $backup -Destination $config -Force }
-  } elseif ($state.originalExisted) { Copy-Item -LiteralPath $backup -Destination $config -Force }
-  $state.enabled = $false; $state.restartRequired = $true; $state.lastBackupPath = $backup
-  $state.changedAt = (Get-Date).ToUniversalTime().ToString("o")
+    $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+    Copy-Item -LiteralPath $config -Destination "$config.native-recovery-$stamp.bak"
+    if (-not $state.originalExisted) { Remove-Item -LiteralPath $config -Force }
+    else { Copy-Item -LiteralPath $backup -Destination $config -Force }
+  } elseif ($state.originalExisted) {
+    Copy-Item -LiteralPath $backup -Destination $config -Force
+  }
+  # Rebuild the state as a fresh ordered map: Windows PowerShell 5.1 throws when a
+  # property that ConvertFrom-Json did not create (here lastBackupPath) is set via
+  # dot assignment, so copy the existing keys and override the ones we change.
+  $out = [ordered]@{}
+  foreach ($p in $state.PSObject.Properties) { $out[$p.Name] = $p.Value }
+  $out['enabled'] = $false
+  $out['restartRequired'] = $true
+  $out['lastBackupPath'] = $backup
+  $out['changedAt'] = (Get-Date).ToUniversalTime().ToString("o")
   $tmp = "$statePath.$PID.tmp"
-  $state | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $tmp -Encoding utf8
+  # Write UTF-8 without a BOM: the gateway reads this file with Node's utf8 and a
+  # BOM would make JSON.parse fail (Set-Content -Encoding utf8 emits a BOM on 5.1).
+  [System.IO.File]::WriteAllText($tmp, ($out | ConvertTo-Json -Depth 10), (New-Object System.Text.UTF8Encoding($false)))
   Move-Item -LiteralPath $tmp -Destination $statePath -Force
   Write-Output "Codex native route restored from $backup"
   Write-Output "Fully quit and restart Codex."
 }
+
+Write-Output ""
 Write-Output "ModelDock manual recovery"
 Write-Output "1. Restart ModelDock gateway"
 Write-Output "2. Restore Codex native route"
 Write-Output "Q. Quit"
 $choice = (Read-Host "Choose 1, 2, or Q").Trim().ToUpperInvariant()
 try {
-  if ($choice -eq "1") { Restart-Gateway } elseif ($choice -eq "2") { Restore-Native } elseif ($choice -ne "Q" -and $choice -ne "") { throw "Unknown choice: $choice" }
-} catch { Write-Error $_.Exception.Message; exit 1 }
+  if ($choice -eq "1") { Restart-Gateway }
+  elseif ($choice -eq "2") { Restore-Native }
+  elseif ($choice -eq "Q" -or $choice -eq "") { exit 0 }
+  else { throw "Unknown choice: $choice" }
+} catch {
+  Write-Error $_.Exception.Message
+  exit 1
+}
 '@ | Out-File -FilePath $recover -Encoding ascii
 
 # 2.5. Install the content-to-video skill into the Codex skills directory.

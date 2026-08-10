@@ -12,17 +12,18 @@ import {
   AUTO_COMPACT_TOKEN_LIMIT,
 } from "./profiles.mjs";
 
-test("publishedSlugFor keeps bare ids unless a collision needs the provider suffix", () => {
+test("publishedSlugFor owner-qualifies every owned model", () => {
   const luna = OPENCODE_GO_PROFILE.availableModels.find((model) => model.id === "gpt-5.6-luna");
   assert.equal(luna.ownerQualified, true, "our Luna must stay out of the bare native gpt-5.6-luna slot");
   assert.equal(publishedSlugFor("opencode-go", luna), "gpt-5.6-luna@opencode-go");
   assert.equal(publishedSlugFor("opencode-go", "gpt-5.6-luna"), "gpt-5.6-luna@opencode-go", "string ids resolve through the profile entry too");
-  assert.equal(publishedSlugFor("opencode-go", "deepseek-v4-flash"), "deepseek-v4-flash");
+  assert.equal(publishedSlugFor("opencode-go", "deepseek-v4-flash"), "deepseek-v4-flash@opencode-go", "the default provider qualifies its own models too");
   assert.equal(
     publishedSlugFor("deepseek-official", "deepseek-v4-flash"),
     "deepseek-v4-flash@deepseek-official",
     "a duplicate in another provider is owner-qualified",
   );
+  assert.equal(publishedSlugFor("opencode-go", "gpt-5.6-sol"), "gpt-5.6-sol", "an id no profile owns passes through untouched (native GPT)");
 });
 
 test("exposes every registered profile through the registry", () => {
@@ -72,7 +73,7 @@ test("model catalog is generated per profile with distinct comp hashes", () => {
   const goCatalog = OPENCODE_GO_PROFILE.modelCatalog({ mainModel: "deepseek-v4-flash", visionModel: "gpt-5.6-luna", baseInstructions: instructions });
   const officialCatalog = DEEPSEEK_OFFICIAL_PROFILE.modelCatalog({ mainModel: "deepseek-v4-flash", baseInstructions: instructions });
   assert.ok(goCatalog.models.length >= 1, "catalog includes the main model plus every available model");
-  assert.equal(goCatalog.models[0].slug, "deepseek-v4-flash");
+  assert.equal(goCatalog.models[0].slug, "deepseek-v4-flash@opencode-go");
   assert.equal(goCatalog.models[0].comp_hash, "modeldock-opencode-go-v1");
   assert.equal(goCatalog.models[0].supports_search_tool, false);
   assert.equal(goCatalog.models[0].default_reasoning_level, "high");

@@ -39,8 +39,14 @@ if (-not $nodeExe) {
 $log = Join-Path $root "modeldock.log"
 # Rotate at startup, one previous generation (like codex-router's log-rotation):
 # the log is append-only for the life of the process, so a cap on growth can only
-# be applied between runs. 32 MB keeps roughly a month of daily use.
+# be applied between runs. 32 MB keeps roughly a month of daily use. Rotation is
+# best-effort: a previous gateway whose handles have not released must not fail
+# this hidden start.
 if ((Test-Path -LiteralPath $log) -and ((Get-Item -LiteralPath $log).Length -gt 32MB)) {
+  try {
     Move-Item -LiteralPath $log -Destination "$log.1" -Force
+  } catch {
+    Write-Output "WARNING: could not rotate modeldock.log: $($_.Exception.Message)"
+  }
 }
 Start-Process -FilePath "cmd.exe" -ArgumentList "/c", "`"`"$nodeExe`" `"$server`" >> `"$log`" 2>&1`"" -WorkingDirectory $root -WindowStyle Hidden

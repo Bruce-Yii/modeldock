@@ -22,6 +22,7 @@ function tomlString(value) {
 // fields live inside a sentinel block so detection and restore are exact.
 const MANAGED_BEGIN = /^\s*#\s*BEGIN\s+modeldock-managed\s*(?:#.*)?$/m;
 const MANAGED_END = /^\s*#\s*END\s+modeldock-managed\s*(?:#.*)?$/m;
+const MANAGED_ORIGINAL_EXISTED = /^\s*#\s*ModelDock original config existed:\s*(true|false)\s*$/im;
 const CODERX_ROUTER_BEGIN = /^\s*#\s*BEGIN\s+codex-router-managed\s*(?:#.*)?$/m;
 
 // Every top-level key ModelDock may write. Restoring a backup puts the user's own
@@ -186,7 +187,7 @@ function setTopLevel(lines, key, value) {
 // base URL is redirected to the local gate, and the realtime endpoints point at
 // OpenAI so Codex Voice never dials the loopback. The catalog file keeps naming
 // our models in the App picker (openai/codex#32119 only affects custom providers).
-export function buildManagedCodexConfig(source, { baseUrl, model, catalogFile = "", mcpUrl = "", mcpCommand = "", mcpArgs = [], mcpEnv = {} }) {
+export function buildManagedCodexConfig(source, { baseUrl, model, catalogFile = "", mcpUrl = "", mcpCommand = "", mcpArgs = [], mcpEnv = {}, originalExisted = true }) {
   const newline = source.includes("\r\n") ? "\r\n" : "\n";
   let lines = removeManagedRoute(source.replace(/\r\n/g, "\n").split("\n"));
   while (lines.length && !lines.at(-1).trim()) lines.pop();
@@ -195,6 +196,7 @@ export function buildManagedCodexConfig(source, { baseUrl, model, catalogFile = 
   const managed = [
     "# BEGIN modeldock-managed",
     "# Managed by ModelDock: keeps the built-in openai provider and points it at the local gate.",
+    `# ModelDock original config existed: ${originalExisted ? "true" : "false"}`,
     `openai_base_url = ${tomlString(baseUrl)}`,
   ];
   if (catalogFile) managed.push(`model_catalog_json = ${tomlString(catalogFile)}`);
@@ -329,6 +331,27 @@ export class CodexConfigSwitcher {
       if (error.code !== "ENOENT") throw error;
       originalExisted = false;
     }
+    // Crash recovery: enable() only runs with state.enabled false, but a crash
+    // between the config write and the state write of a prior enable() leaves the
+    // config already managed while state says disabled. Backing that up as the
+    // "original" would poison the backup chain - a later disable, seeing the
+    // managed hash match, would restore a still-managed config and leave Codex
+    // routed at a dead gateway. Strip our managed route first so the backup we take
+    // is the true pre-ModelDock baseline.
+    let originalWasManaged = false;
+    if (originalExisted && hasManagedRoute(original)) {
+      originalWasManaged = true;
+      const existenceMarker = MANAGED_ORIGINAL_EXISTED.exec(original)?.[1]?.toLowerCase();
+      const nl = original.includes("\r\n") ? "\r\n" : "\n";
+      original = `${removeManagedRoute(original.replace(/\r\n/g, "\n").split("\n")).join("\n").replace(/\n/g, nl)}${nl}`;
+      // New managed configs carry this crash-recovery marker. For older configs,
+      // a managed-only file is the best available proof that config.toml did not
+      // exist before enable() wrote it.
+      if (existenceMarker === "false" || (!existenceMarker && !original.trim())) {
+        originalExisted = false;
+        original = "";
+      }
+    }
     if (hasCodexRouterBlock(original)) {
       throw Object.assign(
         new Error("codex-router also manages openai_base_url; disable its integration before enabling ModelDock."),
@@ -341,8 +364,14 @@ export class CodexConfigSwitcher {
     if (originalExisted) assertConfigWriteSafe(original);
 
     const backupPath = path.join(this.codexHome, `config.toml.modeldock-backup-${timestamp()}-${randomUUID().slice(0, 8)}`);
-    if (originalExisted) await copyFile(this.configPath, backupPath);
-    else await writeFile(backupPath, "", { encoding: "utf8", flag: "wx", mode: 0o600 });
+    if (originalExisted && originalWasManaged) {
+      // Persist the stripped baseline, not the managed file still on disk.
+      await writeFile(backupPath, original, { encoding: "utf8", mode: 0o600 });
+    } else if (originalExisted) {
+      await copyFile(this.configPath, backupPath);
+    } else {
+      await writeFile(backupPath, "", { encoding: "utf8", flag: "wx", mode: 0o600 });
+    }
 
     const managed = buildManagedCodexConfig(original, {
       baseUrl: this.baseUrl,
@@ -352,6 +381,7 @@ export class CodexConfigSwitcher {
       mcpCommand: this.mcpCommand,
       mcpArgs: this.mcpArgs,
       mcpEnv: this.mcpEnv,
+      originalExisted,
     });
     // Defensive: the writer must never emit duplicates either (setTopLevel
     // dedupes `model`, the managed block owns its keys, but a future edit could

@@ -13,10 +13,14 @@ if (Test-Path -LiteralPath $envFile) {
   }
 }
 
-# Start-at-login repair: when the autostart decision mark exists but the Run key
-# is gone (registry cleanup, earlier toggle-off that deleted the key), re-write
-# the login entry before restarting the gateway. A missing mark means no decision
-# was ever recorded, so an explicit off is never silently overridden.
+# Start-at-login repair: when a start-at-login decision was recorded (the mark
+# exists) but the Run key is gone - registry cleanup, or an earlier toggle-off that
+# deleted the key - re-write the login entry before restarting the gateway.
+# By design autostart is a re-asserted default: the gateway re-enables it on every
+# version change (see initAutostartDefault), and this repair restores it on every
+# recover run as well. A toggle-off is therefore NOT permanent across a recover or
+# an update - to keep it off, turn it off again afterward. Only a missing mark (no
+# decision ever recorded) is left untouched.
 $autostartKeyName = if ($env:MODELDOCK_AUTOSTART_KEY) { $env:MODELDOCK_AUTOSTART_KEY } else { "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" }
 $autostartValueName = if ($env:MODELDOCK_AUTOSTART_NAME) { $env:MODELDOCK_AUTOSTART_NAME } else { "ModelDock" }
 $autostartStateDir = if ($env:MODELDOCK_STATE_DIR) { $env:MODELDOCK_STATE_DIR } else { $root }
@@ -47,6 +51,70 @@ function Repair-Autostart {
   } finally { if ($runKey) { $runKey.Close() } }
 }
 
+function Restore-PreviousUpdate {
+  $rollbackRoot = Join-Path $root ".modeldock-rollback"
+  $marker = Join-Path $rollbackRoot "current"
+  if (-not (Test-Path -LiteralPath $marker -PathType Leaf)) { return $false }
+  $name = [System.IO.File]::ReadAllText($marker).Trim()
+  if (-not $name -or [System.IO.Path]::GetFileName($name) -ne $name) { throw "invalid update rollback marker" }
+  $rollbackDir = Join-Path $rollbackRoot $name
+  $manifestPath = Join-Path $rollbackDir "manifest.json"
+  $manifest = [System.IO.File]::ReadAllText($manifestPath) | ConvertFrom-Json
+  $rootPrefix = [System.IO.Path]::GetFullPath($root).TrimEnd('\') + '\'
+  $rollbackPrefix = [System.IO.Path]::GetFullPath($rollbackDir).TrimEnd('\') + '\'
+  $prepared = @()
+  $applied = 0
+  try {
+    foreach ($entry in $manifest.files) {
+      $relative = ([string]$entry.path).Replace('/', '\')
+      $target = [System.IO.Path]::GetFullPath((Join-Path $root $relative))
+      if (-not $target.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "rollback path escaped install root: $relative"
+      }
+      $stage = "$target.rollback-stage-$PID"
+      $current = "$target.rollback-current-$PID"
+      Remove-Item -LiteralPath $stage, $current -Force -ErrorAction SilentlyContinue
+      [System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($target)) | Out-Null
+      $currentExisted = Test-Path -LiteralPath $target -PathType Leaf
+      if ($currentExisted) { Copy-Item -LiteralPath $target -Destination $current -Force }
+      $restore = [bool]$entry.existed
+      if ($restore) {
+        $source = [System.IO.Path]::GetFullPath((Join-Path $rollbackDir $relative))
+        if (-not $source.StartsWith($rollbackPrefix, [System.StringComparison]::OrdinalIgnoreCase) -or
+            -not (Test-Path -LiteralPath $source -PathType Leaf)) {
+          throw "rollback file is missing: $relative"
+        }
+        Copy-Item -LiteralPath $source -Destination $stage -Force
+      }
+      $prepared += [pscustomobject]@{ Target = $target; Stage = $stage; Current = $current; CurrentExisted = $currentExisted; Restore = $restore }
+    }
+    foreach ($item in $prepared) {
+      if ($item.Restore) {
+        if (Test-Path -LiteralPath $item.Target -PathType Leaf) {
+          [System.IO.File]::Replace($item.Stage, $item.Target, $null)
+        } else {
+          Move-Item -LiteralPath $item.Stage -Destination $item.Target
+        }
+      } elseif (Test-Path -LiteralPath $item.Target) {
+        Remove-Item -LiteralPath $item.Target -Force
+      }
+      $applied += 1
+    }
+  } catch {
+    for ($index = $applied - 1; $index -ge 0; $index -= 1) {
+      $item = $prepared[$index]
+      if ($item.CurrentExisted) { Copy-Item -LiteralPath $item.Current -Destination $item.Target -Force }
+      else { Remove-Item -LiteralPath $item.Target -Force -ErrorAction SilentlyContinue }
+    }
+    throw
+  } finally {
+    foreach ($item in $prepared) {
+      Remove-Item -LiteralPath $item.Stage, $item.Current -Force -ErrorAction SilentlyContinue
+    }
+  }
+  return $true
+}
+
 function Restart-Gateway {
   Repair-Autostart
   $restart = Join-Path $root "scripts\restart.ps1"
@@ -54,7 +122,16 @@ function Restart-Gateway {
     throw "restart.ps1 is missing from $root"
   }
   & powershell -NoProfile -ExecutionPolicy Bypass -File $restart
-  if ($LASTEXITCODE -ne 0) { throw "gateway restart failed" }
+  if ($LASTEXITCODE -ne 0) {
+    # A bundle and its bridge/lifecycle helpers are one versioned unit. Restore
+    # the complete snapshot transactionally before retrying the old restart.
+    if (Restore-PreviousUpdate) {
+      Write-Output "New installed version did not become healthy; restored the complete previous version set."
+      & powershell -NoProfile -ExecutionPolicy Bypass -File $restart
+      if ($LASTEXITCODE -eq 0) { return }
+    }
+    throw "gateway restart failed"
+  }
 }
 
 function Restore-Native {
@@ -86,12 +163,19 @@ function Restore-Native {
   } elseif ($state.originalExisted) {
     Copy-Item -LiteralPath $backup -Destination $config -Force
   }
-  $state.enabled = $false
-  $state.restartRequired = $true
-  $state.lastBackupPath = $backup
-  $state.changedAt = (Get-Date).ToUniversalTime().ToString("o")
+  # Rebuild the state as a fresh ordered map: Windows PowerShell 5.1 throws when a
+  # property that ConvertFrom-Json did not create (here lastBackupPath) is set via
+  # dot assignment, so copy the existing keys and override the ones we change.
+  $out = [ordered]@{}
+  foreach ($p in $state.PSObject.Properties) { $out[$p.Name] = $p.Value }
+  $out['enabled'] = $false
+  $out['restartRequired'] = $true
+  $out['lastBackupPath'] = $backup
+  $out['changedAt'] = (Get-Date).ToUniversalTime().ToString("o")
   $tmp = "$statePath.$PID.tmp"
-  $state | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $tmp -Encoding utf8
+  # Write UTF-8 without a BOM: the gateway reads this file with Node's utf8 and a
+  # BOM would make JSON.parse fail (Set-Content -Encoding utf8 emits a BOM on 5.1).
+  [System.IO.File]::WriteAllText($tmp, ($out | ConvertTo-Json -Depth 10), (New-Object System.Text.UTF8Encoding($false)))
   Move-Item -LiteralPath $tmp -Destination $statePath -Force
   Write-Output "Codex native route restored from $backup"
   Write-Output "Fully quit and restart Codex."

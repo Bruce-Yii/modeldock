@@ -1,7 +1,13 @@
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
+
+// Async exec so the model-refresh timer and startup capture never block the event
+// loop of a live relay: `codex debug models` can take seconds (or hang to its
+// timeout), and a synchronous call would stall every in-flight SSE stream.
+const execFileAsync = promisify(execFile);
 
 // The Codex App's picker list is a replacement, not a merge: with
 // `model_catalog_json` set it shows exactly that file, otherwise it shows the
@@ -53,35 +59,36 @@ function desktopBundledCodex() {
   return desktopCodexCandidates().find((candidate) => existsSync(candidate)) || null;
 }
 
-function pathCodex() {
+async function pathCodex() {
   if (process.platform === "win32") return null;
   try {
-    const output = execFileSync("which", ["codex"], {
+    const { stdout } = await execFileAsync("which", ["codex"], {
       encoding: "utf8",
       timeout: 5_000,
       windowsHide: true,
     });
-    const candidate = String(output || "").trim().split(/\r?\n/)[0];
+    const candidate = String(stdout || "").trim().split(/\r?\n/)[0];
     return candidate && existsSync(candidate) ? candidate : null;
   } catch {
     return null;
   }
 }
 
-function resolveCodexBinary() {
+async function resolveCodexBinary() {
   if (process.env.CODEX_BIN && existsSync(process.env.CODEX_BIN)) return process.env.CODEX_BIN;
-  return desktopBundledCodex() || pathCodex();
+  return desktopBundledCodex() || (await pathCodex());
 }
 
-function runCodex(args) {
-  const binary = resolveCodexBinary();
+async function runCodex(args, timeout = 30_000) {
+  const binary = await resolveCodexBinary();
   if (!binary) return null;
-  return execFileSync(binary, args, {
+  const { stdout } = await execFileAsync(binary, args, {
     encoding: "utf8",
-    timeout: 30_000,
+    timeout,
     maxBuffer: 64 * 1024 * 1024,
     windowsHide: true,
   });
+  return stdout;
 }
 
 export function nativeCatalogPath(config) {
@@ -116,9 +123,9 @@ export function nativeModelSlugs(config) {
   return slugs;
 }
 
-export function codexVersion() {
+export async function codexVersion() {
   try {
-    const out = runCodex(["--version"]);
+    const out = await runCodex(["--version"], 5_000);
     return String(out || "").trim().split(/\s+/)[0] || "";
   } catch {
     return "";
@@ -130,9 +137,9 @@ export function codexVersion() {
 // next refresh. Returns the captured models, or null when the CLI is missing
 // or the capture failed (the catalog then simply keeps the last good cache).
 export async function refreshNativeCatalog(config) {
-  if (!resolveCodexBinary()) return null;
+  if (!(await resolveCodexBinary())) return null;
   try {
-    const output = runCodex(["debug", "models", "--bundled"]);
+    const output = await runCodex(["debug", "models", "--bundled"]);
     const parsed = JSON.parse(output);
     if (!Array.isArray(parsed?.models) || parsed.models.length === 0) return null;
     const file = nativeCatalogPath(config);
@@ -140,7 +147,7 @@ export async function refreshNativeCatalog(config) {
     const temporary = `${file}.tmp.${process.pid}`;
     writeFileSync(
       temporary,
-      JSON.stringify({ captured_with: codexVersion(), models: parsed.models }, null, 2),
+      JSON.stringify({ captured_with: await codexVersion(), models: parsed.models }, null, 2),
       "utf8",
     );
     renameSync(temporary, file);

@@ -1,6 +1,41 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { compareVersions, parseLatestRelease, parseSumsFile, localVersion, createUpdater } from "./update.mjs";
+
+function responseBody(body) {
+  const bytes = Buffer.from(body);
+  return {
+    ok: true,
+    status: 200,
+    headers: { get: () => String(bytes.length) },
+    arrayBuffer: async () => bytes,
+  };
+}
+
+function releaseResponse(tag, assets, sums = "") {
+  const releaseAssets = { ...assets, ...(sums ? { SHA256SUMS: sums } : {}) };
+  return {
+    ok: true,
+    status: 200,
+    json: async () => ({
+      tag_name: `v${tag}`,
+      html_url: `https://example.com/releases/v${tag}`,
+      assets: Object.entries(releaseAssets).map(([name, body]) => ({
+        name,
+        browser_download_url: `https://assets.example/${tag}/${name}`,
+        body,
+      })),
+    }),
+  };
+}
+
+function sha256(body) {
+  return createHash("sha256").update(body).digest("hex");
+}
 
 test("compareVersions orders dotted versions numerically", () => {
   assert.ok(compareVersions("0.2.0", "0.1.0") > 0);
@@ -96,4 +131,263 @@ test("createUpdater.check records errors without throwing", async () => {
 test("createUpdater.apply refuses when no update is available", async () => {
   const updater = createUpdater({ fetchImpl: async () => ({ ok: false, status: 404 }) });
   await assert.rejects(() => updater.apply(), /No update available/);
+});
+
+test("createUpdater.apply deploys the complete Windows install and rechecks at click time", async (t) => {
+  const rootDir = mkdtempSync(path.join(os.tmpdir(), "modeldock-update-"));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  writeFileSync(path.join(rootDir, "package.json"), JSON.stringify({ version: "0.2.5" }));
+  mkdirSync(path.join(rootDir, "dist"));
+  mkdirSync(path.join(rootDir, "scripts"));
+
+  const oldFiles = {
+    "dist/modeldock.mjs": "old gateway",
+    "dist/mcp-standalone.mjs": "old bridge",
+    "scripts/start-hidden.ps1": "old launcher",
+    "scripts/restart.ps1": "old restart",
+    "scripts/recover.ps1": "old recovery",
+    "scripts/start-hidden.sh": "posix file must not change on Windows",
+  };
+  for (const [relative, body] of Object.entries(oldFiles)) {
+    writeFileSync(path.join(rootDir, relative), body);
+  }
+
+  const assets = {
+    "modeldock.mjs": "new gateway".repeat(20_000),
+    "mcp-standalone.mjs": "new bridge",
+    "start-hidden.ps1": "new launcher",
+    "restart.ps1": "new restart",
+    "recover.ps1": "new recovery",
+    "start-hidden.sh": "new posix launcher",
+  };
+  const sums = Object.entries(assets)
+    .map(([name, body]) => `${sha256(body)}  ${name}`)
+    .join("\n");
+  let releaseChecks = 0;
+  const fetchImpl = async (url) => {
+    if (url.includes("api.github.com")) {
+      releaseChecks += 1;
+      return releaseResponse(releaseChecks === 1 ? "0.2.6" : "0.2.7", assets, sums);
+    }
+    if (url.endsWith("/SHA256SUMS")) return responseBody(sums);
+    const name = url.split("/").pop();
+    return responseBody(assets[name]);
+  };
+  let restartCalls = 0;
+  const updater = createUpdater({
+    fetchImpl,
+    restartImpl: () => { restartCalls += 1; },
+    rootDir,
+    platform: "win32",
+  });
+
+  assert.equal((await updater.check()).latestVersion, "0.2.6");
+  const result = await updater.apply();
+
+  assert.equal(result.latestVersion, "0.2.7");
+  assert.equal(releaseChecks, 2, "apply should re-check instead of trusting stale startup state");
+  assert.equal(restartCalls, 1);
+  for (const [relative, body] of Object.entries({
+    "dist/modeldock.mjs": assets["modeldock.mjs"],
+    "dist/mcp-standalone.mjs": assets["mcp-standalone.mjs"],
+    "scripts/start-hidden.ps1": assets["start-hidden.ps1"],
+    "scripts/restart.ps1": assets["restart.ps1"],
+    "scripts/recover.ps1": assets["recover.ps1"],
+  })) {
+    assert.equal(readFileSync(path.join(rootDir, relative), "utf8"), body, `${relative} should be updated`);
+  }
+  assert.equal(
+    readFileSync(path.join(rootDir, "scripts/start-hidden.sh"), "utf8"),
+    oldFiles["scripts/start-hidden.sh"],
+    "a non-current-platform helper must not be overwritten",
+  );
+  const rollbackName = readFileSync(path.join(rootDir, ".modeldock-rollback/current"), "utf8").trim();
+  const rollbackDir = path.join(rootDir, ".modeldock-rollback", rollbackName);
+  const manifest = JSON.parse(readFileSync(path.join(rollbackDir, "manifest.json"), "utf8"));
+  assert.deepEqual(
+    manifest.files.map((file) => file.path),
+    ["dist/modeldock.mjs", "dist/mcp-standalone.mjs", "scripts/start-hidden.ps1", "scripts/restart.ps1", "scripts/recover.ps1"],
+  );
+  for (const relative of manifest.files.map((file) => file.path)) {
+    assert.equal(readFileSync(path.join(rollbackDir, relative), "utf8"), oldFiles[relative], `${relative} should have a rollback copy`);
+  }
+});
+
+test("createUpdater.apply leaves an installed layout untouched when a helper is missing", async (t) => {
+  const rootDir = mkdtempSync(path.join(os.tmpdir(), "modeldock-update-missing-"));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  writeFileSync(path.join(rootDir, "package.json"), JSON.stringify({ version: "0.2.5" }));
+  mkdirSync(path.join(rootDir, "dist"));
+  mkdirSync(path.join(rootDir, "scripts"));
+  const original = {
+    "dist/modeldock.mjs": "installed gateway",
+    "dist/mcp-standalone.mjs": "installed bridge",
+    "scripts/start-hidden.ps1": "installed launcher",
+    "scripts/restart.ps1": "installed restart",
+    "scripts/recover.ps1": "installed recovery",
+  };
+  for (const [relative, body] of Object.entries(original)) writeFileSync(path.join(rootDir, relative), body);
+  const assets = {
+    "modeldock.mjs": "new gateway".repeat(20_000),
+    "mcp-standalone.mjs": "new bridge",
+    "start-hidden.ps1": "new launcher",
+    "restart.ps1": "new restart",
+  };
+  const sums = Object.entries(assets)
+    .map(([name, body]) => `${sha256(body)}  ${name}`)
+    .join("\n");
+  const fetchImpl = async (url) => {
+    if (url.includes("api.github.com")) return releaseResponse("0.2.6", assets, sums);
+    if (url.endsWith("/SHA256SUMS")) return responseBody(sums);
+    return responseBody(assets[url.split("/").pop()]);
+  };
+  const updater = createUpdater({
+    fetchImpl,
+    restartImpl: () => assert.fail("restart must not happen after an incomplete release"),
+    rootDir,
+    platform: "win32",
+  });
+
+  await updater.check();
+  await assert.rejects(() => updater.apply(), /Release is missing recover\.ps1/);
+  for (const [relative, body] of Object.entries(original)) {
+    assert.equal(readFileSync(path.join(rootDir, relative), "utf8"), body, `${relative} must remain unchanged`);
+  }
+});
+
+test("createUpdater.apply rolls back the whole layout when a destination cannot be replaced", async (t) => {
+  const rootDir = mkdtempSync(path.join(os.tmpdir(), "modeldock-update-rollback-"));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  writeFileSync(path.join(rootDir, "package.json"), JSON.stringify({ version: "0.2.5" }));
+  mkdirSync(path.join(rootDir, "dist"));
+  mkdirSync(path.join(rootDir, "scripts"));
+  const original = {
+    "dist/modeldock.mjs": "installed gateway",
+    "dist/mcp-standalone.mjs": "installed bridge",
+    "scripts/restart.ps1": "installed restart",
+    "scripts/recover.ps1": "installed recovery",
+  };
+  for (const [relative, body] of Object.entries(original)) writeFileSync(path.join(rootDir, relative), body);
+  // A corrupt layout with a directory at a helper destination used to fail only
+  // after the bundle and bridge had already been replaced.
+  mkdirSync(path.join(rootDir, "scripts/start-hidden.ps1"));
+  const assets = {
+    "modeldock.mjs": "new gateway".repeat(20_000),
+    "mcp-standalone.mjs": "new bridge",
+    "start-hidden.ps1": "new launcher",
+    "restart.ps1": "new restart",
+    "recover.ps1": "new recovery",
+  };
+  const sums = Object.entries(assets).map(([name, body]) => `${sha256(body)}  ${name}`).join("\n");
+  const fetchImpl = async (url) => {
+    if (url.includes("api.github.com")) return releaseResponse("0.2.6", assets, sums);
+    if (url.endsWith("/SHA256SUMS")) return responseBody(sums);
+    return responseBody(assets[url.split("/").pop()]);
+  };
+  const updater = createUpdater({
+    fetchImpl,
+    restartImpl: () => assert.fail("restart must not happen after a failed deployment"),
+    rootDir,
+    platform: "win32",
+  });
+
+  await updater.check();
+  await assert.rejects(() => updater.apply(), /destination is not a file/);
+  for (const [relative, body] of Object.entries(original)) {
+    assert.equal(readFileSync(path.join(rootDir, relative), "utf8"), body, `${relative} must be rolled back`);
+  }
+});
+
+test("createUpdater.apply rolls back when the complete rollback snapshot cannot be written", async (t) => {
+  const rootDir = mkdtempSync(path.join(os.tmpdir(), "modeldock-update-prev-"));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  writeFileSync(path.join(rootDir, "package.json"), JSON.stringify({ version: "0.2.5" }));
+  mkdirSync(path.join(rootDir, "dist"));
+  mkdirSync(path.join(rootDir, "scripts"));
+  const original = {
+    "dist/modeldock.mjs": "installed gateway",
+    "dist/mcp-standalone.mjs": "installed bridge",
+    "scripts/start-hidden.ps1": "installed launcher",
+    "scripts/restart.ps1": "installed restart",
+    "scripts/recover.ps1": "installed recovery",
+  };
+  for (const [relative, body] of Object.entries(original)) writeFileSync(path.join(rootDir, relative), body);
+  writeFileSync(path.join(rootDir, ".modeldock-rollback"), "blocked rollback directory");
+  const assets = {
+    "modeldock.mjs": "new gateway".repeat(20_000),
+    "mcp-standalone.mjs": "new bridge",
+    "start-hidden.ps1": "new launcher",
+    "restart.ps1": "new restart",
+    "recover.ps1": "new recovery",
+  };
+  const sums = Object.entries(assets).map(([name, body]) => `${sha256(body)}  ${name}`).join("\n");
+  const fetchImpl = async (url) => {
+    if (url.includes("api.github.com")) return releaseResponse("0.2.6", assets, sums);
+    if (url.endsWith("/SHA256SUMS")) return responseBody(sums);
+    return responseBody(assets[url.split("/").pop()]);
+  };
+  const updater = createUpdater({ fetchImpl, restartImpl: () => {}, rootDir, platform: "win32" });
+
+  await updater.check();
+  await assert.rejects(() => updater.apply());
+  for (const [relative, body] of Object.entries(original)) {
+    assert.equal(readFileSync(path.join(rootDir, relative), "utf8"), body, `${relative} must remain unchanged`);
+  }
+});
+
+test("createUpdater.apply keeps only the two most recent rollback snapshots", async (t) => {
+  const rootDir = mkdtempSync(path.join(os.tmpdir(), "modeldock-update-prune-"));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  writeFileSync(path.join(rootDir, "package.json"), JSON.stringify({ version: "0.2.5" }));
+  mkdirSync(path.join(rootDir, "dist"));
+  mkdirSync(path.join(rootDir, "scripts"));
+  for (const [relative, body] of Object.entries({
+    "dist/modeldock.mjs": "installed gateway",
+    "dist/mcp-standalone.mjs": "installed bridge",
+    "scripts/start-hidden.ps1": "installed launcher",
+    "scripts/restart.ps1": "installed restart",
+    "scripts/recover.ps1": "installed recovery",
+  })) writeFileSync(path.join(rootDir, relative), body);
+
+  const assets = {
+    "modeldock.mjs": "new gateway".repeat(20_000),
+    "mcp-standalone.mjs": "new bridge",
+    "start-hidden.ps1": "new launcher",
+    "restart.ps1": "new restart",
+    "recover.ps1": "new recovery",
+  };
+  const sums = Object.entries(assets).map(([name, body]) => `${sha256(body)}  ${name}`).join("\n");
+  let releaseChecks = 0;
+  const fetchImpl = async (url) => {
+    if (url.includes("api.github.com")) {
+      releaseChecks += 1;
+      return releaseResponse(releaseChecks === 1 ? "0.2.6" : "0.2.7", assets, sums);
+    }
+    if (url.endsWith("/SHA256SUMS")) return responseBody(sums);
+    return responseBody(assets[url.split("/").pop()]);
+  };
+  // apply() leaves the updater in "updating" state by design (the process
+  // restarts right after a real update), so the second deployment uses a fresh
+  // instance that shares the release feed.
+  const updater = createUpdater({ fetchImpl, restartImpl: () => {}, rootDir, platform: "win32" });
+  await updater.check();
+  await updater.apply();
+  const rollbackRoot = path.join(rootDir, ".modeldock-rollback");
+  const firstCurrent = readFileSync(path.join(rollbackRoot, "current"), "utf8").trim();
+  // Plant one stale snapshot, then run a second update: the newest snapshot
+  // plus the previous real generation must survive, while the stale one is pruned.
+  const staleSnapshot = "0000000000000-111";
+  const staleDir = path.join(rollbackRoot, staleSnapshot);
+  mkdirSync(staleDir, { recursive: true });
+  writeFileSync(path.join(staleDir, "manifest.json"), '{"files":[]}\n');
+  const updater2 = createUpdater({ fetchImpl, restartImpl: () => {}, rootDir, platform: "win32" });
+  await updater2.check();
+  await updater2.apply();
+
+  const snapshots = readdirSync(rollbackRoot).filter((name) => /^\d+-\d+$/.test(name)).sort();
+  assert.equal(snapshots.length, 2, "only the two most recent snapshots are kept");
+  assert.ok(!snapshots.includes(staleSnapshot), "the stale snapshot is pruned");
+  assert.ok(snapshots.includes(firstCurrent), "the previous generation survives");
+  const current = readFileSync(path.join(rollbackRoot, "current"), "utf8").trim();
+  assert.equal(current, snapshots[1], "the marker still points at the newest snapshot");
 });

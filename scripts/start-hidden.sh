@@ -11,7 +11,7 @@ else
 fi
 PORT="${MODELDOCK_PORT:-4097}"
 if [ -f "$ROOT/.env" ]; then
-  ENV_PORT="$(sed -n 's/^MODELDOCK_PORT=//p' "$ROOT/.env" | tail -n 1)"
+  ENV_PORT="$(sed -n 's/^MODELDOCK_PORT=//p' "$ROOT/.env" | tail -n 1 | tr -d '\r' || true)"
   [ -n "$ENV_PORT" ] && PORT="$ENV_PORT"
 fi
 if curl -s -o /dev/null --max-time 2 "http://127.0.0.1:$PORT/healthz"; then
@@ -34,7 +34,9 @@ if [ -z "$NODE_BIN" ] || [ ! -x "$NODE_BIN" ]; then
   if [ -n "$BEST_BIN" ]; then
     NODE_BIN="$BEST_BIN"
   else
-    NODE_BIN="$(command -v node)"
+    # `set -e` turns a failed command substitution into an immediate exit, so
+    # the friendly error below would never run; keep the substitution false-safe.
+    NODE_BIN="$(command -v node || true)"
   fi
 fi
 if [ -z "$NODE_BIN" ] || [ ! -x "$NODE_BIN" ]; then

@@ -22,7 +22,7 @@ function configStub() {
 
 test("catalogFor declares image input for the text-only main model (image escalation)", () => {
   const catalog = catalogFor(configStub());
-  const main = catalog.models.find((entry) => entry.slug === "deepseek-v4-flash");
+  const main = catalog.models.find((entry) => entry.slug === "deepseek-v4-flash@opencode-go");
   assert.ok(main, "main model entry exists");
   assert.deepEqual(main.input_modalities, ["text", "image"], "endpoint handles images by escalating to the vision model");
   assert.equal(main.supports_search_tool, false, "search is the MCP tool, not a hosted schema");
@@ -32,7 +32,7 @@ test("catalogFor declares image input for the text-only main model (image escala
 
 test("catalogFor keeps the main model first with the profile comp hash", () => {
   const catalog = catalogFor(configStub());
-  assert.equal(catalog.models[0].slug, "deepseek-v4-flash");
+  assert.equal(catalog.models[0].slug, "deepseek-v4-flash@opencode-go");
   assert.equal(catalog.models[0].comp_hash, "modeldock-opencode-go-v1");
   assert.equal(catalog.models[0].context_window, 400_000, "deepseek-v4-flash declares 400k so Codex compacts at 320k");
   assert.equal(catalog.models[0].auto_compact_token_limit, 320_000);
@@ -100,7 +100,7 @@ test("enabledProvidersFor includes the active profile and any provider with a to
 test("catalogFor publishes only models owned by enabled providers", () => {
   const catalog = catalogFor(configStub());
   const slugs = catalog.models.map((entry) => entry.slug);
-  assert.ok(slugs.includes("deepseek-v4-flash"));
+  assert.ok(slugs.includes("deepseek-v4-flash@opencode-go"));
   assert.ok(!slugs.some((slug) => slug.endsWith("@deepseek-official")), "DeepSeek official models are hidden without a token");
 
   const withDeepSeek = {
@@ -156,7 +156,7 @@ test("catalogFor with nativeMerge=false skips the native GPT merge for non-subsc
   try {
     const catalog = catalogFor({ ...configStub(), nativeCatalogFile: file, nativeMerge: false });
     const slugs = catalog.models.map((entry) => entry.slug);
-    assert.ok(slugs.includes("deepseek-v4-flash"), "curated Go models stay published");
+  assert.ok(slugs.includes("deepseek-v4-flash@opencode-go"), "curated Go models stay published");
     assert.ok(!slugs.includes("gpt-5.6-luna"), "native GPT models are hidden without a subscription (nativeMerge=false)");
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -178,8 +178,8 @@ test("catalogFor in trial mode publishes only the fixed free pair and never merg
       visionModel: "mimo-v2.5-free",
       nativeCatalogFile: file,
     });
-    assert.deepEqual(trial.models.map((entry) => entry.slug).sort(), ["deepseek-v4-flash-free", "mimo-v2.5-free"]);
-    assert.equal(trial.models[0].slug, "deepseek-v4-flash-free", "the fixed trial main model leads");
+    assert.deepEqual(trial.models.map((entry) => entry.slug).sort(), ["deepseek-v4-flash-free@opencode-go", "mimo-v2.5-free@opencode-go"]);
+    assert.equal(trial.models[0].slug, "deepseek-v4-flash-free@opencode-go", "the fixed trial main model leads");
     assert.ok(!trial.models.some((entry) => entry.slug === "gpt-5.6-luna"), "trial never merges native GPT models");
 
     // The same native capture outside trial publishes the native model.
@@ -193,8 +193,8 @@ test("catalogFor in trial mode publishes only the fixed free pair and never merg
 test("catalogFor outside trial still publishes the free models alongside the paid ones", () => {
   const catalog = catalogFor(configStub());
   const slugs = catalog.models.map((entry) => entry.slug);
-  assert.ok(slugs.includes("deepseek-v4-flash-free"));
-  assert.ok(slugs.includes("mimo-v2.5-free"));
+  assert.ok(slugs.includes("deepseek-v4-flash-free@opencode-go"));
+  assert.ok(slugs.includes("mimo-v2.5-free@opencode-go"));
 });
 
 test("mergeNativeCatalog caps native reasoning levels to the published enum", () => {
