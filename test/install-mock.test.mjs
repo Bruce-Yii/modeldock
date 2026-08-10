@@ -805,8 +805,12 @@ test("mock install lifecycle: first start, second start routes, login relaunch",
     const plist = path.join(installDir, "LaunchAgents", "com.modeldock.gateway.plist");
     const plistText = readFileSync(plist, "utf8");
     assert.match(plistText, /RunAtLoad/, "plist should load at login");
-    assert.ok(plistText.includes(launcher), "plist should launch the installed start-hidden.sh");
-    relaunch = spawn("/bin/sh", [launcher], { env, stdio: ["ignore", "pipe", "pipe"] });
+    assert.match(plistText, /<key>KeepAlive<\/key><true\/>/, "plist should keep the gateway alive");
+    const argBlock = plistText.split("<key>ProgramArguments</key>")[1].split("</array>")[0];
+    const args = [...argBlock.matchAll(/<string>(.*?)<\/string>/g)].map((match) => match[1]);
+    assert.equal(args.length, 2, "plist ProgramArguments should be exactly [node, server]");
+    assert.ok(plistText.includes("dist/modeldock.mjs"), "plist should launch the installed bundle directly");
+    relaunch = spawn(args[0], [args[1]], { env, stdio: ["ignore", "pipe", "pipe"] });
   } else {
     relaunch = spawn("/bin/sh", [launcher], { env, stdio: ["ignore", "pipe", "pipe"] });
   }

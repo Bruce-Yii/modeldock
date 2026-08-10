@@ -111,8 +111,15 @@ test("macOS plist lifecycle: launch, healthy, kill, relaunch", async (t) => {
   const first = launch();
   const firstStderr = [];
   first.stderr.on("data", (chunk) => firstStderr.push(chunk.toString()));
+  let firstError = "";
+  first.on("error", (error) => (firstError = error.message));
   t.after(() => first.kill());
-  await waitHealthy(port);
+  try {
+    await waitHealthy(port);
+  } catch (error) {
+    error.message += `\nfirst spawn error: ${firstError || "none"}\nfirst stderr:\n${firstStderr.join("")}`;
+    throw error;
+  }
   assert.ok(first.pid, "first launch should have a pid");
 
   // Simulate a crash: launchd sees the process exit and, with KeepAlive, runs
