@@ -194,7 +194,12 @@ export function createUpstreams({ config, metrics, mediaStore, memoryStore = nul
       const stat = statSync(absolute);
       if (!stat.isFile()) throw new Error(`Image path is not a file: ${absolute}`);
       const ext = extname(absolute).toLowerCase();
-      const mime = ext === ".jpg" || ext === ".jpeg" ? "image/jpeg" : ext === ".png" ? "image/png" : ext === ".gif" ? "image/gif" : ext === ".webp" ? "image/webp" : ext === ".bmp" ? "image/bmp" : "image/png";
+      // Only read recognized image types. Falling back to image/png for anything
+      // let a (possibly prompt-injected) model exfiltrate arbitrary local files
+      // (keys, /etc/shadow, .env) to the upstream vision model as "an image".
+      const mimeByExt = { ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp" };
+      const mime = mimeByExt[ext];
+      if (!mime) throw new Error(`Unsupported image type: ${absolute} (allowed: jpg, jpeg, png, gif, webp, bmp)`);
       const bytes = readFileSync(absolute);
       if (bytes.byteLength > mediaStore.maxBytes) throw new Error(`Image exceeds the ${mediaStore.maxBytes}-byte limit: ${absolute}`);
       return `data:${mime};base64,${bytes.toString("base64")}`;

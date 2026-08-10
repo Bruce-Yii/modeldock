@@ -222,6 +222,12 @@ if (-not $nodeExe) {
 # command starts with a quoted program path, so wrap the whole command in one extra
 # pair of quotes (the ""prog" args" form).
 $log = Join-Path $root "modeldock.log"
+# Rotate at startup, one previous generation (same policy as scripts/start-hidden.ps1):
+# the log is append-only for the life of the process, so a cap on growth can only
+# be applied between runs.
+if ((Test-Path -LiteralPath $log) -and ((Get-Item -LiteralPath $log).Length -gt 32MB)) {
+    Move-Item -LiteralPath $log -Destination "$log.1" -Force
+}
 Start-Process -FilePath "cmd.exe" -ArgumentList "/c", "`"`"$nodeExe`" `"$server`" >> `"$log`" 2>&1`"" -WorkingDirectory $root -WindowStyle Hidden
 '@ | Out-File -FilePath $launcher -Encoding ascii
 
@@ -245,6 +251,14 @@ $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $PSScriptRoot
 $envFile = Join-Path $root ".env"
+
+# Status lines go to both stdout and stderr. Callers (CI, the model shell, the
+# dashboard) sometimes capture only one stream; a hidden launcher must never
+# fail silently.
+function Write-Status($message) {
+  Write-Output $message
+  [Console]::Error.WriteLine($message)
+}
 
 $port = 4097
 if (Test-Path $envFile) {
@@ -275,8 +289,8 @@ if ($listener) {
         $ownerRoot = [System.IO.Path]::GetFullPath($owner.root)
         $thisRoot = [System.IO.Path]::GetFullPath($root)
         if ($ownerRoot -ne $thisRoot) {
-          Write-Output "ERROR: port $port is owned by a gateway from '$ownerRoot' (PID $oldPid); this script runs from '$thisRoot'."
-          Write-Output "Re-run with -Force to take the port over deliberately."
+          Write-Status "ERROR: port $port is owned by a gateway from '$ownerRoot' (PID $oldPid); this script runs from '$thisRoot'."
+          Write-Status "Re-run with -Force to take the port over deliberately."
           exit 1
         }
       }
@@ -284,20 +298,50 @@ if ($listener) {
       # Unreadable owner file: fall through and behave as before.
     }
   }
-  Write-Output "restart.ps1: stopping gateway (PID $oldPid, port $port)"
+  Write-Status "restart.ps1: stopping gateway (PID $oldPid, port $port)"
   Stop-Process -Id $oldPid -Force
   for ($i = 0; $i -lt 20; $i += 1) {
     Start-Sleep -Milliseconds 250
     if (-not (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue)) { break }
   }
 } else {
-  Write-Output "restart.ps1: no gateway on port $port; starting fresh"
+  Write-Status "restart.ps1: no gateway on port $port; starting fresh"
 }
 
-$logDir = Join-Path $env:TEMP "modeldock"
-New-Item -ItemType Directory -Force -Path $logDir | Out-Null
-$stdout = Join-Path $logDir "gateway.log"
-$stderr = Join-Path $logDir "gateway.err.log"
+$log = Join-Path $root "modeldock.log"
+# Rotate at startup, one previous generation (same policy as start-hidden.ps1):
+# the log is append-only for the life of the process, so a cap on growth can
+# only be applied between runs.
+if ((Test-Path -LiteralPath $log) -and ((Get-Item -LiteralPath $log).Length -gt 32MB)) {
+  Move-Item -LiteralPath $log -Destination "$log.1" -Force
+}
+
+# The old gateway's stdout/stderr handles can linger for a moment after
+# Stop-Process. Wait for the log to become writable; if it stays locked, fall
+# back to a per-run log file so the redirect never races the dying process's
+# file handles.
+function Test-WritableFile($file) {
+  try {
+    $probe = [System.IO.File]::Open($file, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+    $probe.Close()
+    return $true
+  } catch {
+    return $false
+  }
+}
+$logsReady = $false
+for ($i = 0; $i -lt 20; $i += 1) {
+  if (Test-WritableFile $log) {
+    $logsReady = $true
+    break
+  }
+  Start-Sleep -Milliseconds 250
+}
+if (-not $logsReady) {
+  $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+  $log = Join-Path $root "modeldock-$stamp.log"
+  Write-Status "WARNING: modeldock.log was still locked; using per-run log ($log)"
+}
 
 # Prefer an explicit path, then a bundled Node under <root>\node (the installer
 # downloads Node 22 LTS there when none is on PATH), then PATH.
@@ -316,7 +360,7 @@ if (-not $nodeExe) {
 }
 if (-not $nodeExe) { $nodeExe = (Get-Command node -ErrorAction SilentlyContinue).Source }
 if (-not $nodeExe) {
-  Write-Output "ERROR: node.exe not found; install Node 22+ or re-run the ModelDock installer"
+  Write-Status "ERROR: node.exe not found; install Node 22+ or re-run the ModelDock installer"
   exit 1
 }
 
@@ -326,30 +370,41 @@ if (-not $nodeExe) {
 $server = Join-Path $root "src\server.mjs"
 if (-not (Test-Path -LiteralPath $server)) { $server = Join-Path $root "dist\modeldock.mjs" }
 
-# Quote the script path so an install dir with a space (e.g. "Chen Bao") is not
-# split into two argv entries by node's CRT.
-Start-Process -FilePath $nodeExe -ArgumentList "`"$server`"" -WorkingDirectory $root -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
-Write-Output "restart.ps1: started gateway from $root (logs: $logDir)"
+try {
+  # Quote both paths: an installed layout under a home dir with a space
+  # (e.g. "C:\Users\Chen Bao\.modeldock") would otherwise be split by node's
+  # CRT into two argv entries and fail with "Cannot find module". cmd.exe does
+  # the >> redirection so stdout and stderr share the same log file as the
+  # start-hidden launcher (and the "check modeldock.log" guidance).
+  Start-Process -FilePath "cmd.exe" -ArgumentList "/c", "`"`"$nodeExe`" `"$server`" >> `"$log`" 2>&1`"" -WorkingDirectory $root -WindowStyle Hidden
+} catch {
+  Write-Status "ERROR: failed to start gateway: $($_.Exception.Message)"
+  exit 1
+}
+Write-Status "restart.ps1: started gateway from $root (logs: $log)"
 
 for ($i = 0; $i -lt 40; $i += 1) {
   Start-Sleep -Milliseconds 250
   try {
     Invoke-WebRequest -Uri "http://127.0.0.1:$port/healthz" -TimeoutSec 2 -UseBasicParsing | Out-Null
-    Write-Output "restart.ps1: gateway healthy at http://127.0.0.1:$port"
+    Write-Status "restart.ps1: gateway healthy at http://127.0.0.1:$port"
     exit 0
   } catch {
-    # A returned HTTP status (e.g. 503 before a token is set) still proves the
-    # gateway is up; only a connection failure means it is not.
+    # A returned HTTP status (e.g. 503 before a token is configured) still proves
+    # the gateway is up and listening - only a connection failure means it is not.
     if ($_.Exception.Response) {
-      Write-Output "restart.ps1: gateway up at http://127.0.0.1:$port (awaiting token)"
+      Write-Status "restart.ps1: gateway up at http://127.0.0.1:$port (awaiting token)"
       exit 0
     }
-    # Otherwise still booting; keep polling.
+    # Otherwise still booting / connection refused; keep polling.
   }
 }
 
-Write-Output "ERROR: gateway did not become healthy within 10s"
-if (Test-Path $stderr) { Get-Content $stderr -Tail 10 -ErrorAction SilentlyContinue }
+Write-Status "ERROR: gateway did not become healthy within 10s"
+if (Test-Path $log) {
+  $tail = Get-Content $log -Tail 10 -ErrorAction SilentlyContinue
+  if ($tail) { $tail | ForEach-Object { [Console]::Error.WriteLine($_) } }
+}
 exit 1
 '@ | Out-File -FilePath $restart -Encoding ascii
 
@@ -402,7 +457,11 @@ function Repair-Autostart {
 
 function Restart-Gateway {
   Repair-Autostart
-  & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root "scripts\restart.ps1")
+  $restart = Join-Path $root "scripts\restart.ps1"
+  if (-not (Test-Path -LiteralPath $restart)) {
+    throw "restart.ps1 is missing from $root"
+  }
+  & powershell -NoProfile -ExecutionPolicy Bypass -File $restart
   if ($LASTEXITCODE -ne 0) { throw "gateway restart failed" }
 }
 function Restore-Native {
@@ -423,11 +482,14 @@ function Restore-Native {
     Copy-Item -LiteralPath $config -Destination "$config.native-recovery-$(Get-Date -Format yyyyMMdd-HHmmss).bak"
     if (-not $state.originalExisted) { Remove-Item -LiteralPath $config -Force } else { Copy-Item -LiteralPath $backup -Destination $config -Force }
   } elseif ($state.originalExisted) { Copy-Item -LiteralPath $backup -Destination $config -Force }
+  # Rebuild the state as a fresh ordered map: Windows PowerShell 5.1 throws when a
+  # property that ConvertFrom-Json did not create is set via dot assignment.
   $out = [ordered]@{}
   foreach ($p in $state.PSObject.Properties) { $out[$p.Name] = $p.Value }
   $out['enabled'] = $false; $out['restartRequired'] = $true; $out['lastBackupPath'] = $backup
   $out['changedAt'] = (Get-Date).ToUniversalTime().ToString("o")
   $tmp = "$statePath.$PID.tmp"
+  # Write UTF-8 without a BOM: Node reads this file as UTF-8 JSON.
   [System.IO.File]::WriteAllText($tmp, ($out | ConvertTo-Json -Depth 10), (New-Object System.Text.UTF8Encoding($false)))
   Move-Item -LiteralPath $tmp -Destination $statePath -Force
   Write-Output "Codex native route restored from $backup"

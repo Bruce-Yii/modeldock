@@ -70,15 +70,18 @@ if ($listener) {
   Write-Status "restart.ps1: no gateway on port $port; starting fresh"
 }
 
-$logDir = Join-Path $env:TEMP "modeldock"
-New-Item -ItemType Directory -Force -Path $logDir | Out-Null
-$stdout = Join-Path $logDir "gateway.log"
-$stderr = Join-Path $logDir "gateway.err.log"
+$log = Join-Path $root "modeldock.log"
+# Rotate at startup, one previous generation (same policy as start-hidden.ps1):
+# the log is append-only for the life of the process, so a cap on growth can
+# only be applied between runs.
+if ((Test-Path -LiteralPath $log) -and ((Get-Item -LiteralPath $log).Length -gt 32MB)) {
+  Move-Item -LiteralPath $log -Destination "$log.1" -Force
+}
 
 # The old gateway's stdout/stderr handles can linger for a moment after
-# Stop-Process. Wait for both log files to become writable; if they stay
-# locked, fall back to per-run log files so Start-Process never races the
-# dying process's file handles.
+# Stop-Process. Wait for the log to become writable; if it stays locked, fall
+# back to a per-run log file so the redirect never races the dying process's
+# file handles.
 function Test-WritableFile($file) {
   try {
     $probe = [System.IO.File]::Open($file, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
@@ -90,7 +93,7 @@ function Test-WritableFile($file) {
 }
 $logsReady = $false
 for ($i = 0; $i -lt 20; $i += 1) {
-  if ((Test-WritableFile $stdout) -and (Test-WritableFile $stderr)) {
+  if (Test-WritableFile $log) {
     $logsReady = $true
     break
   }
@@ -98,9 +101,8 @@ for ($i = 0; $i -lt 20; $i += 1) {
 }
 if (-not $logsReady) {
   $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
-  $stdout = Join-Path $logDir "gateway-$stamp.log"
-  $stderr = Join-Path $logDir "gateway-$stamp.err.log"
-  Write-Status "WARNING: gateway.log was still locked; using per-run logs ($stamp)"
+  $log = Join-Path $root "modeldock-$stamp.log"
+  Write-Status "WARNING: modeldock.log was still locked; using per-run log ($log)"
 }
 
 # Prefer an explicit path, then a bundled Node under <root>\node (the installer
@@ -131,15 +133,17 @@ $server = Join-Path $root "src\server.mjs"
 if (-not (Test-Path -LiteralPath $server)) { $server = Join-Path $root "dist\modeldock.mjs" }
 
 try {
-  # Quote the script path: an installed layout under a home dir with a space
-  # (e.g. "C:\Users\Chen Bao\.modeldock") would otherwise be split by node's CRT
-  # into two argv entries and fail with "Cannot find module".
-  Start-Process -FilePath $nodeExe -ArgumentList "`"$server`"" -WorkingDirectory $root -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+  # Quote both paths: an installed layout under a home dir with a space
+  # (e.g. "C:\Users\Chen Bao\.modeldock") would otherwise be split by node's
+  # CRT into two argv entries and fail with "Cannot find module". cmd.exe does
+  # the >> redirection so stdout and stderr share the same log file as the
+  # start-hidden launcher (and the "check modeldock.log" guidance).
+  Start-Process -FilePath "cmd.exe" -ArgumentList "/c", "`"`"$nodeExe`" `"$server`" >> `"$log`" 2>&1`"" -WorkingDirectory $root -WindowStyle Hidden
 } catch {
   Write-Status "ERROR: failed to start gateway: $($_.Exception.Message)"
   exit 1
 }
-Write-Status "restart.ps1: started gateway from $root (logs: $logDir)"
+Write-Status "restart.ps1: started gateway from $root (logs: $log)"
 
 for ($i = 0; $i -lt 40; $i += 1) {
   Start-Sleep -Milliseconds 250
@@ -159,8 +163,8 @@ for ($i = 0; $i -lt 40; $i += 1) {
 }
 
 Write-Status "ERROR: gateway did not become healthy within 10s"
-if (Test-Path $stderr) {
-  $tail = Get-Content $stderr -Tail 10 -ErrorAction SilentlyContinue
+if (Test-Path $log) {
+  $tail = Get-Content $log -Tail 10 -ErrorAction SilentlyContinue
   if ($tail) { $tail | ForEach-Object { [Console]::Error.WriteLine($_) } }
 }
 exit 1

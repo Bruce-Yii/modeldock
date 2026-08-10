@@ -59,9 +59,11 @@ export async function ttsSpeak({ text = "", voice = "zh-CN-XiaoxiaoNeural", outp
   const path = await import("node:path");
   const { MsEdgeTTS, OUTPUT_FORMAT } = await import("msedge-tts");
   const TTS = MsEdgeTTS || (await import("msedge-tts")).default;
-  const target = path.isAbsolute(output)
-    ? output
-    : path.join(tmpdir(), output);
+  // Confine the output to tmpdir: take only the basename so an absolute path or a
+  // "../../x" traversal from a (possibly prompt-injected) model cannot write the
+  // audio bytes to an arbitrary location (e.g. a startup script).
+  const safeName = path.basename(String(output)) || "tts-output.webm";
+  const target = path.join(tmpdir(), safeName);
   const tts = new TTS();
   await tts.setMetadata(voice, OUTPUT_FORMAT.WEBM_24KHZ_16BIT_MONO_OPUS);
   const { audioStream } = await tts.toStream(text);

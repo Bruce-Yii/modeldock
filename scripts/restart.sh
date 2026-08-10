@@ -38,6 +38,11 @@ fi
 find_listener_pid() {
   if command -v lsof >/dev/null 2>&1; then
     lsof -nP -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null | head -n 1 || true
+  elif command -v ss >/dev/null 2>&1; then
+    # Minimal Linux images (Debian/Ubuntu containers) ship neither lsof nor
+    # psmisc, but do ship ss. Without this branch the old PID is never found and
+    # the new gateway dies with EADDRINUSE while the stale one keeps answering.
+    ss -tlnpH "sport = :$PORT" 2>/dev/null | grep -o 'pid=[0-9]*' | head -n 1 | cut -d= -f2 || true
   elif command -v fuser >/dev/null 2>&1; then
     fuser "$PORT/tcp" 2>/dev/null | tr ' ' '\n' | sed '/^$/d' | head -n 1 || true
   else

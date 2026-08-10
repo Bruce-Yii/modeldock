@@ -12,6 +12,26 @@ if [ -f "$ROOT/.env" ]; then
   [ -n "$ENV_PORT" ] && PORT="$ENV_PORT"
 fi
 
+# Resolve a Node binary the same bundled-first way as restart.sh. A self-contained
+# install (node auto-downloaded into "$ROOT/node" because the machine had none)
+# has no node on PATH, so a bare "node" here would fail the config restore exactly
+# when the gateway is down and recovery matters most.
+resolve_node() {
+  if [ -n "${MODELDOCK_NODE_PATH:-}" ] && [ -x "$MODELDOCK_NODE_PATH" ]; then
+    printf '%s\n' "$MODELDOCK_NODE_PATH"; return
+  fi
+  best_bin=""; best_v=""
+  for d in "$ROOT"/node/v*; do
+    [ -d "$d" ] && [ -x "$d/bin/node" ] || continue
+    v="$(basename "$d" | sed 's/^v//')"
+    if [ -z "$best_v" ] || [ "$(printf '%s\n%s\n' "$v" "$best_v" | sort -t. -k1,1n -k2,2n -k3,3n | tail -n 1)" = "$v" ]; then
+      best_bin="$d/bin/node"; best_v="$v"
+    fi
+  done
+  if [ -n "$best_bin" ]; then printf '%s\n' "$best_bin"; return; fi
+  command -v node || true
+}
+
 restart_gateway() {
   if [ ! -x "$ROOT/scripts/start-hidden.sh" ]; then
     echo "start-hidden.sh is missing from $ROOT" >&2
@@ -83,7 +103,12 @@ restore_native() {
     echo "ModelDock switch state was not found: $STATE" >&2
     exit 1
   fi
-  node --input-type=module - "$STATE" "$CONFIG" <<'NODE'
+  NODE_BIN="$(resolve_node)"
+  if [ -z "$NODE_BIN" ] || [ ! -x "$NODE_BIN" ]; then
+    echo "node not found; cannot restore the Codex config. Install Node 22+ or re-run the installer." >&2
+    exit 1
+  fi
+  "$NODE_BIN" --input-type=module - "$STATE" "$CONFIG" <<'NODE'
 import { copyFile, readFile, rm, writeFile, rename } from "node:fs/promises";
 import path from "node:path";
 const [statePath, configPath] = process.argv.slice(2);
@@ -144,6 +169,15 @@ repair_autostart() {
   PLIST_DIR="${MODELDOCK_AUTOSTART_PLIST_DIR:-$HOME/Library/LaunchAgents}"
   PLIST="$PLIST_DIR/com.modeldock.gateway.plist"
   mkdir -p "$PLIST_DIR"
+  # plist is XML: a user path containing & < > would otherwise break launchd.
+  xml_escape() {
+    printf '%s' "$1" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'
+  }
+  NODE_DIR="$(dirname "$NODE_BIN")"
+  PLIST_PATH="$(xml_escape "$NODE_DIR:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")"
+  PLIST_NODE="$(xml_escape "$NODE_BIN")"
+  PLIST_SERVER="$(xml_escape "$SERVER")"
+  PLIST_ROOT="$(xml_escape "$ROOT")"
   cat > "$PLIST" <<PLISTEOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -152,20 +186,20 @@ repair_autostart() {
   <key>Label</key><string>com.modeldock.gateway</string>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>PATH</key><string>$(dirname "$NODE_BIN"):/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-    <key>MODELDOCK_NODE_PATH</key><string>$NODE_BIN</string>
+    <key>PATH</key><string>$PLIST_PATH</string>
+    <key>MODELDOCK_NODE_PATH</key><string>$PLIST_NODE</string>
   </dict>
   <key>ProgramArguments</key>
   <array>
-    <string>$NODE_BIN</string>
-    <string>$SERVER</string>
+    <string>$PLIST_NODE</string>
+    <string>$PLIST_SERVER</string>
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>10</integer>
-  <key>WorkingDirectory</key><string>$ROOT</string>
-  <key>StandardOutPath</key><string>$ROOT/modeldock.log</string>
-  <key>StandardErrorPath</key><string>$ROOT/modeldock.log</string>
+  <key>WorkingDirectory</key><string>$PLIST_ROOT</string>
+  <key>StandardOutPath</key><string>$PLIST_ROOT/modeldock.log</string>
+  <key>StandardErrorPath</key><string>$PLIST_ROOT/modeldock.log</string>
 </dict>
 </plist>
 PLISTEOF

@@ -203,7 +203,7 @@ else
 fi
 PORT="${MODELDOCK_PORT:-4097}"
 if [ -f "$ROOT/.env" ]; then
-  ENV_PORT="$(sed -n 's/^MODELDOCK_PORT=//p' "$ROOT/.env" | tail -n 1)"
+  ENV_PORT="$(sed -n 's/^MODELDOCK_PORT=//p' "$ROOT/.env" | tail -n 1 | tr -d '\r' || true)"
   [ -n "$ENV_PORT" ] && PORT="$ENV_PORT"
 fi
 if curl -s -o /dev/null --max-time 2 "http://127.0.0.1:$PORT/healthz"; then
@@ -226,7 +226,9 @@ if [ -z "$NODE_BIN" ] || [ ! -x "$NODE_BIN" ]; then
   if [ -n "$BEST_BIN" ]; then
     NODE_BIN="$BEST_BIN"
   else
-    NODE_BIN="$(command -v node)"
+    # `set -e` turns a failed command substitution into an immediate exit, so
+    # the friendly error below would never run; keep the substitution false-safe.
+    NODE_BIN="$(command -v node || true)"
   fi
 fi
 if [ -z "$NODE_BIN" ] || [ ! -x "$NODE_BIN" ]; then
@@ -795,6 +797,15 @@ if [ "$SKIP_START" != "1" ] && [ "$(uname -s)" = "Darwin" ]; then
   PLIST_DIR="${MODELDOCK_AUTOSTART_PLIST_DIR:-$HOME/Library/LaunchAgents}"
   PLIST="$PLIST_DIR/com.modeldock.gateway.plist"
   mkdir -p "$PLIST_DIR"
+  # plist is XML: a user path containing & < > would otherwise break launchd.
+  xml_escape() {
+    printf '%s' "$1" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'
+  }
+  NODE_DIR="$(dirname "$NODE_BIN")"
+  PLIST_PATH="$(xml_escape "$NODE_DIR:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")"
+  PLIST_NODE="$(xml_escape "$NODE_BIN")"
+  PLIST_SERVER="$(xml_escape "$SERVER")"
+  PLIST_ROOT="$(xml_escape "$ROOT")"
   cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -803,20 +814,20 @@ if [ "$SKIP_START" != "1" ] && [ "$(uname -s)" = "Darwin" ]; then
   <key>Label</key><string>com.modeldock.gateway</string>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>PATH</key><string>$(dirname "$NODE_BIN"):/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-    <key>MODELDOCK_NODE_PATH</key><string>$NODE_BIN</string>
+    <key>PATH</key><string>$PLIST_PATH</string>
+    <key>MODELDOCK_NODE_PATH</key><string>$PLIST_NODE</string>
   </dict>
   <key>ProgramArguments</key>
   <array>
-    <string>$NODE_BIN</string>
-    <string>$SERVER</string>
+    <string>$PLIST_NODE</string>
+    <string>$PLIST_SERVER</string>
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>10</integer>
-  <key>WorkingDirectory</key><string>$ROOT</string>
-  <key>StandardOutPath</key><string>$ROOT/modeldock.log</string>
-  <key>StandardErrorPath</key><string>$ROOT/modeldock.log</string>
+  <key>WorkingDirectory</key><string>$PLIST_ROOT</string>
+  <key>StandardOutPath</key><string>$PLIST_ROOT/modeldock.log</string>
+  <key>StandardErrorPath</key><string>$PLIST_ROOT/modeldock.log</string>
 </dict>
 </plist>
 EOF
