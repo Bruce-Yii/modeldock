@@ -22,6 +22,10 @@ New-Item -ItemType Directory -Force -Path $work | Out-Null
 $root = Join-Path $work "install-root"
 $stateDir = Join-Path $work "state"
 $codexHome = Join-Path $work "codex-home"
+$upstreamPortFile = Join-Path $work "probe-upstream.port"
+$upstreamLog = Join-Path $work "probe-upstream.log"
+$upstreamErrorLog = Join-Path $work "probe-upstream.error.log"
+$upstreamProcess = $null
 New-Item -ItemType Directory -Force -Path $root, $stateDir, $codexHome | Out-Null
 
 # Default to the real port when free; otherwise a random high port so the
@@ -61,6 +65,12 @@ function Stop-TestGateway {
         }
       }
     } catch { }
+  }
+}
+
+function Stop-ProbeUpstream {
+  if ($script:upstreamProcess -and -not $script:upstreamProcess.HasExited) {
+    Stop-Process -Id $script:upstreamProcess.Id -Force -ErrorAction SilentlyContinue
   }
 }
 
@@ -141,8 +151,65 @@ try {
   }
   if (-not $healthy) { throw "gateway did not recover after restart" }
   Write-Step "gateway healthy after restart"
+
+  # Point the installed gateway at a local deterministic Responses upstream.
+  # This keeps the release test offline from the provider while exercising the
+  # real installed relay, caller-key, metrics, and restart path.
+  $streamProbe = Join-Path $PSScriptRoot "stream-probe.cjs"
+  if (-not (Test-Path $streamProbe)) {
+    throw "stream probe is missing from the checkout"
+  }
+  Write-Step "starting local Responses stream probe upstream"
+  $script:upstreamProcess = Start-Process -FilePath "node.exe" `
+    -ArgumentList @($streamProbe, "upstream", "--portfile", $upstreamPortFile) `
+    -WindowStyle Hidden -PassThru `
+    -RedirectStandardOutput $upstreamLog -RedirectStandardError $upstreamErrorLog
+  $upstreamPort = $null
+  for ($i = 0; $i -lt 40; $i += 1) {
+    if (Test-Path $upstreamPortFile) {
+      $upstreamPort = (Get-Content $upstreamPortFile -Raw).Trim()
+      if ($upstreamPort -match "^\d+$") { break }
+    }
+    if ($script:upstreamProcess.HasExited) { throw "stream probe upstream exited early" }
+    Start-Sleep -Milliseconds 250
+  }
+  if (-not $upstreamPort) { throw "stream probe upstream did not publish a port" }
+  Write-Step "stream probe upstream listening on $upstreamPort"
+  [System.IO.File]::AppendAllText(
+    (Join-Path $root ".env"),
+    "MODELDOCK_UPSTREAM_BASE_URL=http://127.0.0.1:$upstreamPort`r`nOPENCODE_GO_TOKEN=probe-token`r`n",
+    (New-Object System.Text.UTF8Encoding($false))
+  )
+
+  Write-Step "restarting with the local stream probe upstream"
+  $previousPreference = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  $restartOut = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root "scripts\restart.ps1") 2>&1 | ForEach-Object { "$_" })
+  $restartExit = $LASTEXITCODE
+  $ErrorActionPreference = $previousPreference
+  $restartText = ($restartOut -join "`n").Trim()
+  Write-Step $restartText
+  if ($restartExit -ne 0) { throw "restart.ps1 exited $restartExit`n$restartText" }
+
+  $healthy = $false
+  for ($i = 0; $i -lt 40; $i += 1) {
+    try {
+      $health = Invoke-WebRequest -UseBasicParsing -Uri $healthUrl -TimeoutSec 5
+      if ($health.Content -match '"ok"\s*:\s*true') { $healthy = $true; break }
+    } catch {
+      Start-Sleep -Milliseconds 500
+    }
+  }
+  if (-not $healthy) { throw "gateway did not become healthy after stream-probe restart" }
+  Write-Step "gateway healthy with stream probe upstream"
+
+  Write-Step "verifying completed stream closes cleanly"
+  $streamOut = & node $streamProbe client --gateway "http://127.0.0.1:$port" --keyfile (Join-Path $stateDir "caller-key") 2>&1
+  if ($LASTEXITCODE -ne 0) { throw "stream probe failed: $streamOut" }
+  Write-Step $streamOut
   Write-Step "RELEASE_INSTALL_VERIFY_OK"
 } finally {
+  Stop-ProbeUpstream
   Stop-TestGateway
   reg.exe delete $autostartKey /v $autostartName /f 2>$null | Out-Null
   Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
