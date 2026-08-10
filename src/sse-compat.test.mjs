@@ -296,3 +296,84 @@ test("stallTimeoutMs 0 disables the stall safety net", async () => {
   assert.equal(result.stalled, false, "no stall timer armed");
   assert.equal(result.interrupted, true, "only the client abort settled the stream");
 });
+
+test("function_call done with empty arguments is normalized to {}", async () => {
+  const state = new SseCompatState();
+  const res = { write: () => true, end: () => {}, once: () => res, on: () => res, removeListener: () => res };
+  const chunks = [];
+  res.write = (chunk) => { chunks.push(Buffer.from(chunk).toString("utf8")); return true; };
+  const events = [
+    { type: "response.output_item.added", output_index: 0, item: { id: "fc1", type: "function_call", name: "shell_command", arguments: "", status: "in_progress" } },
+    { type: "response.function_call_arguments.delta", item_id: "fc1", output_index: 0, content_index: 0, delta: "" },
+    { type: "response.output_item.done", output_index: 0, item: { id: "fc1", type: "function_call", name: "shell_command", arguments: "", status: "completed" } },
+    { type: "response.completed", response: { id: "r1", status: "completed", output: [] } },
+  ];
+  await pipeCompatStream(ssePayloads(...events), res, null, null, state);
+  const done = parseSse(chunks.join("")).find((e) => e.type === "response.output_item.done");
+  assert.equal(done.item.type, "function_call");
+  assert.equal(done.item.arguments, "{}", "empty arguments normalized");
+});
+
+test("function_call done with real arguments is untouched", async () => {
+  const state = new SseCompatState();
+  const res = { write: () => true, end: () => {}, once: () => res, on: () => res, removeListener: () => res };
+  const chunks = [];
+  res.write = (chunk) => { chunks.push(Buffer.from(chunk).toString("utf8")); return true; };
+  const events = [
+    { type: "response.output_item.added", output_index: 0, item: { id: "fc1", type: "function_call", name: "shell_command", arguments: "", status: "in_progress" } },
+    { type: "response.function_call_arguments.delta", item_id: "fc1", output_index: 0, content_index: 0, delta: "{\"cmd\":\"ls\"}" },
+    { type: "response.output_item.done", output_index: 0, item: { id: "fc1", type: "function_call", name: "shell_command", arguments: "{\"cmd\":\"ls\"}", status: "completed" } },
+    { type: "response.completed", response: { id: "r1", status: "completed", output: [] } },
+  ];
+  await pipeCompatStream(ssePayloads(...events), res, null, null, state);
+  const done = parseSse(chunks.join("")).find((e) => e.type === "response.output_item.done");
+  assert.equal(done.item.arguments, '{"cmd":"ls"}', "real arguments preserved verbatim");
+});
+
+test("clean EOF closes a function_call as completed with {} arguments", async () => {
+  const state = new SseCompatState();
+  const res = { write: () => true, end: () => {}, once: () => res, on: () => res, removeListener: () => res };
+  const chunks = [];
+  res.write = (chunk) => { chunks.push(Buffer.from(chunk).toString("utf8")); return true; };
+  // Upstream ends cleanly right after the arguments delta, without a done event.
+  const events = [
+    { type: "response.output_item.added", output_index: 0, item: { id: "fc1", type: "function_call", name: "shell_command", arguments: "", status: "in_progress" } },
+    { type: "response.function_call_arguments.delta", item_id: "fc1", output_index: 0, content_index: 0, delta: "" },
+  ];
+  await pipeCompatStream(ssePayloads(...events), res, null, null, state);
+  const done = parseSse(chunks.join("")).find((e) => e.type === "response.output_item.done");
+  assert.ok(done, "synthesized done on clean EOF");
+  assert.equal(done.item.status, "completed");
+  assert.equal(done.item.arguments, "{}", "empty arguments normalized on the clean path");
+});
+
+test("interrupted stream closes a function_call as incomplete without normalization", async () => {
+  const state = new SseCompatState();
+  const res = { write: () => true, end: () => {}, once: () => res, on: () => res, removeListener: () => res };
+  const chunks = [];
+  res.write = (chunk) => { chunks.push(Buffer.from(chunk).toString("utf8")); return true; };
+  const delta = (text) => `event: response.output_text.delta\r\ndata: ${JSON.stringify({
+    type: "response.output_text.delta", item_id: "i1", output_index: 0, content_index: 0, delta: text,
+  })}\r\n\r\n`;
+  const fcDelta = `event: response.function_call_arguments.delta\r\ndata: ${JSON.stringify({
+    type: "response.function_call_arguments.delta", item_id: "fc1", output_index: 1, content_index: 0, delta: "{\"cmd\":\"rm",
+  })}\r\n\r\n`;
+  // Message item then an interrupted function call: the error path must close
+  // the call as incomplete (never a real invocation) and leave args untouched.
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(Buffer.from(delta("thinking...")));
+      controller.enqueue(Buffer.from(fcDelta));
+      setTimeout(() => controller.error(new Error("reset")), 10);
+    },
+  });
+  const result = await pipeCompatStream(body, res, null, null, state);
+  const parsed = parseSse(chunks.join(""));
+  const done = parsed.filter((e) => e.type === "response.output_item.done");
+  assert.equal(result.truncated, true);
+  assert.ok(parsed.some((e) => e.type === "response.incomplete"), "terminal is incomplete");
+  const fcDone = done.find((e) => e.item.type === "function_call");
+  assert.ok(fcDone, "function_call closed");
+  assert.equal(fcDone.item.status, "incomplete", "truncated call never looks completed");
+  assert.equal(fcDone.item.arguments, undefined, "no empty-arguments normalization on interruption");
+});

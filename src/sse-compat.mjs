@@ -111,11 +111,19 @@ export class SseCompatState {
       return out;
     }
     if (kind === "response.output_item.done") {
+      const item = parsed?.item;
+      if (item && typeof item === "object" && item.type === "function_call") {
+        // Normalize an empty argument buffer to "{}": no-arg tools stream no
+        // deltas, and the client would otherwise JSON.parse("") on the next
+        // turn (opencodex toolCallArgumentsUsable semantics). Only applies to
+        // a real done event; interrupted streams (no done) are never
+        // normalized so a truncated call cannot turn into a real invocation.
+        if (item.arguments == null || item.arguments === "") item.arguments = "{}";
+      }
       if (!this.openItem?.announced) {
         // done without its added parent (some upstreams emit only the terminal
         // item): synthesize the parent from the done payload so the client never
         // sees a reference to an item it was never told about.
-        const item = parsed?.item;
         if (item && typeof item === "object") {
           this.outputIndex = typeof parsed?.output_index === "number" ? parsed.output_index : this.outputIndex + 1;
           this.openItem = { id: item.id || this.id("item"), type: item.type || "message", announced: true };
@@ -159,8 +167,18 @@ export class SseCompatState {
   }
 
   ensureItem(kind, hintedId) {
-    if (this.openItem?.announced) return [];
     const type = kind === "response.function_call_arguments.delta" ? "function_call" : "message";
+    if (this.openItem?.announced) {
+      if (this.openItem.type !== type) {
+        // Item type switch (e.g. message text then a tool call): close the
+        // previous item cleanly before opening the new one, mirroring what a
+        // fully-streaming upstream emits between items.
+        const closed = this.closeOpenItems();
+        this.openPart = null;
+        return [...closed, ...this.synthesizeItem(type, hintedId || this.id("item"), this.outputIndex)];
+      }
+      return [];
+    }
     const id = hintedId || this.id("item");
     return this.synthesizeItem(type, id, this.outputIndex);
   }
@@ -210,15 +228,24 @@ export class SseCompatState {
     })];
   }
 
-  closeOpenItems() {
+  // Close a still-open item. `truncating` distinguishes the terminal paths:
+  // a clean finish closes a function_call as completed with an empty-argument
+  // normalization to "{}", while an interrupted stream (upstream error / stall)
+  // closes it as status:"incomplete" WITHOUT normalization - a truncated call
+  // must never look like a real invocation.
+  closeOpenItems(truncating = false) {
     if (!this.openItem?.announced) return [];
+    const type = this.openItem.type;
     const item = {
       id: this.openItem.id,
-      type: this.openItem.type,
-      role: this.openItem.type === "message" ? "assistant" : undefined,
-      status: "completed",
-      content: this.openItem.type === "message" ? [] : undefined,
+      type,
+      role: type === "message" ? "assistant" : undefined,
+      status: truncating && type === "function_call" ? "incomplete" : "completed",
+      content: type === "message" ? [] : undefined,
     };
+    if (type === "function_call" && !truncating && (item.arguments == null || item.arguments === "")) {
+      item.arguments = "{}";
+    }
     this.openItem = null;
     return [synthesizeEvent("response.output_item.done", {
       type: "response.output_item.done",
@@ -316,8 +343,23 @@ export async function pipeCompatStream(upstreamBody, res, tee, markFirstResponse
       } catch {
         continue;
       }
+      // Capture the raw empty-args state BEFORE before() may normalize the
+      // parsed object in memory (the wire block still carries the original).
+      const emptyCallArgs =
+        parsed?.type === "response.output_item.done"
+        && parsed?.item?.type === "function_call"
+        && (parsed.item.arguments == null || parsed.item.arguments === "");
       emit(state.before(parsed));
-      writeOut(block + delim);
+      // P0-3: the one sanctioned content rewrite - a completed function_call
+      // with an empty argument buffer becomes "{}" so the client's next turn
+      // never JSON.parse("") (no-arg tools stream no deltas). The original
+      // block is otherwise forwarded byte-for-byte.
+      let outBlock = block;
+      if (emptyCallArgs) {
+        parsed.item.arguments = "{}";
+        outBlock = block.replace(/^data: .*$/m, `data: ${JSON.stringify(parsed)}`);
+      }
+      writeOut(outBlock + delim);
       return;
     }
     writeOut(block + delim);
@@ -368,7 +410,7 @@ export async function pipeCompatStream(upstreamBody, res, tee, markFirstResponse
         emit([
           ...state.ensureCreated(),
           ...state.closeOpenParts(),
-          ...state.closeOpenItems(),
+          ...state.closeOpenItems(true),
           state.stallFailedEvent(stallTimeoutMs),
         ]);
         try {
@@ -411,7 +453,7 @@ export async function pipeCompatStream(upstreamBody, res, tee, markFirstResponse
         truncated = true;
         // ensureCreated is idempotent: an error before any event still gets
         // the response envelope so the client can attach the incomplete to it.
-        emit([...state.ensureCreated(), ...state.closeOpenParts(), ...state.closeOpenItems(), state.incompleteEvent()]);
+        emit([...state.ensureCreated(), ...state.closeOpenParts(), ...state.closeOpenItems(true), state.incompleteEvent()]);
       }
       try {
         res.end();
