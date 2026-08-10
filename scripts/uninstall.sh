@@ -36,7 +36,7 @@ if [ "$(uname -s)" = "Darwin" ]; then
 fi
 
 # Clear the install state but preserve the memory vault: MEMORY.md captures and
-# memory.db are user data, not disposable runtime state.
+# global.db and node databases are user data, not disposable runtime state.
 if [ -d "$STATE_DIR" ]; then
   for entry in "$STATE_DIR"/* "$STATE_DIR"/.[!.]*; do
     [ -e "$entry" ] || continue

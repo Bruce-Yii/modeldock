@@ -514,7 +514,7 @@ function render(data) {
   status.className = `status-pill ${ready ? "ready" : "error"}`;
   status.querySelector("strong").textContent = ready ? t("status.ready") : t("status.tokenMissing");
   renderModelOptions(data);
-  set("uptime", `${t("status.uptime")} ${uptime(data.uptimeMs)}`);
+  set("uptime", "v" + (data.update?.currentVersion || "") + " " + t("status.uptime") + " " + uptime(data.uptimeMs));
   set("main-model", data.config.routeModel || data.config.mainModel);
   if (data.config.routeProviderLabel || data.config.mainProviderLabel) set("route-provider", data.config.routeProviderLabel || data.config.mainProviderLabel);
   if (data.config.mainWire) set("route-wire", data.config.mainWire === "chat" ? "chat/completions" : "responses");

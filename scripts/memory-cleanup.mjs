@@ -1,17 +1,12 @@
-// Delete memory units scoped to a disposable bucket (e.g. the benchmark scope
-// written through MODELDOCK_MEMORY_SCOPE), so a test run leaves no residue in
+#!/usr/bin/env node
+// Delete memory units in a disposable node (e.g. the benchmark scope written
+// through MODELDOCK_MEMORY_SCOPE), so a test run leaves no content residue in
 // the shared vault. Requires MODELDOCK_MEMORY=1.
 //
 //   node scripts/memory-cleanup.mjs --scope "D:\bench\deepswe"
-//
-// The gateway holds memory.db open; WAL mode lets a second connection write
-// concurrently and busy_timeout waits for the writer instead of failing.
-// content_fts is a plain FTS5 table (not external content), so its rows must be
-// removed explicitly alongside content_units. source_* rows are left as
-// orphans: they do not participate in recall.
-import { DatabaseSync } from "node:sqlite";
-import path from "node:path";
+
 import { loadConfig } from "../src/config.mjs";
+import { memoryStoreFor } from "../src/memory.mjs";
 
 const argv = process.argv.slice(2);
 const idx = argv.indexOf("--scope");
@@ -27,18 +22,12 @@ if (!config.memoryEnabled) {
   process.exit(1);
 }
 
-const dbPath = path.join(config.memoryDir, "memory.db");
-const db = new DatabaseSync(dbPath);
-db.exec("PRAGMA busy_timeout = 5000");
-
-const like = `%${scope.toLowerCase()}%`;
-const before = db.prepare("SELECT COUNT(*) AS n FROM content_units WHERE scope_paths LIKE ?").get(like).n;
-
-db.exec("BEGIN");
-const nFts = db
-  .prepare("DELETE FROM content_fts WHERE id IN (SELECT id FROM content_units WHERE scope_paths LIKE ?)")
-  .run(like).changes;
-const nUnits = db.prepare("DELETE FROM content_units WHERE scope_paths LIKE ?").run(like).changes;
-db.exec("COMMIT");
-
-console.log(`memory-cleanup scope=${JSON.stringify(scope)} deleted units=${nUnits} fts=${nFts} (was ${before})`);
+const store = memoryStoreFor(config);
+try {
+  console.log(JSON.stringify({
+    scope,
+    ...store.purgeScope(scope),
+  }));
+} finally {
+  store.close();
+}

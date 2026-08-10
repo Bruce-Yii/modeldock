@@ -75,5 +75,5 @@ test("serves the memory view when the vault is enabled", async (t) => {
   assert.equal(data.enabled, true);
   assert.ok(Array.isArray(data.content));
   assert.ok(Array.isArray(data.events));
-  assert.equal(data.status.dbPath, path.join(dir, "memory.db"));
+  assert.equal(data.status.dbPath, path.join(dir, "global.db"));
 });

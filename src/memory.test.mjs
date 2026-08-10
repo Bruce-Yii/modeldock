@@ -3,13 +3,18 @@ import test from "node:test";
 import os from "node:os";
 import path from "node:path";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
-import { MemoryStore } from "./memory.mjs";
+import { DatabaseSync } from "node:sqlite";
+import { MEMORY_SCHEMA, MemoryStore, migrateLegacyMemory, nodeDbPathFor, scopeNodeId } from "./memory.mjs";
 
 function memoryDir() {
   const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-memory-test-"));
   const memories = path.join(dir, "memories");
   mkdirSync(memories, { recursive: true });
   return { dir, memories };
+}
+
+function storeFor(dir) {
+  return new MemoryStore({ memoryDir: path.join(dir, "vault") });
 }
 
 function writeFixture(memories, { baseline = true } = {}) {
@@ -37,7 +42,7 @@ function writeFixture(memories, { baseline = true } = {}) {
 test("capture indexes memory files and search finds them", () => {
   const { dir, memories } = memoryDir();
   writeFixture(memories);
-  const store = new MemoryStore({ dbPath: path.join(dir, "memory.db") });
+  const store = storeFor(dir);
   try {
     const captured = store.captureCodexMemories(dir);
     assert.equal(captured.ok, true);
@@ -65,7 +70,7 @@ test("capture indexes memory files and search finds them", () => {
 test("recall filters by working-directory scope", () => {
   const { dir, memories } = memoryDir();
   writeFixture(memories);
-  const store = new MemoryStore({ dbPath: path.join(dir, "memory.db") });
+  const store = storeFor(dir);
   try {
     store.captureCodexMemories(dir);
 
@@ -86,7 +91,7 @@ test("recall filters by working-directory scope", () => {
 
 test("scopeOnly restricts recall to the project bucket and never falls back to global", () => {
   const { dir } = memoryDir();
-  const store = new MemoryStore({ dbPath: path.join(dir, "memory.db") });
+  const store = storeFor(dir);
   try {
     store.storeMemory({ content: "General note visible everywhere.", scopeDir: null, kind: "knowledge" });
     store.storeMemory({
@@ -120,7 +125,7 @@ test("scopeOnly restricts recall to the project bucket and never falls back to g
 
 test("storeMemory persists an explicit memory scoped to a project", () => {
   const { dir } = memoryDir();
-  const store = new MemoryStore({ dbPath: path.join(dir, "memory.db") });
+  const store = storeFor(dir);
   try {
     const saved = store.storeMemory({
       content: "The QCM baseline uses the DIVO cash-sleeve version with quality >= 280.",
@@ -147,7 +152,7 @@ test("storeMemory persists an explicit memory scoped to a project", () => {
 
 test("search layers project hits first and falls back to global", () => {
   const { dir } = memoryDir();
-  const store = new MemoryStore({ dbPath: path.join(dir, "memory.db") });
+  const store = storeFor(dir);
   try {
     store.storeMemory({
       content: "The QCM baseline uses the DIVO cash-sleeve version.",
@@ -171,7 +176,7 @@ test("search layers project hits first and falls back to global", () => {
     );
 
     const full = store.search({ query: "baseline" });
-    assert.equal(full.count, 2, "without working-directory context the recall stays full");
+    assert.equal(full.count, 1, "without working-directory context the recall stays in the global node");
   } finally {
     store.close();
     rmSync(dir, { recursive: true, force: true });
@@ -180,7 +185,7 @@ test("search layers project hits first and falls back to global", () => {
 
 test("recall falls back to permissive OR when the strict AND misses", () => {
   const { dir } = memoryDir();
-  const store = new MemoryStore({ dbPath: path.join(dir, "memory.db") });
+  const store = storeFor(dir);
   try {
     store.storeMemory({
       content: "The benchmark harness proves ModelDock tools amplify DeepSeek on DeepSWE.",
@@ -202,7 +207,7 @@ test("recall falls back to permissive OR when the strict AND misses", () => {
 
 test("storeMemory dedupes identical content and supersedes via a stable key", () => {
   const { dir } = memoryDir();
-  const store = new MemoryStore({ dbPath: path.join(dir, "memory.db") });
+  const store = storeFor(dir);
   try {
     const first = store.storeMemory({ content: "Prefer fast iteration.", kind: "preference", key: "iter-style" });
     assert.equal(first.stored, true);
@@ -223,7 +228,7 @@ test("storeMemory dedupes identical content and supersedes via a stable key", ()
     assert.match(hit.text, /daily checkpoints/);
     assert.match(hit.text, /key: iter-style/, "recall output exposes the stable key");
 
-    const states = store.db.prepare("SELECT memory_state, COUNT(*) AS n FROM content_units GROUP BY memory_state").all();
+    const states = store.nodeDb("global").prepare("SELECT memory_state, COUNT(*) AS n FROM content_units GROUP BY memory_state").all();
     const byState = Object.fromEntries(states.map((row) => [row.memory_state, row.n]));
     assert.ok(byState.superseded >= 1, "old key revision is marked superseded");
   } finally {
@@ -234,13 +239,12 @@ test("storeMemory dedupes identical content and supersedes via a stable key", ()
 
 test("recall exposes the key so a later session can correct the entry", () => {
   const { dir } = memoryDir();
-  const dbPath = path.join(dir, "memory.db");
-  let store = new MemoryStore({ dbPath });
+  let store = storeFor(dir);
   try {
     store.storeMemory({ content: "Trading rule: buy only above MA200.", kind: "baseline", key: "ma200-rule" });
     store.close();
     // A later session has only the recall output to work from.
-    store = new MemoryStore({ dbPath });
+    store = storeFor(dir);
     const hit = store.search({ query: "MA200" });
     assert.equal(hit.count, 1);
     assert.match(hit.text, /key: ma200-rule/);
@@ -269,7 +273,7 @@ test("recall exposes the key so a later session can correct the entry", () => {
 test("memory events and content view track stores and captures", () => {
   const { dir, memories } = memoryDir();
   writeFixture(memories);
-  const store = new MemoryStore({ dbPath: path.join(dir, "memory.db") });
+  const store = storeFor(dir);
   try {
     store.captureCodexMemories(dir);
     store.storeMemory({ content: "Remember the DIVO baseline.", scopeDir: "D:\\projects\\stockscan", kind: "baseline" });
@@ -295,7 +299,7 @@ test("memory events and content view track stores and captures", () => {
 test("unchanged files are no-ops and edits create superseded revisions", () => {
   const { dir, memories } = memoryDir();
   writeFixture(memories);
-  const store = new MemoryStore({ dbPath: path.join(dir, "memory.db") });
+  const store = storeFor(dir);
   try {
     store.captureCodexMemories(dir);
     const second = store.captureCodexMemories(dir);
@@ -315,7 +319,8 @@ test("unchanged files are no-ops and edits create superseded revisions", () => {
 
     const latest = store.search({ query: "updated threshold", scopeDir: "D:\\projects\\stockscan" });
     assert.equal(latest.count, 1);
-    const states = store.db.prepare("SELECT memory_state, COUNT(*) AS n FROM content_units GROUP BY memory_state").all();
+    const node = store.nodeDb("global");
+    const states = node.prepare("SELECT memory_state, COUNT(*) AS n FROM content_units GROUP BY memory_state").all();
     const byState = Object.fromEntries(states.map((row) => [row.memory_state, row.n]));
     assert.ok(byState.superseded >= 1, "old revision units are superseded");
     assert.ok(byState.captured >= 1, "new revision units are captured");
@@ -328,13 +333,114 @@ test("unchanged files are no-ops and edits create superseded revisions", () => {
 test("search rejects empty queries and punctuation-only input", () => {
   const { dir, memories } = memoryDir();
   writeFixture(memories);
-  const store = new MemoryStore({ dbPath: path.join(dir, "memory.db") });
+  const store = storeFor(dir);
   try {
     store.captureCodexMemories(dir);
     assert.throws(() => store.search({ query: "   " }), /non-empty query/);
     assert.throws(() => store.search({ query: "--- !!!" }), /non-empty query/);
   } finally {
     store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("stores project memories in independent nodes and exposes node aggregates", () => {
+  const { dir } = memoryDir();
+  const store = storeFor(dir);
+  const project = "D:\\projects\\modeldock";
+  try {
+    store.storeMemory({ content: "Project-only routing rule.", scopeDir: project, kind: "decision" });
+    const projectNode = scopeNodeId(project);
+    assert.equal(nodeDbPathFor(path.join(dir, "vault"), projectNode), store.nodes().find((node) => node.nodeId === projectNode)?.dbPath);
+    assert.equal(store.nodeDb(projectNode).prepare("SELECT COUNT(*) AS n FROM content_units").get().n, 1);
+    assert.equal(store.nodeDb("global").prepare("SELECT COUNT(*) AS n FROM content_units").get().n, 0);
+    assert.deepEqual(store.status().nodes.sort(), ["global", projectNode].sort());
+    assert.ok(store.contentView(20).some((row) => row.node === projectNode));
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("links compose recall across nodes without copying knowledge", () => {
+  const { dir } = memoryDir();
+  const store = storeFor(dir);
+  const project = "D:\\projects\\modeldock";
+  const sharedCore = "D:\\projects\\shared-core";
+  const linked = "D:\\projects\\shared-patterns";
+  try {
+    store.storeMemory({ content: "Shared rule: preserve stable interfaces across tools.", scopeDir: sharedCore, kind: "knowledge" });
+    store.storeMemory({ content: "Linked pattern: use append-only event records.", scopeDir: linked, kind: "knowledge" });
+    store.storeMemory({ content: "Project fact: ModelDock uses a thin gateway.", scopeDir: project, kind: "baseline" });
+    store.link({ fromScope: project, toScope: sharedCore, kind: "reference", label: "shared rule" });
+    store.link({ fromScope: project, toScope: linked, kind: "reference", label: "shared pattern" });
+
+    const hit = store.search({ query: "interfaces append-only", scopeDir: project, limit: 4 });
+    assert.equal(hit.count, 2);
+    assert.match(hit.text, /stable interfaces/);
+    assert.match(hit.text, /append-only event records/);
+    assert.match(hit.text, /via: shared pattern/);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a missing project node still falls back to global", () => {
+  const { dir } = memoryDir();
+  const store = storeFor(dir);
+  try {
+    store.storeMemory({ content: "Global fallback guidance.", kind: "knowledge" });
+    const hit = store.search({ query: "fallback guidance", scopeDir: "D:\\projects\\not-created-yet" });
+    assert.equal(hit.count, 1);
+    assert.match(hit.text, /Global fallback guidance/);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("legacy single database migrates into global and scoped node files", () => {
+  const { dir } = memoryDir();
+  const vault = path.join(dir, "vault");
+  const legacyPath = path.join(vault, "memory.db");
+  mkdirSync(vault, { recursive: true });
+  const legacy = new DatabaseSync(legacyPath);
+  legacy.exec(MEMORY_SCHEMA);
+  legacy.prepare("INSERT INTO sources VALUES (?, ?, ?, ?)").run("src_1", "test", "fixture", "2026-01-01T00:00:00.000Z");
+  legacy.prepare("INSERT INTO source_items VALUES (?, ?, ?, ?, ?)").run("item_1", "src_1", "fixture", null, "memory");
+  legacy.prepare("INSERT INTO source_revisions VALUES (?, ?, ?, ?, ?, ?, ?)").run("rev_1", "item_1", 1, "sha-1", 10, "2026-01-01T00:00:00.000Z", null);
+  legacy.prepare("INSERT INTO source_revisions VALUES (?, ?, ?, ?, ?, ?, ?)").run("rev_2", "item_1", 2, "sha-2", 11, "2026-01-02T00:00:00.000Z", "rev_1");
+  legacy.prepare("INSERT INTO content_units VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
+    "unit_1", "rev_1", "knowledge", "Global note", "Global portable note.", "hash-1", "{}", "agent_output", "captured", "", "2026-01-01T00:00:00.000Z",
+  );
+  legacy.prepare("INSERT INTO content_units VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
+    "unit_2", "rev_2", "baseline", "Project note", "Project portable note.", "hash-2", "D:\\projects\\portable", "agent_output", "captured", "d:\\projects\\portable", "2026-01-02T00:00:00.000Z",
+  );
+  legacy.prepare("INSERT INTO content_fts VALUES (?, ?, ?)").run("unit_1", "Global note", "Global portable note.");
+  legacy.prepare("INSERT INTO content_fts VALUES (?, ?, ?)").run("unit_2", "Project note", "Project portable note.");
+  legacy.prepare("INSERT INTO memory_events VALUES (?, ?, ?, ?, ?)").run("evt_1", "store_memory", "global", "{}", "2026-01-01T00:00:00.000Z");
+  legacy.close();
+
+  try {
+    const result = migrateLegacyMemory({ memoryDir: vault });
+    assert.equal(result.skipped, false);
+    assert.equal(result.units, 2);
+    assert.equal(result.nodes, 2);
+    assert.ok(result.backupFiles.length >= 1);
+    assert.ok(result.archivePath);
+    const store = storeFor(dir);
+    try {
+      assert.equal(store.search({ query: "portable note" }).count, 1);
+      const scoped = store.search({ query: "project portable", scopeDir: "D:\\projects\\portable" });
+      assert.equal(scoped.count, 2);
+      assert.match(scoped.text, /Project note/);
+      assert.equal(store.status().content_units, 2);
+      assert.equal(store.status().events, 1);
+    } finally {
+      store.close();
+    }
+  } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });

@@ -1059,7 +1059,7 @@ test("uninstall preserves the memory vault and never kills a foreign listener", 
   const stateDir = path.join(root, ".modeldock");
   const memoryDir = path.join(stateDir, "memory");
   mkdirSync(memoryDir, { recursive: true });
-  writeFileSync(path.join(memoryDir, "memory.db"), "sqlite-bytes");
+  writeFileSync(path.join(memoryDir, "global.db"), "sqlite-bytes");
   writeFileSync(path.join(stateDir, "caller-key"), "not-a-real-key\n");
   writeFileSync(path.join(stateDir, "autostart-initialized"), "2026-01-01\n");
 
@@ -1089,7 +1089,7 @@ test("uninstall preserves the memory vault and never kills a foreign listener", 
   child.stderr.on("data", (d) => (err += d));
   const exitCode = await new Promise((resolve) => child.on("close", resolve));
   assert.equal(exitCode, 0, `uninstall failed:\n${out}\n${err}`);
-  assert.ok(existsSync(path.join(memoryDir, "memory.db")), "uninstall must preserve the memory vault");
+  assert.ok(existsSync(path.join(memoryDir, "global.db")), "uninstall must preserve the memory vault");
   assert.ok(!existsSync(path.join(stateDir, "caller-key")), "runtime state files should be cleared");
   assert.ok(!existsSync(path.join(stateDir, "autostart-initialized")), "the autostart mark should be cleared");
   assert.match(out + err, /preserved/i, "uninstall should say the memory vault is preserved");

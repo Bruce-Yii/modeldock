@@ -164,7 +164,9 @@ test("install.sh macOS branch: plist, launchctl, marker (WSL or direct)", async 
   assert.ok(existsSync(plist), "plist should be written to the redirectable LaunchAgents dir");
   const plistText = readFileSync(plist, "utf8");
   assert.match(plistText, /<key>RunAtLoad<\/key><true\/>/, "plist should load at login");
-  assert.ok(plistText.includes("start-hidden.sh"), "plist should launch the installed launcher");
+  assert.match(plistText, /dist\/modeldock\.mjs/, "plist should launch the installed bundle directly");
+  assert.match(plistText, /<key>KeepAlive<\/key><true\/>/, "plist should keep the gateway alive");
+  assert.match(plistText, /<key>ThrottleInterval<\/key><integer>10<\/integer>/, "plist should throttle crash-loop restarts");
   assert.ok(plistText.includes("<key>MODELDOCK_NODE_PATH</key>"), "plist should pin the node binary");
   assert.match(plistText, /\/opt\/homebrew\/bin/, "plist should keep the launchd-safe PATH");
 

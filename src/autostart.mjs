@@ -5,12 +5,13 @@
 // - macOS: a per-user LaunchAgent (~/Library/LaunchAgents/com.modeldock.gateway.plist)
 //   that launchd loads at login and keeps running. No sudo needed.
 //
-// The autostart entry points at scripts/start-hidden.*. On macOS launchd starts
-// with a sparse PATH and first-run autostart can race the installer-started
-// gateway, so keep that logic in the launcher instead of hardcoding a Node binary
-// and server entry in the plist.
+// On macOS the plist runs the Node gateway directly so launchd owns the process
+// lifetime: KeepAlive restarts it after a crash (or after a self-update exits),
+// and ThrottleInterval keeps a crash loop from hammering the machine. launchd
+// starts with a sparse PATH, so the plist pins the Node binary and the PATH.
 
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdir, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -54,10 +55,7 @@ function xmlEscape(value) {
     .replaceAll("'", "&apos;");
 }
 
-export function plistXml(launcherPath, rootDir, {
-  nodePath = process.execPath,
-  tmpDir = os.tmpdir(),
-} = {}) {
+export function plistXml(nodePath, serverEntry, rootDir) {
   const pathDirs = [
     path.dirname(nodePath),
     "/opt/homebrew/bin",
@@ -80,13 +78,15 @@ export function plistXml(launcherPath, rootDir, {
   </dict>
   <key>ProgramArguments</key>
   <array>
-    <string>/bin/sh</string>
-    <string>${xmlEscape(launcherPath)}</string>
+    <string>${xmlEscape(nodePath)}</string>
+    <string>${xmlEscape(serverEntry)}</string>
   </array>
   <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
   <key>WorkingDirectory</key><string>${xmlEscape(rootDir)}</string>
-  <key>StandardOutPath</key><string>${xmlEscape(path.join(tmpDir, "modeldock.log"))}</string>
-  <key>StandardErrorPath</key><string>${xmlEscape(path.join(tmpDir, "modeldock.log"))}</string>
+  <key>StandardOutPath</key><string>${xmlEscape(path.join(rootDir, "modeldock.log"))}</string>
+  <key>StandardErrorPath</key><string>${xmlEscape(path.join(rootDir, "modeldock.log"))}</string>
 </dict>
 </plist>`;
 }
@@ -124,7 +124,9 @@ export function createAutostart({
   async function macGetEnabled() {
     try {
       const out = await exec("launchctl", ["list"]);
-      return out.split(/\r?\n/).some((line) => line.trim() === PLIST_LABEL);
+      return out
+        .split(/\r?\n/)
+        .some((line) => line.trim().split(/\t+/).pop() === PLIST_LABEL);
     } catch {
       return false;
     }
@@ -134,8 +136,10 @@ export function createAutostart({
     const plistPath = path.join(macPlistDir(), PLIST_NAME);
     if (enabled) {
       const rootDir = path.resolve(dirname, "..");
+      const bundle = path.join(rootDir, "dist", "modeldock.mjs");
+      const serverEntry = existsSync(bundle) ? bundle : path.join(rootDir, "src", "server.mjs");
       await mkdir(path.dirname(plistPath), { recursive: true });
-      await writeFile(plistPath, plistXml(launcherPath, rootDir), "utf8");
+      await writeFile(plistPath, plistXml(process.execPath, serverEntry, rootDir), "utf8");
       await exec("launchctl", ["unload", plistPath]).catch(() => {});
       await exec("launchctl", ["load", "-w", plistPath]);
     } else {

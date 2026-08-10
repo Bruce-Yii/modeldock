@@ -45,7 +45,7 @@ try {
 }
 
 # Clear the install state but preserve the memory vault: MEMORY.md captures and
-# memory.db are user data, not disposable runtime state.
+# global.db and node databases are user data, not disposable runtime state.
 if (Test-Path -LiteralPath $stateDir) {
     Get-ChildItem -LiteralPath $stateDir -Force | Where-Object { $_.Name -ne "memory" } |
         Remove-Item -Recurse -Force

@@ -337,22 +337,59 @@ cat > "$RECOVER" <<'EOF'
 #!/bin/sh
 set -eu
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+STATE_DIR="${MODELDOCK_STATE_DIR:-$ROOT}"
 PORT="${MODELDOCK_PORT:-4097}"
 if [ -f "$ROOT/.env" ]; then
   ENV_PORT="$(sed -n 's/^MODELDOCK_PORT=//p' "$ROOT/.env" | tail -n 1)"
   [ -n "$ENV_PORT" ] && PORT="$ENV_PORT"
 fi
 restart_gateway() {
-  pid="$(lsof -ti "tcp:$PORT" 2>/dev/null | head -n 1 || true)"
-  if [ -n "$pid" ]; then
-    command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
-    case "$command" in *"$ROOT"*) kill "$pid";; *) echo "Refusing to stop an unrelated process on port $PORT." >&2; exit 1;; esac
+  if [ ! -x "$ROOT/scripts/start-hidden.sh" ]; then
+    echo "start-hidden.sh is missing from $ROOT" >&2
+    exit 1
+  fi
+  old_pid=""
+  has_lsof=0
+  if command -v lsof >/dev/null 2>&1; then has_lsof=1; fi
+  if [ "$has_lsof" -eq 1 ]; then
+    pid="$(lsof -ti "tcp:$PORT" 2>/dev/null | head -n 1 || true)"
+    if [ -n "$pid" ]; then
+      command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+      case "$command" in
+        *"$ROOT"*) old_pid="$pid"; kill "$pid";;
+        *) echo "Refusing to stop an unrelated process on port $PORT." >&2; exit 1;;
+      esac
+    fi
+  fi
+  # Give the old process and its socket time to release before starting the
+  # replacement, so the new instance cannot fail with EADDRINUSE and the health
+  # probe below cannot be answered by the dying process (false healthy).
+  i=0
+  while [ "$i" -lt 20 ]; do
+    alive=""
+    if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then alive=1; fi
+    listening=""
+    if [ "$has_lsof" -eq 1 ] && [ -n "$(lsof -ti "tcp:$PORT" 2>/dev/null | head -n 1 || true)" ]; then listening=1; fi
+    if [ -z "$alive" ] && [ -z "$listening" ]; then break; fi
+    sleep 0.25
+    i=$((i + 1))
+  done
+  if [ "$i" -ge 20 ]; then
+    echo "Port $PORT did not release within 5s; aborting restart." >&2
+    exit 1
   fi
   "$ROOT/scripts/start-hidden.sh"
   i=0
   while [ "$i" -lt 40 ]; do
     if curl -fsS --max-time 2 "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1; then
-      echo "ModelDock gateway is healthy at http://127.0.0.1:$PORT"; return
+      if [ "$has_lsof" -eq 1 ]; then
+        new_pid="$(lsof -ti "tcp:$PORT" 2>/dev/null | head -n 1 || true)"
+        if [ -n "$new_pid" ] && [ "$new_pid" != "$old_pid" ]; then
+          echo "ModelDock gateway is healthy at http://127.0.0.1:$PORT (PID $new_pid)"; return
+        fi
+      else
+        echo "ModelDock gateway is healthy at http://127.0.0.1:$PORT"; return
+      fi
     fi
     sleep 0.25; i=$((i + 1))
   done
@@ -392,13 +429,75 @@ console.log(`Codex native route restored from ${backup}`);
 console.log("Fully quit and restart Codex.");
 NODE
 }
+repair_autostart() {
+  if [ "$(uname -s)" != "Darwin" ] && [ "${MODELDOCK_FAKE_DARWIN:-}" != "1" ]; then
+    echo "Start-at-login repair is macOS-only; on Windows use the installer's recover menu." >&2
+    return
+  fi
+  if [ ! -e "$STATE_DIR/autostart-initialized" ]; then
+    echo "No start-at-login decision was recorded; enable it from the dashboard Settings instead." >&2
+    return
+  fi
+  NODE_BIN=""
+  for d in "$ROOT"/node/v*; do
+    [ -d "$d" ] && [ -x "$d/bin/node" ] || continue
+    NODE_BIN="$d/bin/node"
+    break
+  done
+  [ -n "$NODE_BIN" ] || NODE_BIN="$(command -v node || true)"
+  if [ -z "$NODE_BIN" ]; then
+    echo "node not found; cannot regenerate the launch agent." >&2
+    exit 1
+  fi
+  if [ -f "$ROOT/dist/modeldock.mjs" ]; then
+    SERVER="$ROOT/dist/modeldock.mjs"
+  else
+    SERVER="$ROOT/src/server.mjs"
+  fi
+  PLIST_DIR="${MODELDOCK_AUTOSTART_PLIST_DIR:-$HOME/Library/LaunchAgents}"
+  PLIST="$PLIST_DIR/com.modeldock.gateway.plist"
+  mkdir -p "$PLIST_DIR"
+  cat > "$PLIST" <<PLISTEOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.modeldock.gateway</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>$(dirname "$NODE_BIN"):/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>MODELDOCK_NODE_PATH</key><string>$NODE_BIN</string>
+  </dict>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$NODE_BIN</string>
+    <string>$SERVER</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>WorkingDirectory</key><string>$ROOT</string>
+  <key>StandardOutPath</key><string>$ROOT/modeldock.log</string>
+  <key>StandardErrorPath</key><string>$ROOT/modeldock.log</string>
+</dict>
+</plist>
+PLISTEOF
+  launchctl unload "$PLIST" >/dev/null 2>&1 || true
+  if launchctl load -w "$PLIST"; then
+    echo "Start-at-login re-enabled."
+  else
+    echo "launchctl load failed; check $ROOT/modeldock.log and the plist." >&2
+    exit 1
+  fi
+}
 echo "ModelDock manual recovery"
 echo "1. Restart ModelDock gateway"
 echo "2. Restore Codex native route"
+echo "3. Repair start-at-login"
 echo "Q. Quit"
-printf "Choose 1, 2, or Q: "
+printf "Choose 1, 2, 3, or Q: "
 read -r choice
-case "$choice" in 1) restart_gateway ;; 2) restore_native ;; q|Q|"") exit 0 ;; *) echo "Unknown choice: $choice" >&2; exit 1 ;; esac
+case "$choice" in 1) restart_gateway ;; 2) restore_native ;; 3) repair_autostart ;; q|Q|"") exit 0 ;; *) echo "Unknown choice: $choice" >&2; exit 1 ;; esac
 EOF
 chmod +x "$RECOVER"
 
@@ -449,6 +548,7 @@ echo "  content-to-video skill installed to $SKILL_DEST"
 STATE_DIR="${MODELDOCK_STATE_DIR:-$ROOT}"
 AUTOSTART_MARK="$STATE_DIR/autostart-initialized"
 if [ "$SKIP_START" != "1" ] && [ ! -e "$AUTOSTART_MARK" ] && [ "$(uname -s)" = "Darwin" ]; then
+  SERVER="$ROOT/dist/modeldock.mjs"
   PLIST_DIR="${MODELDOCK_AUTOSTART_PLIST_DIR:-$HOME/Library/LaunchAgents}"
   PLIST="$PLIST_DIR/com.modeldock.gateway.plist"
   mkdir -p "$PLIST_DIR"
@@ -465,10 +565,12 @@ if [ "$SKIP_START" != "1" ] && [ ! -e "$AUTOSTART_MARK" ] && [ "$(uname -s)" = "
   </dict>
   <key>ProgramArguments</key>
   <array>
-    <string>/bin/sh</string>
-    <string>$ROOT/scripts/start-hidden.sh</string>
+    <string>$NODE_BIN</string>
+    <string>$SERVER</string>
   </array>
   <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
   <key>WorkingDirectory</key><string>$ROOT</string>
   <key>StandardOutPath</key><string>$ROOT/modeldock.log</string>
   <key>StandardErrorPath</key><string>$ROOT/modeldock.log</string>
@@ -481,7 +583,9 @@ EOF
     printf '%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$AUTOSTART_MARK"
     echo "  start at login enabled (default)"
   else
-    echo "WARNING: could not enable start at login during install" >&2
+    echo "ERROR: could not enable start at login (launchctl load failed)." >&2
+    echo "       The gateway still works; run the recovery script and choose" >&2
+    echo "       'Repair start-at-login' to fix it later." >&2
   fi
 fi
 
