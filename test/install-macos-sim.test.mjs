@@ -117,6 +117,9 @@ test("install.sh macOS branch: plist, launchctl, marker (WSL or direct)", async 
   let exitCode;
   let out = "";
   let err = "";
+  const env = isWindows
+    ? undefined
+    : { ...process.env, ...sandboxEnv({ root: installDir, fakeBin, launchctlLog, releaseUrl, bridgeUrl, skillBaseUrl, port: appPort }) };
   if (isWindows) {
     // Drive install.sh from inside WSL: the sandbox dir is on the Windows side,
     // and the fake node/uname/launchctl shims live there too. The runner script
@@ -148,17 +151,13 @@ test("install.sh macOS branch: plist, launchctl, marker (WSL or direct)", async 
     child.stderr.on("data", (d) => (err += d));
     exitCode = await new Promise((resolve) => child.on("close", resolve));
   } else {
-    const env = {
-      ...process.env,
-      ...sandboxEnv({ root: installDir, fakeBin, launchctlLog, releaseUrl, bridgeUrl, skillBaseUrl, port: appPort }),
-    };
     const child = spawn("sh", [installer], { env, stdio: ["ignore", "pipe", "pipe"] });
     child.stdout.on("data", (d) => (out += d));
     child.stderr.on("data", (d) => (err += d));
     exitCode = await new Promise((resolve) => child.on("close", resolve));
   }
   assert.equal(exitCode, 0, `install.sh failed:\n${out}\n${err}`);
-  assert.match(out, /start at login enabled \(default\)/, `installer should report the default autostart\n${out}`);
+  assert.match(out, /start at login enabled/, `installer should report the default autostart\n${out}`);
 
   const plist = path.join(installDir, "LaunchAgents", "com.modeldock.gateway.plist");
   assert.ok(existsSync(plist), "plist should be written to the redirectable LaunchAgents dir");
@@ -176,6 +175,24 @@ test("install.sh macOS branch: plist, launchctl, marker (WSL or direct)", async 
   assert.ok(launchctlCalls.includes("com.modeldock.gateway.plist"), "launchctl should target our plist");
 
   assert.ok(existsSync(path.join(installDir, ".modeldock", "autostart-initialized")), "installer should record the decision marker");
+
+  // Reinstall with the decision marker already present: start at login must be
+  // (re-)enabled on every install, not only on a first install.
+  if (!isWindows) {
+    const loadCountBefore = (readFileSync(launchctlLog, "utf8").match(/load -w/g) || []).length;
+    let out2 = "";
+    let err2 = "";
+    const child2 = spawn("sh", [installer], { env, stdio: ["ignore", "pipe", "pipe"] });
+    child2.stdout.on("data", (d) => (out2 += d));
+    child2.stderr.on("data", (d) => (err2 += d));
+    const exit2 = await new Promise((resolve) => child2.on("close", resolve));
+    assert.equal(exit2, 0, `second install.sh failed:\n${out2}\n${err2}`);
+    assert.match(out2, /start at login enabled/, `reinstall should re-enable start at login\n${out2}`);
+    const launchctlCalls2 = readFileSync(launchctlLog, "utf8");
+    const loadCountAfter = (launchctlCalls2.match(/load -w/g) || []).length;
+    assert.equal(loadCountAfter, loadCountBefore + 1, "reinstall should load the plist again");
+    assert.ok(existsSync(plist), "reinstall should keep the plist in place");
+  }
   for (const file of [
     path.join(installDir, "dist", "modeldock.mjs"),
     path.join(installDir, "dist", "mcp-standalone.mjs"),

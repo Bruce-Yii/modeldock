@@ -743,15 +743,18 @@ for rel in $SKILL_FILES; do
 done
 echo "  content-to-video skill installed to $SKILL_DEST"
 
-# 3. Enable login autostart on a first install. The gateway also has this
-#    safeguard, but doing it here makes the install result deterministic even
-#    when the first background start is delayed or fails. The marker preserves
-#    an explicit user choice across later reinstalls. Tests redirect the plist
-#    directory and state dir through MODELDOCK_AUTOSTART_PLIST_DIR and
-#    MODELDOCK_STATE_DIR so mock installs never touch the real LaunchAgents.
+# 3. Enable login autostart on every install (macOS). The gateway also has a
+#    first-run default-on safeguard, but doing it here makes the install result
+#    deterministic even when the first background start is delayed or fails.
+#    The marker only records that the decision was made (the dashboard toggle
+#    remains the runtime switch); a reinstall deliberately re-enables start at
+#    login instead of preserving a previous off. SKIP_START=1 opts out. Tests
+#    redirect the plist directory and state dir through
+#    MODELDOCK_AUTOSTART_PLIST_DIR and MODELDOCK_STATE_DIR so mock installs
+#    never touch the real LaunchAgents.
 STATE_DIR="${MODELDOCK_STATE_DIR:-$ROOT}"
 AUTOSTART_MARK="$STATE_DIR/autostart-initialized"
-if [ "$SKIP_START" != "1" ] && [ ! -e "$AUTOSTART_MARK" ] && [ "$(uname -s)" = "Darwin" ]; then
+if [ "$SKIP_START" != "1" ] && [ "$(uname -s)" = "Darwin" ]; then
   SERVER="$ROOT/dist/modeldock.mjs"
   PLIST_DIR="${MODELDOCK_AUTOSTART_PLIST_DIR:-$HOME/Library/LaunchAgents}"
   PLIST="$PLIST_DIR/com.modeldock.gateway.plist"
@@ -785,7 +788,7 @@ EOF
   if launchctl load -w "$PLIST"; then
     mkdir -p "$STATE_DIR"
     printf '%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$AUTOSTART_MARK"
-    echo "  start at login enabled (default)"
+    echo "  start at login enabled"
   else
     echo "ERROR: could not enable start at login (launchctl load failed)." >&2
     echo "       The gateway still works; run the recovery script and choose" >&2
