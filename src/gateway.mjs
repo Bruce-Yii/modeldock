@@ -922,9 +922,11 @@ export async function relayNativeResponses(payload, res, services, { signal } = 
   const markFirstResponse = () => finish?.markFirstResponse?.();
   const startedAt = Date.now();
   let usage;
+  let responseCompleted = false;
   const tee = createUsageTee((event) => {
     const eventUsage = usageFromEvent(event);
     if (eventUsage) usage = eventUsage;
+    if (event?.type === "response.completed") responseCompleted = true;
   });
   try {
     const upstream = await fetch(target, {
@@ -975,7 +977,11 @@ export async function relayNativeResponses(payload, res, services, { signal } = 
     }
     const piped = await pipeGatewayStream(upstream.body, res, tee, markFirstResponse);
     const bytesOut = piped.bytes;
-    const interrupted = piped.interrupted;
+    // Codex closes the HTTP response as soon as it consumes the terminal SSE
+    // event. The upstream socket can still be open for a trailing delimiter or
+    // transport teardown, so a later close is not a failed request once
+    // response.completed has already been observed.
+    const interrupted = piped.interrupted && !responseCompleted;
     markFirstResponse();
     finish?.({
       ok: !interrupted,
@@ -1532,11 +1538,13 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   let usage;
   let bytesOut = 0;
   let completedResponse;
+  let responseCompleted = false;
   const tee = createUsageTee((event) => {
     const eventUsage = usageFromEvent(event);
     if (eventUsage) usage = eventUsage;
-    if (event?.type === "response.completed" && Array.isArray(event.response?.output)) {
-      completedResponse = event.response;
+    if (event?.type === "response.completed") {
+      responseCompleted = true;
+      if (Array.isArray(event.response?.output)) completedResponse = event.response;
     }
   });
 
@@ -1650,7 +1658,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     } else {
       const piped = await pipeGatewayStream(upstreamBody, res, tee, markFirstResponse);
       bytesOut = piped.bytes;
-      interrupted = piped.interrupted;
+      interrupted = piped.interrupted && !responseCompleted;
     }
     markFirstResponse();
     if (completedResponse && routeAffinity) {

@@ -632,7 +632,8 @@ test("pipeGatewayStream settles when the client disconnects mid-stream", async (
   // Give the first chunk a tick to flow, then drop the client.
   await new Promise((resolve) => setTimeout(resolve, 20));
   res.emit("close");
-  await piping;
+  const result = await piping;
+  assert.equal(result.interrupted, true, "a close before a terminal event remains a real interruption");
   assert.equal(upstreamCancelled, true, "upstream body must be cancelled on client disconnect");
 });
 
@@ -705,6 +706,54 @@ test("relayResponses forwards a streamed response and records usage", async () =
     assert.equal(finished.outputTokens, 2, "finish must carry output tokens onto the trace record");
     assert.equal(usageEvents[0].cachedTokens, 3, "usage event must carry cached tokens from the upstream details");
     assert.equal(usageEvents[0].reasoningTokens, 1, "usage event must carry reasoning tokens from the upstream details");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("relayResponses treats a client close after response.completed as success", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const finishResults = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(
+    new ReadableStream({
+      start(controller) {
+        controller.enqueue(Buffer.from('event: response.completed\ndata: {"type":"response.completed","response":{"output":[],"usage":{"input_tokens":12,"output_tokens":4}}}\n\n'));
+        // The transport remains open briefly after the semantic terminal event.
+      },
+    }),
+    { status: 200, headers: { "content-type": "text/event-stream" } },
+  );
+  try {
+    const pending = relayResponses(
+      {
+        model: "deepseek-v4-flash",
+        input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }],
+      },
+      res,
+      {
+        recordUsage: () => {},
+        config: configStub(),
+        metrics: {
+          begin: () => (result) => finishResults.push(result),
+          recordResponseTransform: () => {},
+          recordResponseUsage: () => {},
+        },
+        routeAffinity: new RouteAffinity(),
+        knownModels: new Set(["deepseek-v4-flash"]),
+        mainModel: "deepseek-v4-flash",
+        visionModel: "gpt-5.6-luna",
+      },
+    );
+    while (sink.chunks.length === 0) await new Promise((resolve) => setImmediate(resolve));
+    res.emit("close");
+    const result = await pending;
+    assert.equal(result.ok, true);
+    assert.equal(result.httpStatus, 200);
+    assert.equal(result.usage.output_tokens, 4);
+    assert.equal(finishResults.at(-1).ok, true);
+    assert.equal(finishResults.at(-1).error, undefined);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -915,6 +964,47 @@ test("relayNativeResponses forwards native GPT traffic to the ChatGPT backend", 
     assert.equal(result.usage.input_tokens, 9);
     const forwarded = Buffer.concat(sink.chunks).toString("utf8");
     assert.match(forwarded, /response\.completed/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("relayNativeResponses treats a client close after response.completed as success", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const finishResults = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(
+    new ReadableStream({
+      start(controller) {
+        controller.enqueue(Buffer.from('event: response.completed\ndata: {"type":"response.completed","response":{"usage":{"input_tokens":20,"output_tokens":6}}}\n\n'));
+      },
+    }),
+    { status: 200, headers: { "content-type": "text/event-stream" } },
+  );
+  try {
+    const pending = relayNativeResponses(
+      { model: "gpt-5.6-sol", input: [{ type: "message", role: "user", content: [] }] },
+      res,
+      {
+        recordUsage: () => {},
+        metrics: {
+          begin: () => (result) => finishResults.push(result),
+          recordResponseTransform: () => {},
+          recordResponseUsage: () => {},
+        },
+        incomingHeaders: { authorization: "Bearer chatgpt-token" },
+        requestUrl: "/v1/responses",
+      },
+    );
+    while (sink.chunks.length === 0) await new Promise((resolve) => setImmediate(resolve));
+    res.emit("close");
+    const result = await pending;
+    assert.equal(result.ok, true);
+    assert.equal(result.httpStatus, 200);
+    assert.equal(result.usage.output_tokens, 6);
+    assert.equal(finishResults.at(-1).ok, true);
+    assert.equal(finishResults.at(-1).error, undefined);
   } finally {
     globalThis.fetch = originalFetch;
   }
