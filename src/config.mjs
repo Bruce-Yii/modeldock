@@ -417,6 +417,16 @@ export function loadConfig() {
     nativeAliasesFile: process.env.MODELDOCK_NATIVE_ALIASES_FILE
       ? path.resolve(process.env.MODELDOCK_NATIVE_ALIASES_FILE)
       : "",
+    // SSE compatibility layer: opencode-go's Responses adapters stream a full
+    // lifecycle only for a few models; the rest emit delta events without their
+    // output_item parents (and sometimes without response.completed), which the
+    // Codex client rejects as "OutputTextDelta without active item". When
+    // enabled, the gateway synthesizes the missing lifecycle events around the
+    // original payloads (content is never rewritten). Off by default so
+    // fully-streaming models keep their untouched passthrough.
+    sseCompat: !["0", "false", "off"].includes(
+      String(process.env.MODELDOCK_SSE_COMPAT || "").toLowerCase(),
+    ),
     mcpTransport,
     visionTimeoutMs: integer("MODELDOCK_VISION_TIMEOUT_MS", 90_000, { min: 1_000, max: 300_000 }),
     mediaTtlMs: integer("MODELDOCK_MEDIA_TTL_MS", 3_600_000, { min: 60_000 }),

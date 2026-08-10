@@ -9,6 +9,7 @@ import { translateUpstreamError, freeEmptyOutputError } from "./error-translatio
 import { RouteAffinity, routeResponsesRequest } from "./router.mjs";
 import { extractResponseUsage } from "./metrics.mjs";
 import { externalModelForAlias } from "./native-alias.mjs";
+import { normalizeAssistantContent, pipeCompatStream } from "./sse-compat.mjs";
 
 // Hosted / special tool types Codex can emit that the Go and DeepSeek upstreams
 // reject. The catalog declarations are the primary control; stripping here is the
@@ -1491,6 +1492,12 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     model: route.model,
   };
   delete normalizedPayload.client_metadata;
+  // SSE-compat mode also rewrites assistant history to the string-content
+  // dialect (see normalizeAssistantContent) so models that reject the array
+  // shape stop answering 400.
+  if (config.sseCompat) {
+    normalizedPayload.input = normalizeAssistantContent(normalizedPayload.input);
+  }
   // The input array is the authoritative history here. A previous_response_id
   // would make the upstream resolve continuation state server-side - state
   // that can still carry the orphaned tool call this gateway just cleaned, so
@@ -1665,6 +1672,13 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       bytesOut = result.bytes;
       freeEmpty = result.empty;
       if (result.usage) usage = result.usage;
+    } else if (config.sseCompat && normalizedPayload.stream === true) {
+      // SSE-compat layer: synthesize the lifecycle events (created /
+      // output_item.added / content_part.added / ...) that opencode-go's
+      // Responses adapters drop for most models. Content is never rewritten.
+      const result = await pipeCompatStream(upstreamBody, res, tee, markFirstResponse);
+      bytesOut = result.bytes;
+      interrupted = result.interrupted;
     } else {
       const piped = await pipeGatewayStream(upstreamBody, res, tee, markFirstResponse);
       bytesOut = piped.bytes;
