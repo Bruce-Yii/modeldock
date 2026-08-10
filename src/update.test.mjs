@@ -1,10 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { compareVersions, parseLatestRelease, parseSumsFile, localVersion, createUpdater } from "./update.mjs";
+import { compareVersions, parseLatestRelease, parseSumsFile, localVersion, createUpdater, deployFilesAtomically } from "./update.mjs";
 
 function responseBody(body) {
   const bytes = Buffer.from(body);
@@ -296,6 +297,75 @@ test("createUpdater.apply rolls back the whole layout when a destination cannot 
   for (const [relative, body] of Object.entries(original)) {
     assert.equal(readFileSync(path.join(rootDir, relative), "utf8"), body, `${relative} must be rolled back`);
   }
+});
+
+test("deployFilesAtomically arms a complete rollback snapshot before the first replacement", (t) => {
+  const rootDir = mkdtempSync(path.join(os.tmpdir(), "modeldock-update-crash-"));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  mkdirSync(path.join(rootDir, "dist"));
+  mkdirSync(path.join(rootDir, "scripts"));
+  writeFileSync(path.join(rootDir, "dist/modeldock.mjs"), "old bundle");
+  writeFileSync(path.join(rootDir, "scripts/restart.ps1"), "old restart");
+  const moduleUrl = new URL("./update.mjs", import.meta.url).href;
+  const childScript = `
+    import path from "node:path";
+    import { deployFilesAtomically } from ${JSON.stringify(moduleUrl)};
+    const root = process.argv[1];
+    deployFilesAtomically([
+      { body: Buffer.from("new bundle"), dest: path.join(root, "dist/modeldock.mjs") },
+      { body: Buffer.from("new restart"), dest: path.join(root, "scripts/restart.ps1") },
+    ], root, { afterReplace(count) { if (count === 1) process.exit(73); } });
+  `;
+  const child = spawnSync(process.execPath, ["--input-type=module", "-e", childScript, rootDir]);
+  assert.equal(child.status, 73);
+  assert.equal(readFileSync(path.join(rootDir, "dist/modeldock.mjs"), "utf8"), "new bundle");
+  assert.equal(readFileSync(path.join(rootDir, "scripts/restart.ps1"), "utf8"), "old restart");
+  const rollbackRoot = path.join(rootDir, ".modeldock-rollback");
+  const current = readFileSync(path.join(rollbackRoot, "current"), "utf8").trim();
+  const snapshot = path.join(rollbackRoot, current);
+  const manifest = JSON.parse(readFileSync(path.join(snapshot, "manifest.json"), "utf8"));
+  assert.deepEqual(manifest.files.map((entry) => entry.path), ["dist/modeldock.mjs", "scripts/restart.ps1"]);
+  assert.equal(readFileSync(path.join(snapshot, "dist/modeldock.mjs"), "utf8"), "old bundle");
+  assert.equal(readFileSync(path.join(snapshot, "scripts/restart.ps1"), "utf8"), "old restart");
+  assert.equal(readdirSync(rollbackRoot).some((name) => name.endsWith(".tmp")), false);
+});
+
+test("deployFilesAtomically restores the prior marker after an in-process replacement failure", (t) => {
+  const rootDir = mkdtempSync(path.join(os.tmpdir(), "modeldock-update-marker-"));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  mkdirSync(path.join(rootDir, "dist"));
+  mkdirSync(path.join(rootDir, ".modeldock-rollback", "100-1"), { recursive: true });
+  writeFileSync(path.join(rootDir, ".modeldock-rollback", "current"), "100-1\n");
+  writeFileSync(path.join(rootDir, "dist/modeldock.mjs"), "old bundle");
+  assert.throws(() => deployFilesAtomically(
+    [{ body: Buffer.from("new bundle"), dest: path.join(rootDir, "dist/modeldock.mjs") }],
+    rootDir,
+    { afterReplace() { throw new Error("injected replacement failure"); } },
+  ), /injected replacement failure/);
+  assert.equal(readFileSync(path.join(rootDir, "dist/modeldock.mjs"), "utf8"), "old bundle");
+  assert.equal(readFileSync(path.join(rootDir, ".modeldock-rollback", "current"), "utf8"), "100-1\n");
+  assert.deepEqual(readdirSync(path.join(rootDir, ".modeldock-rollback")).sort(), ["100-1", "current"]);
+});
+
+test("deployFilesAtomically preserves recovery material when in-process rollback fails", (t) => {
+  const rootDir = mkdtempSync(path.join(os.tmpdir(), "modeldock-update-rollback-failure-"));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  mkdirSync(path.join(rootDir, "dist"));
+  const destination = path.join(rootDir, "dist/modeldock.mjs");
+  writeFileSync(destination, "old bundle");
+  assert.throws(() => deployFilesAtomically(
+    [{ body: Buffer.from("new bundle"), dest: destination }],
+    rootDir,
+    { afterReplace() {
+      rmSync(`${destination}.${process.pid}.update-backup`);
+      throw new Error("injected failure after replacement");
+    } },
+  ), /rollback failed/);
+  assert.equal(readFileSync(destination, "utf8"), "new bundle", "the failed in-process restore remains visible");
+  const rollbackRoot = path.join(rootDir, ".modeldock-rollback");
+  const current = readFileSync(path.join(rollbackRoot, "current"), "utf8").trim();
+  assert.equal(readFileSync(path.join(rollbackRoot, current, "dist/modeldock.mjs"), "utf8"), "old bundle");
+  assert.ok(readFileSync(path.join(rollbackRoot, current, "manifest.json"), "utf8").includes("dist/modeldock.mjs"));
 });
 
 test("createUpdater.apply rolls back when the complete rollback snapshot cannot be written", async (t) => {

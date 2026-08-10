@@ -106,29 +106,33 @@ check_owner() {
   [ "$FORCE" -eq 0 ] || return 0
   state_dir="${MODELDOCK_STATE_DIR:-$HOME/.modeldock}"
   owner_file="$state_dir/owner-$PORT.json"
-  [ -f "$owner_file" ] || return 0
-  "$NODE_BIN" --input-type=module - "$owner_file" "$OLD_PID" "$ROOT" <<'NODE'
+  "$NODE_BIN" --input-type=module - "$owner_file" "$OLD_PID" "$ROOT" "$PORT" <<'NODE'
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
-const [ownerFile, oldPid, root] = process.argv.slice(2);
+const [ownerFile, oldPid, root, port] = process.argv.slice(2);
 try {
   const owner = JSON.parse(fs.readFileSync(ownerFile, "utf8"));
-  if (owner?.root && Number(owner.pid) === Number(oldPid)) {
-    const ownerRoot = path.resolve(owner.root);
-    const thisRoot = path.resolve(root);
-    if (ownerRoot !== thisRoot) {
-      const first = `ERROR: port ${owner.port || ""} is owned by a gateway from '${ownerRoot}' (PID ${oldPid}); this script runs from '${thisRoot}'.`;
-      const second = "Re-run with --force to take the port over deliberately.";
-      console.log(first);
-      console.log(second);
-      console.error(first);
-      console.error(second);
-      process.exit(2);
-    }
+  const ownerRoot = path.resolve(String(owner?.root || ""));
+  const thisRoot = path.resolve(root);
+  if (Number(owner?.pid) !== Number(oldPid) || Number(owner?.port) !== Number(port) || ownerRoot !== thisRoot) {
+    throw new Error("owner record does not match this listener and install root");
   }
-} catch {
-  // Unreadable owner file: match restart.ps1 and behave as before.
+  const candidates = [path.join(thisRoot, "src", "server.mjs"), path.join(thisRoot, "dist", "modeldock.mjs")];
+  let commandMatches = false;
+  if (process.platform === "linux") {
+    const argv = fs.readFileSync(`/proc/${oldPid}/cmdline`).toString("utf8").split("\0").filter(Boolean);
+    commandMatches = argv.some((arg) => candidates.includes(path.resolve(arg)));
+  } else {
+    const command = execFileSync("ps", ["-p", oldPid, "-o", "command="], { encoding: "utf8" });
+    commandMatches = candidates.some((candidate) => command.includes(candidate));
+  }
+  if (!commandMatches) throw new Error("listener command does not run this ModelDock install");
+} catch (error) {
+  console.error(`ERROR: refusing to stop PID ${oldPid} on port ${port} because ownership could not be verified: ${error.message}`);
+  console.error("Re-run with --force to take the port over deliberately.");
+  process.exit(2);
 }
 NODE
 }
@@ -173,6 +177,11 @@ if try_launchd_restart; then
 fi
 
 if [ -n "$OLD_PID" ]; then
+  current_pid="$(find_listener_pid)"
+  if [ "$FORCE" -eq 0 ] && [ -n "$current_pid" ] && [ "$current_pid" != "$OLD_PID" ]; then
+    status "ERROR: the listener on port $PORT changed during ownership verification; refusing to stop it"
+    exit 2
+  fi
   status "restart.sh: stopping gateway (PID $OLD_PID, port $PORT)"
   kill "$OLD_PID" 2>/dev/null || true
   i=0

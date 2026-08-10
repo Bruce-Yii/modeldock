@@ -5,10 +5,13 @@
 // is needed. This module is shared by the stdio bridge (src/mcp-standalone.mjs)
 // and the direct CLI (scripts/mcp-call.mjs).
 
+import { callerRootPath, loadOrCreateCallerKey } from "./caller-key.mjs";
+
 const DEFAULT_GATEWAY_URL = "http://127.0.0.1:4097";
 
 export function gatewayBaseUrl() {
-  return process.env.MODELDOCK_GATEWAY_URL || DEFAULT_GATEWAY_URL;
+  return process.env.MODELDOCK_GATEWAY_URL
+    || `${DEFAULT_GATEWAY_URL}${callerRootPath(loadOrCreateCallerKey())}`;
 }
 
 export async function requestMcp(baseUrl, method, params) {

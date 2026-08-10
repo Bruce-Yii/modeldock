@@ -49,8 +49,36 @@ test("restart.sh stops the owned listener and starts a healthy POSIX gateway", a
 
   writeFileSync(path.join(root, ".env"), `MODELDOCK_PORT=${port}\n`, "utf8");
   writeFileSync(path.join(root, "scripts", "restart.sh"), readFileSync(path.join(repoRoot, "scripts", "restart.sh")), { mode: 0o755 });
+  const bundlePath = path.join(root, "dist", "modeldock.mjs");
   writeFileSync(
-    path.join(root, "dist", "modeldock.mjs"),
+    bundlePath,
+    `import http from "node:http";
+const port = Number(process.env.MODELDOCK_PORT);
+http.createServer((req, res) => {
+  if (req.url === "/healthz") {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ ok: true, marker: "old", pid: process.pid }));
+    return;
+  }
+  res.writeHead(404); res.end();
+}).listen(port, "127.0.0.1");
+`,
+    "utf8",
+  );
+
+  const old = spawn(process.execPath, [bundlePath], {
+    env: { ...process.env, MODELDOCK_PORT: String(port) },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  t.after(() => old.kill("SIGKILL"));
+  const oldHealth = await waitForHealth(port, "old");
+  assert.ok(oldHealth, "old gateway should start for the restart test");
+
+  // Replace the on-disk entry only after the old process loaded it. The command
+  // line still identifies the exact owned bundle while restart launches this
+  // new content from the same path.
+  writeFileSync(
+    bundlePath,
     `import http from "node:http";
 import { writeFileSync } from "node:fs";
 const port = Number(process.env.MODELDOCK_PORT || ${port});
@@ -66,25 +94,6 @@ http.createServer((req, res) => {
 `,
     "utf8",
   );
-
-  const old = spawn(process.execPath, ["--input-type=module", "-e", `
-import http from "node:http";
-const port = Number(process.env.MODELDOCK_PORT);
-http.createServer((req, res) => {
-  if (req.url === "/healthz") {
-    res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ ok: true, marker: "old", pid: process.pid }));
-    return;
-  }
-  res.writeHead(404); res.end();
-}).listen(port, "127.0.0.1");
-`], {
-    env: { ...process.env, MODELDOCK_PORT: String(port) },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  t.after(() => old.kill("SIGKILL"));
-  const oldHealth = await waitForHealth(port, "old");
-  assert.ok(oldHealth, "old gateway should start for the restart test");
 
   writeFileSync(
     path.join(stateDir, `owner-${port}.json`),
@@ -112,4 +121,43 @@ http.createServer((req, res) => {
   } catch {
     // Best-effort cleanup; the temp install dir is still removed by t.after.
   }
+});
+
+test("restart.sh refuses a live foreign listener when the owner record is missing", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("restart.sh is POSIX-only");
+    return;
+  }
+  const probe = createServer();
+  const port = await listen(probe);
+  await new Promise((resolve) => probe.close(resolve));
+  const root = mkdtempSync(path.join(os.tmpdir(), "modeldock-restart-foreign-"));
+  const stateDir = path.join(root, ".state");
+  mkdirSync(path.join(root, "scripts"), { recursive: true });
+  mkdirSync(path.join(root, "dist"), { recursive: true });
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(path.join(root, ".env"), `MODELDOCK_PORT=${port}\n`, "utf8");
+  writeFileSync(path.join(root, "scripts", "restart.sh"), readFileSync(path.join(repoRoot, "scripts", "restart.sh")), { mode: 0o755 });
+  writeFileSync(path.join(root, "dist", "modeldock.mjs"), "process.exit(0);\n", "utf8");
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const foreign = spawn(process.execPath, ["--input-type=module", "-e", `
+import http from "node:http";
+http.createServer((req, res) => {
+  res.writeHead(200, { "content-type": "application/json" });
+  res.end(JSON.stringify({ ok: true, marker: "foreign" }));
+}).listen(Number(process.env.MODELDOCK_PORT), "127.0.0.1");
+`], { env: { ...process.env, MODELDOCK_PORT: String(port) }, stdio: "ignore" });
+  t.after(() => foreign.kill("SIGKILL"));
+  assert.ok(await waitForHealth(port, "foreign"));
+  const child = spawn("sh", [path.join(root, "scripts", "restart.sh")], {
+    env: { ...process.env, MODELDOCK_PORT: String(port), MODELDOCK_STATE_DIR: stateDir },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let output = "";
+  child.stdout.on("data", (chunk) => (output += chunk));
+  child.stderr.on("data", (chunk) => (output += chunk));
+  const exitCode = await new Promise((resolve) => child.on("close", resolve));
+  assert.equal(exitCode, 2, output);
+  assert.match(output, /ownership could not be verified|owner record is missing/i);
+  assert.ok(await waitForHealth(port, "foreign"), "foreign listener must survive the refused restart");
 });

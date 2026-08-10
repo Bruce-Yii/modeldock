@@ -97,5 +97,9 @@ export function loadOrCreateCallerKey(filePath = keyFilePath()) {
 }
 
 export function callerBasePath(key) {
-  return `${CALLER_PATH_PREFIX}/${key}/v1`;
+  return `${callerRootPath(key)}/v1`;
+}
+
+export function callerRootPath(key) {
+  return `${CALLER_PATH_PREFIX}/${key}`;
 }

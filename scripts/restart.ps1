@@ -44,21 +44,34 @@ if ($listener) {
   # MODELDOCK_STATE_DIR redirect, or the guard reads a file the gateway never wrote.
   $stateDir = if ($env:MODELDOCK_STATE_DIR) { $env:MODELDOCK_STATE_DIR } else { Join-Path $env:USERPROFILE ".modeldock" }
   $ownerFile = Join-Path $stateDir "owner-$port.json"
-  if ((Test-Path $ownerFile) -and (-not $args.Contains("-Force"))) {
+  $forceTakeover = $args -contains "-Force"
+  if (-not $forceTakeover) {
+    $owned = $false
     try {
+      if (-not (Test-Path -LiteralPath $ownerFile)) { throw "owner record is missing" }
       $owner = Get-Content $ownerFile -Raw | ConvertFrom-Json
-      if ($owner.root -and $owner.pid -eq $oldPid) {
-        $ownerRoot = [System.IO.Path]::GetFullPath($owner.root)
-        $thisRoot = [System.IO.Path]::GetFullPath($root)
-        if ($ownerRoot -ne $thisRoot) {
-          Write-Status "ERROR: port $port is owned by a gateway from '$ownerRoot' (PID $oldPid); this script runs from '$thisRoot'."
-          Write-Status "Re-run with -Force to take the port over deliberately."
-          exit 1
-        }
+      $ownerRoot = [System.IO.Path]::GetFullPath([string]$owner.root)
+      $thisRoot = [System.IO.Path]::GetFullPath($root)
+      if ([int]$owner.pid -ne [int]$oldPid -or [int]$owner.port -ne $port -or $ownerRoot -ne $thisRoot) {
+        throw "owner record does not match this listener and install root"
       }
+      $processInfo = Get-CimInstance Win32_Process -Filter "ProcessId = $oldPid" -ErrorAction Stop
+      $commandLine = [string]$processInfo.CommandLine
+      $sourceEntry = [System.IO.Path]::GetFullPath((Join-Path $root "src\server.mjs"))
+      $bundleEntry = [System.IO.Path]::GetFullPath((Join-Path $root "dist\modeldock.mjs"))
+      $owned = $commandLine.IndexOf($sourceEntry, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+          $commandLine.IndexOf($bundleEntry, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+      if (-not $owned) { throw "listener command does not run this ModelDock install" }
     } catch {
-      # Unreadable owner file: fall through and behave as before.
+      Write-Status "ERROR: refusing to stop PID $oldPid on port $port because ownership could not be verified: $($_.Exception.Message)"
+      Write-Status "Re-run with -Force to take the port over deliberately."
+      exit 2
     }
+  }
+  $currentListener = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($currentListener -and $currentListener.OwningProcess -ne $oldPid -and (-not $forceTakeover)) {
+    Write-Status "ERROR: the listener on port $port changed during ownership verification; refusing to stop it."
+    exit 2
   }
   Write-Status "restart.ps1: stopping gateway (PID $oldPid, port $port)"
   Stop-Process -Id $oldPid -Force

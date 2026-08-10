@@ -2,8 +2,8 @@
 //
 // Use this when the Codex session's MCP connection is unavailable (for example
 // after a gateway restart, which the Codex client never re-establishes). It
-// bypasses the Codex MCP client and talks straight to the gateway's /mcp
-// endpoint, so the tools work in any session.
+// bypasses the Codex MCP client and talks straight to the gateway's keyed MCP
+// endpoint, so the tools work in any session without exposing a bare route.
 //
 //   node scripts/mcp-call.mjs tools
 //   node scripts/mcp-call.mjs list_mcp_tools

@@ -186,15 +186,19 @@ function writeStagedFile(body, target) {
   return tmp;
 }
 
-// Replace the platform layout as one recoverable set. Every new file and every
-// backup is prepared before the first destination changes. If any replacement
-// fails, all destinations already changed in this pass are restored before the
-// error reaches the API, so an update can never leave a new bundle beside old
-// launch/recovery scripts.
-function deployFilesAtomically(items, rootDir) {
+// Replace the platform layout as one recoverable set. The complete rollback
+// snapshot and its durable marker are committed before the first destination
+// changes, so both thrown errors and process/machine crashes are recoverable.
+export function deployFilesAtomically(items, rootDir, { afterReplace } = {}) {
   const prepared = [];
   let applied = 0;
   let rollbackDir = "";
+  let rollbackStageDir = "";
+  let rollbackRoot = "";
+  let marker = "";
+  let markerStage = "";
+  let markerCommitted = false;
+  let previousMarker;
   try {
     for (const item of items) {
       if (existsSync(item.dest) && !statSync(item.dest).isFile()) {
@@ -209,17 +213,19 @@ function deployFilesAtomically(items, rootDir) {
       if (existed) copyFileSync(item.dest, backup);
     }
 
-    for (const item of prepared) {
-      renameSync(item.stage, item.dest);
-      applied += 1;
-    }
-
     // Preserve the entire previous platform layout, not just the bundle. A new
     // bundle can depend on its matching bridge and lifecycle scripts, so runtime
-    // recovery must restore the same version set as one transaction.
-    const rollbackRoot = path.join(rootDir, ".modeldock-rollback");
+    // recovery must restore the same version set as one transaction. This is
+    // deliberately durable before any destination rename: if the updater dies
+    // mid-deployment, recover.* can still identify and restore the old layout.
+    rollbackRoot = path.join(rootDir, ".modeldock-rollback");
     const rollbackName = `${Date.now()}-${process.pid}`;
     rollbackDir = path.join(rollbackRoot, rollbackName);
+    rollbackStageDir = `${rollbackDir}.tmp`;
+    marker = path.join(rollbackRoot, "current");
+    markerStage = `${marker}.${process.pid}.tmp`;
+    previousMarker = existsSync(marker) ? readFileSync(marker, "utf8") : undefined;
+    mkdirSync(rollbackStageDir, { recursive: true });
     const files = [];
     for (const item of prepared) {
       const relative = path.relative(rootDir, item.dest).replaceAll(path.sep, "/");
@@ -228,17 +234,22 @@ function deployFilesAtomically(items, rootDir) {
       }
       files.push({ path: relative, existed: item.existed });
       if (item.existed) {
-        const rollbackFile = path.join(rollbackDir, ...relative.split("/"));
+        const rollbackFile = path.join(rollbackStageDir, ...relative.split("/"));
         mkdirSync(path.dirname(rollbackFile), { recursive: true });
         copyFileSync(item.backup, rollbackFile);
       }
     }
-    mkdirSync(rollbackDir, { recursive: true });
-    writeFileSync(path.join(rollbackDir, "manifest.json"), `${JSON.stringify({ files }, null, 2)}\n`, "utf8");
-    const marker = path.join(rollbackRoot, "current");
-    const markerStage = `${marker}.${process.pid}.tmp`;
+    writeFileSync(path.join(rollbackStageDir, "manifest.json"), `${JSON.stringify({ files }, null, 2)}\n`, "utf8");
+    renameSync(rollbackStageDir, rollbackDir);
     writeFileSync(markerStage, `${rollbackName}\n`, "utf8");
     renameSync(markerStage, marker);
+    markerCommitted = true;
+
+    for (const item of prepared) {
+      renameSync(item.stage, item.dest);
+      applied += 1;
+      afterReplace?.(applied, item);
+    }
 
     // Prune old snapshots now that the new marker is committed: the marker
     // always points at the newest snapshot, so older ones are unreachable
@@ -274,13 +285,37 @@ function deployFilesAtomically(items, rootDir) {
     }
     for (const item of prepared) {
       try { removeFileIfPresent(item.stage); } catch { /* report the primary failure */ }
-      try { removeFileIfPresent(item.backup); } catch { /* report the primary failure */ }
+    }
+    try { if (markerStage) removeFileIfPresent(markerStage); } catch { /* report the primary failure */ }
+    // If an in-process rollback itself failed, keep the new marker, complete
+    // snapshot, and adjacent backups intact. The recovery script can then
+    // finish restoring the old layout instead of losing the only good copies.
+    if (rollbackErrors.length) {
+      throw new Error(`${error.message}; rollback failed: ${rollbackErrors.join("; ")}`);
+    }
+    for (const item of prepared) {
+      try { removeFileIfPresent(item.backup); } catch { /* restored layout is already safe */ }
+    }
+    if (markerCommitted) {
+      try {
+        if (previousMarker === undefined) {
+          removeFileIfPresent(marker);
+        } else {
+          writeFileSync(markerStage, previousMarker, "utf8");
+          renameSync(markerStage, marker);
+        }
+      } catch (rollbackError) {
+        rollbackErrors.push(`${marker}: ${rollbackError.message}`);
+      }
+    }
+    if (rollbackErrors.length) {
+      throw new Error(`${error.message}; rollback metadata restore failed: ${rollbackErrors.join("; ")}`);
     }
     if (rollbackDir) {
       try { rmSync(rollbackDir, { recursive: true, force: true }); } catch { /* unreferenced partial snapshot */ }
     }
-    if (rollbackErrors.length) {
-      throw new Error(`${error.message}; rollback failed: ${rollbackErrors.join("; ")}`);
+    if (rollbackStageDir) {
+      try { rmSync(rollbackStageDir, { recursive: true, force: true }); } catch { /* unreferenced partial snapshot */ }
     }
     throw error;
   }

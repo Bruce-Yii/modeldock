@@ -16,21 +16,39 @@ $runKey = if ($env:MODELDOCK_AUTOSTART_KEY) { $env:MODELDOCK_AUTOSTART_KEY } els
 
 # Stop the gateway: only the pid recorded in the owner file is ours. A listener
 # without a matching owner record is a foreign process - warn and leave it.
-$ownerPid = $null
+$owner = $null
 $ownerFile = Join-Path $stateDir "owner-$port.json"
 if (Test-Path -LiteralPath $ownerFile) {
-    try { $ownerPid = [int]((Get-Content -LiteralPath $ownerFile -Raw | ConvertFrom-Json).pid) } catch { $ownerPid = $null }
+    try { $owner = Get-Content -LiteralPath $ownerFile -Raw | ConvertFrom-Json } catch { $owner = $null }
 }
 $procIds = @(Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue |
     Select-Object -ExpandProperty OwningProcess -Unique)
 $stopped = 0
 foreach ($procId in $procIds) {
-    if ($ownerPid -and $procId -eq $ownerPid) {
+    $owned = $false
+    try {
+        if (-not $owner) { throw "owner record is missing or unreadable" }
+        $ownerRoot = [System.IO.Path]::GetFullPath([string]$owner.root)
+        $thisRoot = [System.IO.Path]::GetFullPath($root)
+        if ([int]$owner.pid -ne [int]$procId -or [int]$owner.port -ne $port -or $ownerRoot -ne $thisRoot) {
+            throw "owner record does not match this listener and install root"
+        }
+        $processInfo = Get-CimInstance Win32_Process -Filter "ProcessId = $procId" -ErrorAction Stop
+        $commandLine = [string]$processInfo.CommandLine
+        $sourceEntry = [System.IO.Path]::GetFullPath((Join-Path $root "src\server.mjs"))
+        $bundleEntry = [System.IO.Path]::GetFullPath((Join-Path $root "dist\modeldock.mjs"))
+        $owned = $commandLine.IndexOf($sourceEntry, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $commandLine.IndexOf($bundleEntry, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+    } catch {
+        $owned = $false
+    }
+    if ($owned) {
         Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
         Write-Output "Stopped gateway process $procId"
         $stopped += 1
     } else {
-        Write-Output "WARNING: port $port is held by pid $procId which is not the recorded ModelDock gateway (owner pid $ownerPid); leaving it alone."
+        $ownerPid = if ($owner) { $owner.pid } else { "unknown" }
+        Write-Output "WARNING: port $port is held by pid $procId which could not be verified as this ModelDock gateway (owner pid $ownerPid); leaving it alone."
     }
 }
 if ($procIds.Count -gt 0 -and $stopped -eq 0) {

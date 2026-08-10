@@ -157,10 +157,17 @@ function endRelayStreamFailure(res, message) {
 // images endpoints answer application/json - ends with a JSON error object.
 // Writing SSE events into an application/json body leaves the client with a
 // body it cannot parse.
-function endRelayFailure(res, message) {
+function endRelayFailure(res, message, bodyStarted = false) {
   const contentType = String(res.getHeader?.("Content-Type") || "");
   if (/text\/event-stream/i.test(contentType) || /ndjson|jsonl/i.test(contentType)) {
     endRelayStreamFailure(res, message);
+    return;
+  }
+  // Once any JSON bytes have reached the client there is no valid error object
+  // we can append. Reset the response so clients see a transport failure instead
+  // of accepting a syntactically corrupt 200 body.
+  if (bodyStarted) {
+    res.destroy();
     return;
   }
   try {
@@ -693,7 +700,7 @@ function usageFromEvent(event) {
 // emits "close" without "finish" or "error"; without that handler the promise
 // never settles and the request stays counted as in-flight forever, with the
 // upstream body still being read.
-export async function pipeGatewayStream(upstreamBody, res, tee, onFirstResponse) {
+export async function pipeGatewayStream(upstreamBody, res, tee, onFirstResponse, onChunk) {
   if (!upstreamBody) {
     res.end();
     return { bytes: 0, interrupted: false };
@@ -716,7 +723,9 @@ export async function pipeGatewayStream(upstreamBody, res, tee, onFirstResponse)
         onFirstResponse?.();
       }
       tee?.push(chunk);
-      bytes += chunk.byteLength || Buffer.byteLength(chunk);
+      const size = chunk.byteLength || Buffer.byteLength(chunk);
+      bytes += size;
+      onChunk?.(size);
     });
     stream.once("end", () => tee?.end?.());
     stream.once("error", settle);
@@ -1039,6 +1048,7 @@ export async function relayNativeImage(payload, res, services, { signal } = {}) 
   const body = typeof payload === "string" || Buffer.isBuffer(payload)
     ? payload
     : JSON.stringify(payload || {});
+  let forwardedBytes = 0;
   try {
     const upstream = await fetch(target, {
       method: "POST",
@@ -1061,7 +1071,9 @@ export async function relayNativeImage(payload, res, services, { signal } = {}) 
       res.setHeader("Cache-Control", "no-cache, no-transform");
       res.flushHeaders();
     }
-    const piped = await pipeGatewayStream(upstream.body, res, null);
+    const piped = await pipeGatewayStream(upstream.body, res, null, null, (size) => {
+      forwardedBytes += size;
+    });
     if (piped.interrupted) {
       return { ok: false, httpStatus: 499, error: "client disconnected" };
     }
@@ -1072,7 +1084,7 @@ export async function relayNativeImage(payload, res, services, { signal } = {}) 
       res.setHeader("Content-Type", "application/json");
       res.end(JSON.stringify({ error: { type: "upstream_failed", message: redactBearer(error.message) } }));
     } else {
-      endRelayFailure(res, redactBearer(error.message));
+      endRelayFailure(res, redactBearer(error.message), forwardedBytes > 0);
     }
     return { ok: false, httpStatus: 502, error: error.message };
   }

@@ -1062,7 +1062,7 @@ test("relayNativeImage forwards image generation to the native backend", async (
   }
 });
 
-test("relayNativeImage ends a mid-stream upstream failure as JSON, not SSE", async () => {
+test("relayNativeImage resets a JSON response after partial bytes were forwarded", async () => {
   const sink = collectStream();
   const res = responseStub(sink);
   const originalFetch = globalThis.fetch;
@@ -1072,7 +1072,7 @@ test("relayNativeImage ends a mid-stream upstream failure as JSON, not SSE", asy
         start(controller) {
           // A partial image JSON body, then the upstream connection dies.
           controller.enqueue(Buffer.from('{"data":[{"b64_json":"'));
-          controller.error(new Error("image burst Bearer sk-abc123456"));
+          setTimeout(() => controller.error(new Error("image burst Bearer sk-abc123456")), 20);
         },
       }),
       { status: 200, headers: { "content-type": "application/json" } },
@@ -1086,10 +1086,33 @@ test("relayNativeImage ends a mid-stream upstream failure as JSON, not SSE", asy
     );
     assert.equal(result.ok, false);
     const forwarded = Buffer.concat(sink.chunks).toString("utf8");
-    assert.doesNotMatch(forwarded, /event: response\.failed/, "SSE events must not ride in a JSON response");
-    assert.match(forwarded, /"type":"upstream_failed"/);
-    assert.match(forwarded, /image burst/, "the failure reason reaches the client");
-    assert.doesNotMatch(forwarded, /sk-abc123456/, "bearer tokens are redacted");
+    assert.equal(sink.destroyed, true, "a partial JSON response must be reset");
+    assert.equal(forwarded, '{"data":[{"b64_json":"', "no synthetic payload may be appended to partial JSON");
+    assert.doesNotMatch(forwarded, /response\.failed|upstream_failed|sk-abc123456/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("relayNativeImage emits a valid JSON error when upstream fails before body bytes", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(
+    new ReadableStream({ start(controller) { controller.error(new Error("empty burst Bearer sk-abc123456")); } }),
+    { status: 200, headers: { "content-type": "application/json" } },
+  );
+  try {
+    const result = await relayNativeImage(
+      { model: "gpt-image-2", prompt: "boom", size: "1024x1024" },
+      res,
+      { incomingHeaders: {}, requestUrl: "/c/key123/v1/images/generations" },
+    );
+    assert.equal(result.ok, false);
+    const parsed = JSON.parse(Buffer.concat(sink.chunks).toString("utf8"));
+    assert.equal(parsed.error.type, "upstream_failed");
+    assert.match(parsed.error.message, /empty burst/);
+    assert.doesNotMatch(parsed.error.message, /sk-abc123456/);
   } finally {
     globalThis.fetch = originalFetch;
   }

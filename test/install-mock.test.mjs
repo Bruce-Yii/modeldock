@@ -209,14 +209,15 @@ async function assertRoutingWorks(port, upstreamTag, callerKey) {
   assert.match(text, new RegExp(upstreamTag), `relay should carry the upstream output through`);
 }
 
-async function assertGatewayMcpTools(port) {
-  const init = await rpcMcp(`http://127.0.0.1:${port}`, "initialize", {
+async function assertGatewayMcpTools(port, callerKey) {
+  const gatewayMcpBase = `http://127.0.0.1:${port}/c/${callerKey}`;
+  const init = await rpcMcp(gatewayMcpBase, "initialize", {
     protocolVersion: "2025-06-18",
     capabilities: {},
     clientInfo: { name: "install-test", version: "1.0.0" },
   });
   assert.equal(init.status, 200, "MCP initialize should succeed against the installed gateway");
-  const listed = await rpcMcp(`http://127.0.0.1:${port}`, "tools/list", {});
+  const listed = await rpcMcp(gatewayMcpBase, "tools/list", {});
   const names = (listed.parsed?.result?.tools || []).map((tool) => tool.name);
   for (const name of ["web_search_exa", "vision_inspect", "speak", "hear", "recall_memory", "store_memory"]) {
     assert.ok(names.includes(name), `${name} missing from installed gateway MCP tools: ${names.join(",")}`);
@@ -738,13 +739,13 @@ test("mock install lifecycle: first start, second start routes, login relaunch",
   // 5b. The surfaces a real session depends on must be live after install: the
   //     MCP tool list (HTTP /mcp + the stdio bridge Codex spawns), and the catalog
   //     declarations the LLM reads for its tool surface.
-  await assertGatewayMcpTools(appPort);
-  await assertBridgeTools(path.join(installDir, "dist", "mcp-standalone.mjs"), `http://127.0.0.1:${appPort}`, memoryDir);
+  const callerKey = readCallerKey(path.join(installDir, ".modeldock"));
+  await assertGatewayMcpTools(appPort, callerKey);
+  await assertBridgeTools(path.join(installDir, "dist", "mcp-standalone.mjs"), `http://127.0.0.1:${appPort}/c/${callerKey}`, memoryDir);
   assertCatalogTools(installedCatalog);
   // Caller-key enforcement is on by default, so routing must go through the
   // keyed /c/<key>/v1 URL (what the managed Codex config points at) while the
   // bare path is rejected.
-  const callerKey = readCallerKey(path.join(installDir, ".modeldock"));
   await assertRoutingWorks(appPort, "modeldock-relay-ok", callerKey);
   const bare = await relayProbe(appPort, "");
   assert.equal(bare.status, 401, "bare /v1 relay should be rejected when caller-key enforcement is on by default");
@@ -803,7 +804,7 @@ test("mock install lifecycle: first start, second start routes, login relaunch",
   assert.ok(secondHealth.up, `gateway should come up on second start\n${secondOut}\n${secondErr}`);
   assert.equal(secondHealth.status, 200);
   await assertRoutingWorks(appPort, "modeldock-relay-ok", callerKey);
-  await assertGatewayMcpTools(appPort);
+  await assertGatewayMcpTools(appPort, callerKey);
   assertCatalogTools(installedCatalog);
 
   // 8. Login relaunch: start through the exact entry the OS uses at login. Windows
@@ -841,7 +842,7 @@ test("mock install lifecycle: first start, second start routes, login relaunch",
   assert.ok(relaunchHealth.up, `gateway should come up through the login entry\n${relaunchOut}\n${relaunchErr}`);
   assert.equal(relaunchHealth.status, 200);
   await assertRoutingWorks(appPort, "modeldock-relay-ok", callerKey);
-  await assertGatewayMcpTools(appPort);
+  await assertGatewayMcpTools(appPort, callerKey);
 
   // 9. Stop the final gateway so cleanup can remove the temp install dir.
   killByPort(appPort);
@@ -1118,9 +1119,19 @@ test("uninstall preserves the memory vault and never kills a foreign listener", 
   const probe = createServer();
   const port = await listen(probe);
   await new Promise((resolve) => probe.close(resolve));
-  // A recorded owner that is not a listener on the port must never be killed.
-  // 2147483647 is the largest possible pid and cannot be alive on any runner.
-  writeFileSync(ownerFilePath(port, root), JSON.stringify({ pid: 2147483647, root, port }));
+  // Forge a stale owner record around a real foreign listener. PID and port
+  // equality alone must not authorize a kill after PID reuse; the process must
+  // also run this install's exact gateway entry path.
+  const foreign = spawn(process.execPath, ["--input-type=module", "-e", `
+import http from "node:http";
+http.createServer((req, res) => {
+  res.writeHead(200, { "content-type": "application/json" });
+  res.end(JSON.stringify({ ok: true, foreign: true }));
+}).listen(Number(process.env.MODELDOCK_PORT), "127.0.0.1");
+`], { env: { ...process.env, MODELDOCK_PORT: String(port) }, stdio: "ignore" });
+  t.after(() => foreign.kill("SIGKILL"));
+  assert.ok((await waitForHealth(port)).up, "foreign listener should start");
+  writeFileSync(ownerFilePath(port, root), JSON.stringify({ pid: foreign.pid, root: repoRoot, port }));
 
   const env = {
     ...process.env,
@@ -1145,6 +1156,7 @@ test("uninstall preserves the memory vault and never kills a foreign listener", 
   assert.ok(!existsSync(path.join(stateDir, "caller-key")), "runtime state files should be cleared");
   assert.ok(!existsSync(path.join(stateDir, "autostart-initialized")), "the autostart mark should be cleared");
   assert.match(out + err, /preserved/i, "uninstall should say the memory vault is preserved");
+  assert.ok((await waitForHealth(port)).up, "uninstall must leave the foreign listener running");
 });
 
 test("recover menu repairs a lost autostart Run key", async (t) => {
