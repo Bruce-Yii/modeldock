@@ -51,7 +51,13 @@ test("baseInstructionsFor includes the vision and restart guidance", () => {
   const instructions = baseInstructionsFor(configStub());
   assert.match(instructions, /TEXT-ONLY model and CANNOT see images/);
   assert.match(instructions, /call vision_inspect/);
-  assert.match(instructions, /restart\.ps1/);
+  if (process.platform === "win32") {
+    assert.match(instructions, /restart\.ps1/);
+    assert.match(instructions, /powershell -ExecutionPolicy Bypass/);
+  } else {
+    assert.match(instructions, /restart\.sh/);
+    assert.match(instructions, /sh "/);
+  }
 });
 
 test("baseInstructionsFor includes the design-first workflow", () => {

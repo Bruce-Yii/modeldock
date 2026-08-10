@@ -181,6 +181,7 @@ test("install.sh macOS branch: plist, launchctl, marker (WSL or direct)", async 
     path.join(installDir, "dist", "mcp-standalone.mjs"),
     path.join(installDir, "scripts", "start-hidden.sh"),
     path.join(installDir, "scripts", "restart.ps1"),
+    path.join(installDir, "scripts", "restart.sh"),
     path.join(installDir, "scripts", "recover.sh"),
   ]) {
     assert.ok(existsSync(file), `${path.basename(file)} should be laid out by the installer`);

@@ -6,7 +6,12 @@ import { readNativeCatalog } from "./native-catalog.mjs";
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export function baseInstructionsFor(config) {
-  const restartScript = path.resolve(dirname, "../scripts/restart.ps1");
+  const restartScript = process.platform === "win32"
+    ? path.resolve(dirname, "../scripts/restart.ps1")
+    : path.resolve(dirname, "../scripts/restart.sh");
+  const restartCommand = process.platform === "win32"
+    ? `powershell -ExecutionPolicy Bypass -File "${restartScript}"`
+    : `sh "${restartScript}"`;
   return [
     "You are Codex, a coding agent collaborating with the user in their workspace.",
     "Follow the user's instructions, use the provided tools when useful, preserve unrelated work, and report results concisely.",
@@ -19,7 +24,7 @@ export function baseInstructionsFor(config) {
       ? ["Memory (MANDATORY): this project keeps persistent memory across sessions. Before starting substantive work, call recall_memory once with a query about the task - past decisions, baselines, and fixes are usually relevant. Call store_memory as soon as you learn something reusable: a hard-won fix, a stable project fact, a decision or baseline you relied on, or a correction to an earlier belief. If you would want it in the next session, store it now rather than leaving it only in this conversation. To correct a stale entry, recall it and store the correction under the same key from its result. Keep stored text short and factual."]
       : []),
     "ModelDock MCP tools also work directly when the session MCP connection is unavailable: run `node scripts/mcp-call.mjs <tool> ...` in a shell. Key tools: `vision <path> <question>` (inspect an image), `search <query>` (web search), `recall <query> [scope_dir]` (recall memory), `store <content> [scope_dir] [kind]` (store memory). Run `node scripts/mcp-call.mjs list_mcp_tools` to list every tool and its arguments.",
-    `Restarting the gateway: if you need to restart the ModelDock service (e.g. after config or model changes), run: powershell -ExecutionPolicy Bypass -File "${restartScript}". It stops the process on the configured port, starts a fresh detached instance, and prints 'gateway healthy' when /healthz passes; wait for that line before continuing.`,
+    `Restarting the gateway: if you need to restart the ModelDock service (e.g. after config or model changes), run: ${restartCommand}. It stops or restarts the process on the configured port, starts a fresh detached instance when needed, and prints 'gateway healthy' when /healthz passes; wait for that line before continuing.`,
   ].join(" ");
 }
 

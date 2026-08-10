@@ -274,7 +274,13 @@ function writeFakeLaunchctl(binDir, logPath) {
   mkdirSync(binDir, { recursive: true });
   writeFileSync(
     path.join(binDir, "launchctl"),
-    `#!/bin/sh\necho "$*" >> "$MODELDOCK_FAKE_LAUNCHCTL_LOG"\nexit 0\n`,
+    `#!/bin/sh
+echo "$*" >> "$MODELDOCK_FAKE_LAUNCHCTL_LOG"
+if [ "$1" = "list" ]; then
+  echo "-	0	com.modeldock.gateway"
+fi
+exit 0
+`,
     { mode: 0o755 },
   );
 }
@@ -647,6 +653,9 @@ test("mock install lifecycle: first start, second start routes, login relaunch",
   assert.ok(existsSync(installedBundle), "dist/modeldock.mjs should be downloaded");
   assert.ok(existsSync(launcher), `${launcherName} launcher should be written`);
   assert.ok(existsSync(path.join(installDir, "scripts", "restart.ps1")), "scripts/restart.ps1 should be written");
+  if (!isWindows) {
+    assert.ok(existsSync(path.join(installDir, "scripts", "restart.sh")), "scripts/restart.sh should be written");
+  }
   assert.ok(
     existsSync(path.join(installDir, "scripts", isWindows ? "recover.ps1" : "recover.sh")),
     "manual recovery script should be written",
@@ -754,13 +763,15 @@ test("mock install lifecycle: first start, second start routes, login relaunch",
   // The baked restart path is compared through realpath: Windows may render the
   // temp parent as an 8.3 short name (CHENBA~1) while mkdtempSync returned the
   // long form, so a raw string compare would be flaky.
-  const marker = `${path.sep}scripts${path.sep}restart.ps1`;
+  const restartScriptName = isWindows ? "restart.ps1" : "restart.sh";
+  const marker = `${path.sep}scripts${path.sep}${restartScriptName}`;
   const baked = (installedCatalogPayload.models || [])
     .map((model) => model?.base_instructions || "")
     .find((instructions) => instructions.includes(marker)) || "";
   const bakedIndex = baked.indexOf(marker);
-  assert.ok(bakedIndex > 0, "catalog base_instructions should reference scripts/restart.ps1");
-  // The path is quoted inside the instruction ("...\scripts\restart.ps1"); walk
+  assert.ok(bakedIndex > 0, `catalog base_instructions should reference scripts/${restartScriptName}`);
+  // The path is quoted inside the instruction ("...\scripts\restart.ps1" or
+  // ".../scripts/restart.sh"); walk
   // back from the marker to that opening quote so dirname sees a real path.
   const bakedRestartPath = baked.slice(baked.lastIndexOf('"', bakedIndex) + 1, bakedIndex + marker.length);
   const bakedRoot = path.dirname(path.dirname(bakedRestartPath));
@@ -855,12 +866,19 @@ test("mock install: auto-download a bundled Node 22 LTS when none is suitable", 
       { name: `node-${distName}-darwin-arm64/bin/node`, type: "file", data: nodeBin },
     ]),
   );
+  const tgzDarwinX64 = gzipSync(
+    buildTar([
+      { name: `node-${distName}-darwin-x64/`, type: "dir" },
+      { name: `node-${distName}-darwin-x64/bin/`, type: "dir" },
+      { name: `node-${distName}-darwin-x64/bin/node`, type: "file", data: nodeBin },
+    ]),
+  );
   const shasums =
     [
       `${sha256(zip)}  node-${distName}-win-x64.zip`,
       `${sha256(tgz)}  node-${distName}-linux-x64.tar.gz`,
       `${sha256(tgzDarwin)}  node-${distName}-darwin-arm64.tar.gz`,
-      `${sha256(Buffer.from("decoy"))}  node-${distName}-darwin-x64.tar.gz`,
+      `${sha256(tgzDarwinX64)}  node-${distName}-darwin-x64.tar.gz`,
     ].join("\n") + "\n";
   const indexJson = JSON.stringify([
     { version: "v23.1.0", lts: false, npm: "11.0.0" },
@@ -890,6 +908,9 @@ test("mock install: auto-download a bundled Node 22 LTS when none is suitable", 
     } else if (url === `/v${nodeVer}/node-${distName}-darwin-arm64.tar.gz`) {
       res.writeHead(200, { "content-type": "application/gzip" });
       res.end(tgzDarwin);
+    } else if (url === `/v${nodeVer}/node-${distName}-darwin-x64.tar.gz`) {
+      res.writeHead(200, { "content-type": "application/gzip" });
+      res.end(tgzDarwinX64);
     } else {
       res.writeHead(404, { "content-type": "text/plain" });
       res.end("not found");
@@ -946,11 +967,15 @@ test("mock install: auto-download a bundled Node 22 LTS when none is suitable", 
   // The launcher and restart script carry the bundled-first node resolution.
   const launcher = readFileSync(path.join(installDir, "scripts", launcherName), "utf8");
   const restart = readFileSync(path.join(installDir, "scripts", "restart.ps1"), "utf8");
+  const restartSh = !isWindows ? readFileSync(path.join(installDir, "scripts", "restart.sh"), "utf8") : "";
   assert.ok(
     launcher.includes(isWindows ? 'Join-Path $root "node"' : '"$ROOT"/node/v*'),
     "launcher should prefer the bundled node",
   );
   assert.ok(restart.includes('Join-Path $root "node"'), "restart.ps1 should prefer the bundled node");
+  if (!isWindows) {
+    assert.ok(restartSh.includes('"$ROOT"/node/v*'), "restart.sh should prefer the bundled node");
+  }
 
   // POSIX: the fixture node is a real executable wrapper, so the launcher can start
   // the gateway with the bundled node end to end. Windows cannot run a text file as
@@ -991,6 +1016,7 @@ test("mock install: rejects a Node download whose SHA256 does not match", async 
     `${wrong}  node-${distName}-win-x64.zip`,
     `${wrong}  node-${distName}-linux-x64.tar.gz`,
     `${wrong}  node-${distName}-darwin-arm64.tar.gz`,
+    `${wrong}  node-${distName}-darwin-x64.tar.gz`,
   ].join("\n") + "\n";
   const indexJson = JSON.stringify([{ version: "v22.4.0", lts: "Jod", npm: "10.8.0" }]);
   const server = createServer((req, res) => {
