@@ -10,7 +10,7 @@
 
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -22,6 +22,10 @@ const SUMS_NAME = "SHA256SUMS";
 const CHECK_TIMEOUT_MS = 10_000;
 const DOWNLOAD_TIMEOUT_MS = 120_000;
 const MAX_BUNDLE_BYTES = 64 * 1024 * 1024;
+// Rollback snapshots kept per install: one is the recovery material for the
+// current update, the second covers the previous update's recover menu while a
+// user works through it. Older full-layout copies would otherwise pile up.
+const MAX_ROLLBACK_SNAPSHOTS = 2;
 
 // Files an installed layout needs beyond the bundle itself. The release carries
 // every one of them as an asset (see release.yml), and an update deploys the
@@ -155,23 +159,131 @@ async function fetchSums(sumsUrl, fetchImpl = fetch) {
   return parseSumsFile((await fetchAsset(sumsUrl, 64 * 1024, fetchImpl)).toString("utf8"));
 }
 
-function stageFile(body, target) {
-  const tmp = `${target}.${process.pid}.tmp`;
+function removeFileIfPresent(file) {
+  try {
+    unlinkSync(file);
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+}
+
+function stagedPath(target) {
+  return `${target}.${process.pid}.update-stage`;
+}
+
+function backupPath(target) {
+  return `${target}.${process.pid}.update-backup`;
+}
+
+function writeStagedFile(body, target) {
+  const tmp = stagedPath(target);
   // Keep POSIX launchers executable after an update. The installer chmods these
   // files, but replacing a file with a newly-created temp file would otherwise
   // silently drop that mode bit.
   const mode = target.endsWith(".sh") ? 0o755 : 0o644;
+  removeFileIfPresent(tmp);
   writeFileSync(tmp, body, { mode });
-  // Keep the previous bundle as .prev before replacing it: a checksum only proves
-  // the release was built that way, not that it boots on this machine/Node. If the
-  // new bundle fails to come up, the recover menu restores modeldock.mjs.prev so a
-  // bad update does not strand the user with a dead gateway and a switched config.
-  if (target.endsWith(`${path.sep}modeldock.mjs`) || target.endsWith("/modeldock.mjs")) {
-    if (existsSync(target)) {
-      try { copyFileSync(target, `${target}.prev`); } catch { /* best-effort */ }
+  return tmp;
+}
+
+// Replace the platform layout as one recoverable set. Every new file and every
+// backup is prepared before the first destination changes. If any replacement
+// fails, all destinations already changed in this pass are restored before the
+// error reaches the API, so an update can never leave a new bundle beside old
+// launch/recovery scripts.
+function deployFilesAtomically(items, rootDir) {
+  const prepared = [];
+  let applied = 0;
+  let rollbackDir = "";
+  try {
+    for (const item of items) {
+      if (existsSync(item.dest) && !statSync(item.dest).isFile()) {
+        throw new Error(`Update destination is not a file: ${item.dest}`);
+      }
+      const stage = writeStagedFile(item.body, item.dest);
+      const backup = backupPath(item.dest);
+      const existed = existsSync(item.dest);
+      const preparedItem = { ...item, stage, backup, existed };
+      prepared.push(preparedItem);
+      removeFileIfPresent(backup);
+      if (existed) copyFileSync(item.dest, backup);
     }
+
+    for (const item of prepared) {
+      renameSync(item.stage, item.dest);
+      applied += 1;
+    }
+
+    // Preserve the entire previous platform layout, not just the bundle. A new
+    // bundle can depend on its matching bridge and lifecycle scripts, so runtime
+    // recovery must restore the same version set as one transaction.
+    const rollbackRoot = path.join(rootDir, ".modeldock-rollback");
+    const rollbackName = `${Date.now()}-${process.pid}`;
+    rollbackDir = path.join(rollbackRoot, rollbackName);
+    const files = [];
+    for (const item of prepared) {
+      const relative = path.relative(rootDir, item.dest).replaceAll(path.sep, "/");
+      if (!relative || relative.startsWith("../") || path.isAbsolute(relative)) {
+        throw new Error(`Update destination escaped the install root: ${item.dest}`);
+      }
+      files.push({ path: relative, existed: item.existed });
+      if (item.existed) {
+        const rollbackFile = path.join(rollbackDir, ...relative.split("/"));
+        mkdirSync(path.dirname(rollbackFile), { recursive: true });
+        copyFileSync(item.backup, rollbackFile);
+      }
+    }
+    mkdirSync(rollbackDir, { recursive: true });
+    writeFileSync(path.join(rollbackDir, "manifest.json"), `${JSON.stringify({ files }, null, 2)}\n`, "utf8");
+    const marker = path.join(rollbackRoot, "current");
+    const markerStage = `${marker}.${process.pid}.tmp`;
+    writeFileSync(markerStage, `${rollbackName}\n`, "utf8");
+    renameSync(markerStage, marker);
+
+    // Prune old snapshots now that the new marker is committed: the marker
+    // always points at the newest snapshot, so older ones are unreachable
+    // recovery material and safe to drop. Best-effort - a cleanup failure must
+    // not turn a committed deployment into an error.
+    try {
+      const snapshots = readdirSync(rollbackRoot)
+        .filter((name) => /^\d+-\d+$/.test(name))
+        .sort();
+      for (const old of snapshots.slice(0, Math.max(0, snapshots.length - MAX_ROLLBACK_SNAPSHOTS))) {
+        rmSync(path.join(rollbackRoot, old), { recursive: true, force: true });
+      }
+    } catch { /* stale snapshots are harmless */ }
+
+    // The deployment is committed once every destination and the complete
+    // rollback snapshot are in place. Backup cleanup is best-effort from here:
+    // treating a cleanup error
+    // as a deployment failure could start a rollback after earlier backups
+    // have already been deleted.
+    for (const item of prepared) {
+      try { removeFileIfPresent(item.backup); } catch { /* stale backup is safe */ }
+    }
+  } catch (error) {
+    const rollbackErrors = [];
+    for (let index = applied - 1; index >= 0; index -= 1) {
+      const item = prepared[index];
+      try {
+        if (item.existed) copyFileSync(item.backup, item.dest);
+        else removeFileIfPresent(item.dest);
+      } catch (rollbackError) {
+        rollbackErrors.push(`${item.dest}: ${rollbackError.message}`);
+      }
+    }
+    for (const item of prepared) {
+      try { removeFileIfPresent(item.stage); } catch { /* report the primary failure */ }
+      try { removeFileIfPresent(item.backup); } catch { /* report the primary failure */ }
+    }
+    if (rollbackDir) {
+      try { rmSync(rollbackDir, { recursive: true, force: true }); } catch { /* unreferenced partial snapshot */ }
+    }
+    if (rollbackErrors.length) {
+      throw new Error(`${error.message}; rollback failed: ${rollbackErrors.join("; ")}`);
+    }
+    throw error;
   }
-  renameSync(tmp, target);
 }
 
 // Relaunch after the current process exits: a detached shell waits for the port to
@@ -282,7 +394,7 @@ export function createUpdater({
           });
           staged.push({ body, dest: path.join(rootDir, ...target.dest) });
         }
-        for (const item of staged) stageFile(item.body, item.dest);
+        deployFilesAtomically(staged, rootDir);
       }
       restart();
       return { ok: true, mode, latestVersion: state.latestVersion, restarting: true };

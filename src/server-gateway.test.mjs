@@ -297,6 +297,7 @@ test("gateway: historical images are replaced with refs, current images stay for
 });
 
 test("caller-key routes: correct key relays, wrong key and enforced bare path 401", async (t) => {
+  const zlib = await import("node:zlib");
   const upstream = createServer((req, res) => {
     res.setHeader("content-type", "text/event-stream");
     res.end('data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1}}}\n\ndata: [DONE]\n\n');
@@ -314,6 +315,12 @@ test("caller-key routes: correct key relays, wrong key and enforced bare path 40
 
   const wrong = await fetch(`${instance.base}/c/wrong-key-00000000000000000000000/v1/responses`, { method: "POST", headers, body });
   assert.equal(wrong.status, 401, "a wrong key is rejected");
+  const wrongCompressed = await fetch(`${instance.base}/c/wrong-key-00000000000000000000000/v1/responses`, {
+    method: "POST",
+    headers: { ...headers, "content-encoding": "zstd" },
+    body: zlib.zstdCompressSync(Buffer.from(body)),
+  });
+  assert.equal(wrongCompressed.status, 401, "a wrong key is rejected before zstd decompression");
 
   const models = await fetch(`${instance.base}/c/test-caller-key-0123456789abcdefghij/v1/models`);
   assert.equal(models.status, 200, "the keyed models path serves the catalog");
@@ -322,6 +329,12 @@ test("caller-key routes: correct key relays, wrong key and enforced bare path 40
   t.after(() => { process.env.MODELDOCK_REQUIRE_CALLER_KEY = "0"; });
   const bare = await fetch(`${instance.base}/v1/responses`, { method: "POST", headers, body });
   assert.equal(bare.status, 401, "bare path is refused once enforcement is on");
+  const bareCompressed = await fetch(`${instance.base}/v1/responses`, {
+    method: "POST",
+    headers: { ...headers, "content-encoding": "zstd" },
+    body: zlib.zstdCompressSync(Buffer.from(body)),
+  });
+  assert.equal(bareCompressed.status, 401, "compressed bare path is refused before decompression");
 });
 
 test("caller-key enforcement defaults to on: bare paths 401 without an explicit opt-out", async (t) => {
@@ -465,7 +478,7 @@ test("gateway: nativeMerge=false hides native models from /v1/models but the rel
 
   const models = await (await fetch(`${instance.base}/v1/models`)).json();
   const slugs = models.models.map((model) => model.slug);
-  assert.ok(slugs.includes("deepseek-v4-flash"), "curated Go models stay published");
+  assert.ok(slugs.includes("deepseek-v4-flash@opencode-go"), "curated Go models stay published");
   assert.ok(slugs.includes("gpt-5.6-luna@opencode-go"), "our qualified Luna stays published");
   assert.ok(!slugs.includes("gpt-5.6-luna"), "the native GPT model is hidden for non-subscribers");
 
@@ -504,7 +517,7 @@ test("gateway: trial mode serves only the free pair and relays zen-free models t
   t.after(instance.stop);
 
   const models = await (await fetch(`${instance.base}/v1/models`)).json();
-  assert.deepEqual(models.models.map((model) => model.slug).sort(), ["deepseek-v4-flash-free", "mimo-v2.5-free"]);
+  assert.deepEqual(models.models.map((model) => model.slug).sort(), ["deepseek-v4-flash-free@opencode-go", "mimo-v2.5-free@opencode-go"]);
 
   const relay = await fetch(`${instance.base}/v1/responses`, {
     method: "POST",

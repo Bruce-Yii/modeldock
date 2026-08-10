@@ -7,7 +7,10 @@
 # (config.toml.modeldock-backup-*) is also kept for recovery.
 set -eu
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
-STATE_DIR="${MODELDOCK_ROOT:-$HOME/.modeldock}"
+# Runtime state (owner records, caller key, catalog, memory) follows
+# MODELDOCK_STATE_DIR everywhere else; MODELDOCK_ROOT only ever names the
+# install directory. Honour both so a custom state dir is cleaned up too.
+STATE_DIR="${MODELDOCK_STATE_DIR:-${MODELDOCK_ROOT:-$HOME/.modeldock}}"
 LOG="$ROOT/modeldock.log"
 PORT="${MODELDOCK_PORT:-4097}"
 

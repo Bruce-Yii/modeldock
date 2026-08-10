@@ -95,7 +95,7 @@ test("without token: healthz and responses return 503, local models catalog stil
   assert.equal((await fetch(`${instance.base}/healthz`)).status, 503);
   const models = await fetch(`${instance.base}/v1/models`);
   assert.equal(models.status, 200, "models catalog is local and does not need the token");
-  assert.equal((await models.json()).models[0].slug, "deepseek-v4-flash");
+  assert.equal((await models.json()).models[0].slug, "deepseek-v4-flash@opencode-go");
   const responses = await fetch(`${instance.base}/v1/responses`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -145,10 +145,10 @@ test("model API exposes selectable main and vision-capable options", async (t) =
   t.after(instance.stop);
   const initial = await (await fetch(`${instance.base}/api/models`)).json();
   assert.equal(initial.selected.mainModel, "deepseek-v4-flash");
-  assert.deepEqual(initial.options.filter((model) => model.supportsVision).map((model) => model.id), ["gpt-5.6-luna@opencode-go", "grok-4.5", "kimi-k2.5", "kimi-k2.6", "kimi-k2.7-code", "mimo-v2.5", "mimo-v2.5-free"]);
+  assert.deepEqual(initial.options.filter((model) => model.supportsVision).map((model) => model.id), ["gpt-5.6-luna@opencode-go", "grok-4.5@opencode-go", "kimi-k2.5@opencode-go", "kimi-k2.6@opencode-go", "kimi-k2.7-code@opencode-go", "mimo-v2.5@opencode-go", "mimo-v2.5-free@opencode-go"]);
   const changed = await fetch(`${instance.base}/api/models`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ mainModel: "gpt-5.6-luna@opencode-go", visionModel: "kimi-k2.5" }) });
   assert.equal(changed.status, 200);
-  assert.deepEqual((await changed.json()).selected, { mainModel: "gpt-5.6-luna@opencode-go", visionModel: "kimi-k2.5" });
+  assert.deepEqual((await changed.json()).selected, { mainModel: "gpt-5.6-luna@opencode-go", visionModel: "kimi-k2.5@opencode-go" });
   const invalid = await fetch(`${instance.base}/api/models`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ visionModel: "deepseek-v4-flash" }) });
   assert.equal(invalid.status, 400);
 });
@@ -159,7 +159,7 @@ test("models endpoint serves the local Codex catalog", async (t) => {
   const response = await fetch(`${instance.base}/v1/models`);
   assert.equal(response.status, 200);
   const body = await response.json();
-  assert.equal(body.models[0].slug, "deepseek-v4-flash");
+  assert.equal(body.models[0].slug, "deepseek-v4-flash@opencode-go");
   assert.equal(body.models[0].supports_parallel_tool_calls, false);
   assert.deepEqual(body.models[0].supported_reasoning_levels.map((level) => level.effort), ["low", "high", "xhigh"]);
   assert.match(body.models[0].base_instructions, /coding agent/);
@@ -174,7 +174,7 @@ test("codexModelCatalog matches Codex schema requirements", () => {
     nativeCatalogFile: path.join(os.tmpdir(), "modeldock-test-native-missing.json"),
   });
   const model = catalog.models[0];
-  assert.equal(model.slug, "deepseek-v4-flash");
+  assert.equal(model.slug, "deepseek-v4-flash@opencode-go");
   assert.equal(model.supports_reasoning_summaries, true);
   assert.equal(model.model_messages.instructions_variables.personality_pragmatic, "");
   assert.equal(model.apply_patch_tool_type, "freeform");
@@ -255,13 +255,13 @@ test("config mode endpoint switches OFF / TRIAL / ON and locks the free pair in 
   assert.equal(trial.enabled, true);
   assert.equal(trial.trial, true);
   assert.equal(trial.restartRequired, true);
-  assert.equal(instance.services.modelSelection.mainModel, "deepseek-v4-flash-free");
-  assert.equal(instance.services.modelSelection.visionModel, "mimo-v2.5-free");
+  assert.equal(instance.services.modelSelection.mainModel, "deepseek-v4-flash-free@opencode-go");
+  assert.equal(instance.services.modelSelection.visionModel, "mimo-v2.5-free@opencode-go");
   assert.match(await readFile(envFile, "utf8"), /MODELDOCK_TRIAL=1/);
 
   const trialStatus = await (await fetch(`${instance.base}/api/status`)).json();
   assert.equal(trialStatus.config.trial, true);
-  assert.deepEqual(trialStatus.models.options.map((model) => model.id).sort(), ["deepseek-v4-flash-free", "mimo-v2.5-free"]);
+  assert.deepEqual(trialStatus.models.options.map((model) => model.id).sort(), ["deepseek-v4-flash-free@opencode-go", "mimo-v2.5-free@opencode-go"]);
 
   // /api/models cannot escape the trial pair while trial is active.
   const locked = await (await fetch(`${instance.base}/api/models`, {
@@ -269,7 +269,7 @@ test("config mode endpoint switches OFF / TRIAL / ON and locks the free pair in 
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ mainModel: "gpt-5.6-luna@opencode-go", visionModel: "kimi-k2.5" }),
   })).json();
-  assert.deepEqual(locked.selected, { mainModel: "deepseek-v4-flash-free", visionModel: "mimo-v2.5-free" });
+  assert.deepEqual(locked.selected, { mainModel: "deepseek-v4-flash-free@opencode-go", visionModel: "mimo-v2.5-free@opencode-go" });
 
   const on = await (await post({ mode: "on" })).json();
   assert.equal(on.enabled, true);

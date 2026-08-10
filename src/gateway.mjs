@@ -151,6 +151,26 @@ function endRelayStreamFailure(res, message) {
   }
 }
 
+// A stream that already sent headers cannot switch protocols mid-response:
+// terminate in the shape the client was told to expect. Responses SSE streams
+// end with a response.failed event (above); a JSON payload - e.g. the native
+// images endpoints answer application/json - ends with a JSON error object.
+// Writing SSE events into an application/json body leaves the client with a
+// body it cannot parse.
+function endRelayFailure(res, message) {
+  const contentType = String(res.getHeader?.("Content-Type") || "");
+  if (/text\/event-stream/i.test(contentType) || /ndjson|jsonl/i.test(contentType)) {
+    endRelayStreamFailure(res, message);
+    return;
+  }
+  try {
+    res.write(JSON.stringify({ error: { type: "upstream_failed", message } }));
+    res.end();
+  } catch {
+    res.destroy();
+  }
+}
+
 // Headers Codex's signed-in transport sends that the native backend needs.
 // Everything else (tokens for routed providers, loopback bookkeeping) stays out.
 const NATIVE_FORWARD_HEADERS = new Set([
@@ -1052,7 +1072,7 @@ export async function relayNativeImage(payload, res, services, { signal } = {}) 
       res.setHeader("Content-Type", "application/json");
       res.end(JSON.stringify({ error: { type: "upstream_failed", message: redactBearer(error.message) } }));
     } else {
-      endRelayStreamFailure(res, redactBearer(error.message));
+      endRelayFailure(res, redactBearer(error.message));
     }
     return { ok: false, httpStatus: 502, error: error.message };
   }

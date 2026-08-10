@@ -238,7 +238,14 @@ fi
 cd "$ROOT"
 # Log instead of discarding: a background start that dies (bad node, port in use,
 # missing file) is otherwise completely silent for the user.
-nohup "$NODE_BIN" "$SERVER" >>"$ROOT/modeldock.log" 2>&1 &
+LOG="$ROOT/modeldock.log"
+# Rotate at startup, one previous generation (like codex-router's log-rotation):
+# the log is append-only for the life of the process, so a cap on growth can only
+# be applied between runs. 32 MB keeps roughly a month of daily use.
+if [ -f "$LOG" ] && [ "$(wc -c < "$LOG")" -gt 33554432 ]; then
+  mv -f "$LOG" "$LOG.1"
+fi
+nohup "$NODE_BIN" "$SERVER" >>"$LOG" 2>&1 &
 EOF
 chmod +x "$LAUNCHER"
 
@@ -262,6 +269,14 @@ $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $PSScriptRoot
 $envFile = Join-Path $root ".env"
+
+# Status lines go to both stdout and stderr. Callers (CI, the model shell, the
+# dashboard) sometimes capture only one stream; a hidden launcher must never
+# fail silently.
+function Write-Status($message) {
+  Write-Output $message
+  [Console]::Error.WriteLine($message)
+}
 
 $port = 4097
 if (Test-Path $envFile) {
@@ -292,8 +307,8 @@ if ($listener) {
         $ownerRoot = [System.IO.Path]::GetFullPath($owner.root)
         $thisRoot = [System.IO.Path]::GetFullPath($root)
         if ($ownerRoot -ne $thisRoot) {
-          Write-Output "ERROR: port $port is owned by a gateway from '$ownerRoot' (PID $oldPid); this script runs from '$thisRoot'."
-          Write-Output "Re-run with -Force to take the port over deliberately."
+          Write-Status "ERROR: port $port is owned by a gateway from '$ownerRoot' (PID $oldPid); this script runs from '$thisRoot'."
+          Write-Status "Re-run with -Force to take the port over deliberately."
           exit 1
         }
       }
@@ -301,20 +316,56 @@ if ($listener) {
       # Unreadable owner file: fall through and behave as before.
     }
   }
-  Write-Output "restart.ps1: stopping gateway (PID $oldPid, port $port)"
+  Write-Status "restart.ps1: stopping gateway (PID $oldPid, port $port)"
   Stop-Process -Id $oldPid -Force
   for ($i = 0; $i -lt 20; $i += 1) {
     Start-Sleep -Milliseconds 250
     if (-not (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue)) { break }
   }
 } else {
-  Write-Output "restart.ps1: no gateway on port $port; starting fresh"
+  Write-Status "restart.ps1: no gateway on port $port; starting fresh"
 }
 
-$logDir = Join-Path $env:TEMP "modeldock"
-New-Item -ItemType Directory -Force -Path $logDir | Out-Null
-$stdout = Join-Path $logDir "gateway.log"
-$stderr = Join-Path $logDir "gateway.err.log"
+$log = Join-Path $root "modeldock.log"
+
+# The old gateway's stdout/stderr handles can linger for a moment after
+# Stop-Process. Wait for the log to become writable BEFORE rotating: an
+# in-place Move-Item on a still-locked file fails, and that failure used to
+# abort the restart. If it stays locked, fall back to a per-run log file so
+# the redirect never races the dying process's file handles.
+function Test-WritableFile($file) {
+  try {
+    $probe = [System.IO.File]::Open($file, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+    $probe.Close()
+    return $true
+  } catch {
+    return $false
+  }
+}
+$logsReady = $false
+for ($i = 0; $i -lt 20; $i += 1) {
+  if (Test-WritableFile $log) {
+    $logsReady = $true
+    break
+  }
+  Start-Sleep -Milliseconds 250
+}
+if (-not $logsReady) {
+  $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+  $log = Join-Path $root "modeldock-$stamp.log"
+  Write-Status "WARNING: modeldock.log was still locked; using per-run log ($log)"
+} elseif ((Test-Path -LiteralPath $log) -and ((Get-Item -LiteralPath $log).Length -gt 32MB)) {
+  # Rotate at startup, one previous generation (same policy as start-hidden.ps1):
+  # the log is append-only for the life of the process, so a cap on growth can
+  # only be applied between runs. 32 MB keeps roughly a month of daily use.
+  try {
+    Move-Item -LiteralPath $log -Destination "$log.1" -Force
+  } catch {
+    # Rotation is best-effort now that the lock wait passed; a raced lock must
+    # not turn a restart into a failure.
+    Write-Status "WARNING: could not rotate modeldock.log: $($_.Exception.Message)"
+  }
+}
 
 # Prefer an explicit path, then a bundled Node under <root>\node (the installer
 # downloads Node 22 LTS there when none is on PATH), then PATH.
@@ -333,7 +384,7 @@ if (-not $nodeExe) {
 }
 if (-not $nodeExe) { $nodeExe = (Get-Command node -ErrorAction SilentlyContinue).Source }
 if (-not $nodeExe) {
-  Write-Output "ERROR: node.exe not found; install Node 22+ or re-run the ModelDock installer"
+  Write-Status "ERROR: node.exe not found; install Node 22+ or re-run the ModelDock installer"
   exit 1
 }
 
@@ -343,27 +394,41 @@ if (-not $nodeExe) {
 $server = Join-Path $root "src\server.mjs"
 if (-not (Test-Path -LiteralPath $server)) { $server = Join-Path $root "dist\modeldock.mjs" }
 
-# Quote the script path so an install dir with a space is not split into two argv entries.
-Start-Process -FilePath $nodeExe -ArgumentList "`"$server`"" -WorkingDirectory $root -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
-Write-Output "restart.ps1: started gateway from $root (logs: $logDir)"
+try {
+  # Quote both paths: an installed layout under a home dir with a space
+  # (e.g. "C:\Users\Chen Bao\.modeldock") would otherwise be split by node's
+  # CRT into two argv entries and fail with "Cannot find module". cmd.exe does
+  # the >> redirection so stdout and stderr share the same log file as the
+  # start-hidden launcher (and the "check modeldock.log" guidance).
+  Start-Process -FilePath "cmd.exe" -ArgumentList "/c", "`"`"$nodeExe`" `"$server`" >> `"$log`" 2>&1`"" -WorkingDirectory $root -WindowStyle Hidden
+} catch {
+  Write-Status "ERROR: failed to start gateway: $($_.Exception.Message)"
+  exit 1
+}
+Write-Status "restart.ps1: started gateway from $root (logs: $log)"
 
 for ($i = 0; $i -lt 40; $i += 1) {
   Start-Sleep -Milliseconds 250
   try {
     Invoke-WebRequest -Uri "http://127.0.0.1:$port/healthz" -TimeoutSec 2 -UseBasicParsing | Out-Null
-    Write-Output "restart.ps1: gateway healthy at http://127.0.0.1:$port"
+    Write-Status "restart.ps1: gateway healthy at http://127.0.0.1:$port"
     exit 0
   } catch {
+    # A returned HTTP status (e.g. 503 before a token is configured) still proves
+    # the gateway is up and listening - only a connection failure means it is not.
     if ($_.Exception.Response) {
-      Write-Output "restart.ps1: gateway up at http://127.0.0.1:$port (awaiting token)"
+      Write-Status "restart.ps1: gateway up at http://127.0.0.1:$port (awaiting token)"
       exit 0
     }
-    # Otherwise still booting; keep polling.
+    # Otherwise still booting / connection refused; keep polling.
   }
 }
 
-Write-Output "ERROR: gateway did not become healthy within 10s"
-if (Test-Path $stderr) { Get-Content $stderr -Tail 10 -ErrorAction SilentlyContinue }
+Write-Status "ERROR: gateway did not become healthy within 10s"
+if (Test-Path $log) {
+  $tail = Get-Content $log -Tail 10 -ErrorAction SilentlyContinue
+  if ($tail) { $tail | ForEach-Object { [Console]::Error.WriteLine($_) } }
+}
 exit 1
 EOF
 
@@ -409,13 +474,23 @@ if [ -f "$ENV_FILE" ]; then
 fi
 
 find_listener_pid() {
+  pid=""
   if command -v lsof >/dev/null 2>&1; then
-    lsof -nP -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null | head -n 1 || true
-  elif command -v fuser >/dev/null 2>&1; then
-    fuser "$PORT/tcp" 2>/dev/null | tr ' ' '\n' | sed '/^$/d' | head -n 1 || true
-  else
-    true
+    pid="$(lsof -nP -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null | head -n 1 || true)"
+    if [ -n "$pid" ]; then printf '%s\n' "$pid"; return; fi
   fi
+  if command -v ss >/dev/null 2>&1; then
+    # Minimal Linux images (Debian/Ubuntu containers) ship neither lsof nor
+    # psmisc, but do ship ss. Without this branch the old PID is never found and
+    # the new gateway dies with EADDRINUSE while the stale one keeps answering.
+    pid="$(ss -tlnpH "sport = :$PORT" 2>/dev/null | grep -o 'pid=[0-9]*' | head -n 1 | cut -d= -f2 || true)"
+    if [ -n "$pid" ]; then printf '%s\n' "$pid"; return; fi
+  fi
+  if command -v fuser >/dev/null 2>&1; then
+    pid="$(fuser "$PORT/tcp" 2>/dev/null | tr ' ' '\n' | sed '/^$/d' | head -n 1 || true)"
+    if [ -n "$pid" ]; then printf '%s\n' "$pid"; return; fi
+  fi
+  true
 }
 
 resolve_node() {
@@ -458,6 +533,11 @@ if [ ! -f "$SERVER" ]; then
 fi
 
 OLD_PID="$(find_listener_pid)"
+if curl -sS -o /dev/null --max-time 2 "http://127.0.0.1:$PORT/healthz" 2>/dev/null \
+    && [ -z "$OLD_PID" ]; then
+  status "ERROR: port $PORT is active but its listener PID could not be identified; refusing a fake restart"
+  exit 3
+fi
 
 check_owner() {
   [ -n "$OLD_PID" ] || return 0
@@ -495,7 +575,9 @@ wait_for_health() {
   old_pid="${1:-}"
   i=0
   while [ "$i" -lt 40 ]; do
-    # No -f: a 503 (up but awaiting a token) still proves the process is listening.
+    # No -f: a 503 (gateway up but no token yet) still proves the process is
+    # listening. -f would treat that as a failure and loop until the timeout,
+    # reporting a healthy fresh install as "did not start".
     if curl -sS -o /dev/null --max-time 2 "http://127.0.0.1:$PORT/healthz" 2>/dev/null; then
       new_pid="$(find_listener_pid)"
       if [ -z "$old_pid" ] || [ -z "$new_pid" ] || [ "$new_pid" != "$old_pid" ]; then
@@ -558,6 +640,7 @@ if [ -f "$LOG" ] && [ "$(wc -c < "$LOG")" -gt 33554432 ]; then
 fi
 
 nohup "$NODE_BIN" "$SERVER" >>"$LOG" 2>&1 &
+NEW_PID=$!
 status "restart.sh: started gateway from $ROOT (logs: $LOG)"
 
 if wait_for_health "$OLD_PID"; then
@@ -565,6 +648,8 @@ if wait_for_health "$OLD_PID"; then
 fi
 
 status "ERROR: gateway did not become healthy within 10s"
+kill "$NEW_PID" 2>/dev/null || true
+wait "$NEW_PID" 2>/dev/null || true
 if [ -f "$LOG" ]; then
   tail -n 10 "$LOG" >&2 || true
 fi
@@ -576,94 +661,162 @@ chmod +x "$RESTART_SH"
 RECOVER="$ROOT/scripts/recover.sh"
 cat > "$RECOVER" <<'EOF'
 #!/bin/sh
+# ModelDock manual recovery menu.
+# Choose gateway restart, restore the last native Codex configuration, or repair
+# the start-at-login entry.
 set -eu
+
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 STATE_DIR="${MODELDOCK_STATE_DIR:-$ROOT}"
 PORT="${MODELDOCK_PORT:-4097}"
 if [ -f "$ROOT/.env" ]; then
-  ENV_PORT="$(sed -n 's/^MODELDOCK_PORT=//p' "$ROOT/.env" | tail -n 1)"
-  [ -n "$ENV_PORT" ] && PORT="$ENV_PORT"
+  ENV_PORT="$(sed -n 's/^MODELDOCK_PORT=//p' "$ROOT/.env" | tail -n 1 | tr -d '\r' || true)"
+  case "$ENV_PORT" in
+    ''|*[!0-9]*) ;;
+    *) [ "$ENV_PORT" -gt 0 ] && PORT="$ENV_PORT" ;;
+  esac
 fi
-restart_gateway() {
-  if [ ! -x "$ROOT/scripts/start-hidden.sh" ]; then
-    echo "start-hidden.sh is missing from $ROOT" >&2
-    exit 1
+
+# Resolve a Node binary the same bundled-first way as restart.sh. A self-contained
+# install (node auto-downloaded into "$ROOT/node" because the machine had none)
+# has no node on PATH, so a bare "node" here would fail the config restore exactly
+# when the gateway is down and recovery matters most.
+resolve_node() {
+  if [ -n "${MODELDOCK_NODE_PATH:-}" ] && [ -x "$MODELDOCK_NODE_PATH" ]; then
+    printf '%s\n' "$MODELDOCK_NODE_PATH"; return
   fi
-  old_pid=""
-  has_lsof=0
-  if command -v lsof >/dev/null 2>&1; then has_lsof=1; fi
-  if [ "$has_lsof" -eq 1 ]; then
-    pid="$(lsof -ti "tcp:$PORT" 2>/dev/null | head -n 1 || true)"
-    if [ -n "$pid" ]; then
-      command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
-      case "$command" in
-        *"$ROOT"*) old_pid="$pid"; kill "$pid";;
-        *) echo "Refusing to stop an unrelated process on port $PORT." >&2; exit 1;;
-      esac
+  best_bin=""; best_v=""
+  for d in "$ROOT"/node/v*; do
+    [ -d "$d" ] && [ -x "$d/bin/node" ] || continue
+    v="$(basename "$d" | sed 's/^v//')"
+    if [ -z "$best_v" ] || [ "$(printf '%s\n%s\n' "$v" "$best_v" | sort -t. -k1,1n -k2,2n -k3,3n | tail -n 1)" = "$v" ]; then
+      best_bin="$d/bin/node"; best_v="$v"
     fi
-  fi
-  # Give the old process and its socket time to release before starting the
-  # replacement, so the new instance cannot fail with EADDRINUSE and the health
-  # probe below cannot be answered by the dying process (false healthy).
-  i=0
-  while [ "$i" -lt 20 ]; do
-    alive=""
-    if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then alive=1; fi
-    listening=""
-    if [ "$has_lsof" -eq 1 ] && [ -n "$(lsof -ti "tcp:$PORT" 2>/dev/null | head -n 1 || true)" ]; then listening=1; fi
-    if [ -z "$alive" ] && [ -z "$listening" ]; then break; fi
-    sleep 0.25
-    i=$((i + 1))
   done
-  if [ "$i" -ge 20 ]; then
-    echo "Port $PORT did not release within 5s; aborting restart." >&2
-    exit 1
-  fi
-  "$ROOT/scripts/start-hidden.sh"
-  i=0
-  while [ "$i" -lt 40 ]; do
-    # No -f: a 503 before a token is set still proves the gateway is listening.
-    if curl -sS -o /dev/null --max-time 2 "http://127.0.0.1:$PORT/healthz" 2>/dev/null; then
-      if [ "$has_lsof" -eq 1 ]; then
-        new_pid="$(lsof -ti "tcp:$PORT" 2>/dev/null | head -n 1 || true)"
-        if [ -n "$new_pid" ] && [ "$new_pid" != "$old_pid" ]; then
-          echo "ModelDock gateway is healthy at http://127.0.0.1:$PORT (PID $new_pid)"; return
-        fi
-      else
-        echo "ModelDock gateway is healthy at http://127.0.0.1:$PORT"; return
-      fi
-    fi
-    sleep 0.25; i=$((i + 1))
-  done
-  echo "Gateway did not become healthy. Check $ROOT/modeldock.log" >&2; exit 1
+  if [ -n "$best_bin" ]; then printf '%s\n' "$best_bin"; return; fi
+  command -v node || true
 }
+
+restore_previous_update() {
+  marker="$ROOT/.modeldock-rollback/current"
+  [ -f "$marker" ] || return 1
+  node_bin="$(resolve_node)"
+  [ -n "$node_bin" ] && [ -x "$node_bin" ] || return 1
+  "$node_bin" --input-type=module - "$ROOT" "$marker" <<'NODE'
+import fs from "node:fs";
+import path from "node:path";
+
+const [rootArg, marker] = process.argv.slice(2);
+const root = path.resolve(rootArg);
+const rollbackRoot = path.join(root, ".modeldock-rollback");
+const name = fs.readFileSync(marker, "utf8").trim();
+if (!name || path.basename(name) !== name) throw new Error("invalid update rollback marker");
+const rollbackDir = path.join(rollbackRoot, name);
+const manifest = JSON.parse(fs.readFileSync(path.join(rollbackDir, "manifest.json"), "utf8"));
+const prepared = [];
+let applied = 0;
+const remove = (file) => { try { fs.unlinkSync(file); } catch (error) { if (error.code !== "ENOENT") throw error; } };
+try {
+  for (const entry of manifest.files || []) {
+    const target = path.resolve(root, entry.path);
+    if (target !== root && !target.startsWith(`${root}${path.sep}`)) throw new Error(`rollback path escaped install root: ${entry.path}`);
+    const stage = `${target}.rollback-stage-${process.pid}`;
+    const current = `${target}.rollback-current-${process.pid}`;
+    remove(stage);
+    remove(current);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    const currentExisted = fs.existsSync(target);
+    if (currentExisted) fs.copyFileSync(target, current);
+    if (entry.existed) {
+      const source = path.resolve(rollbackDir, entry.path);
+      if (!source.startsWith(`${rollbackDir}${path.sep}`) || !fs.statSync(source).isFile()) throw new Error(`rollback file is missing: ${entry.path}`);
+      fs.copyFileSync(source, stage);
+    }
+    prepared.push({ target, stage, current, currentExisted, restore: Boolean(entry.existed) });
+  }
+  for (const item of prepared) {
+    if (item.restore) fs.renameSync(item.stage, item.target);
+    else remove(item.target);
+    applied += 1;
+  }
+} catch (error) {
+  for (let index = applied - 1; index >= 0; index -= 1) {
+    const item = prepared[index];
+    if (item.currentExisted) fs.copyFileSync(item.current, item.target);
+    else remove(item.target);
+  }
+  throw error;
+} finally {
+  for (const item of prepared) {
+    try { remove(item.stage); } catch {}
+    try { remove(item.current); } catch {}
+  }
+}
+NODE
+}
+
+restart_gateway() {
+  restart="$ROOT/scripts/restart.sh"
+  if [ ! -x "$restart" ]; then
+    echo "restart.sh is missing from $ROOT" >&2
+    exit 1
+  fi
+  if "$restart"; then return; else restart_status=$?; fi
+  # Codes 2 and 3 are ownership/PID-safety refusals, not a bad release. Never
+  # replace files while a listener we cannot safely stop may still be running.
+  if [ "$restart_status" -eq 2 ] || [ "$restart_status" -eq 3 ]; then exit "$restart_status"; fi
+  echo "New installed version did not become healthy; restoring the complete previous version set." >&2
+  if restore_previous_update && "$ROOT/scripts/restart.sh"; then
+    echo "Rolled back the complete installed version; gateway is healthy."
+    return
+  fi
+  echo "Gateway did not become healthy. Check $ROOT/modeldock.log" >&2
+  exit 1
+}
+
 restore_native() {
   if curl -fsS --max-time 3 -X POST "http://127.0.0.1:$PORT/api/config/disable" >/dev/null 2>&1; then
-    echo "Codex native route restored through the running gateway."; return
+    echo "Codex native route restored through the running gateway."
+    return
   fi
   echo "Gateway is unavailable; restoring from the local backup."
   CODEX_HOME_VALUE="${MODELDOCK_CODEX_HOME:-${CODEX_HOME:-$HOME/.codex}}"
   STATE="$CODEX_HOME_VALUE/modeldock/config-switch-state.json"
   CONFIG="$CODEX_HOME_VALUE/config.toml"
-  [ -f "$STATE" ] || { echo "ModelDock switch state was not found: $STATE" >&2; exit 1; }
-  node --input-type=module - "$STATE" "$CONFIG" <<'NODE'
+  if [ ! -f "$STATE" ]; then
+    echo "ModelDock switch state was not found: $STATE" >&2
+    exit 1
+  fi
+  NODE_BIN="$(resolve_node)"
+  if [ -z "$NODE_BIN" ] || [ ! -x "$NODE_BIN" ]; then
+    echo "node not found; cannot restore the Codex config. Install Node 22+ or re-run the installer." >&2
+    exit 1
+  fi
+  "$NODE_BIN" --input-type=module - "$STATE" "$CONFIG" <<'NODE'
 import { copyFile, readFile, rm, writeFile, rename } from "node:fs/promises";
 import path from "node:path";
 const [statePath, configPath] = process.argv.slice(2);
 const state = JSON.parse(await readFile(statePath, "utf8"));
-if (!state.enabled) { console.log("Codex is already on the native route."); process.exit(0); }
+if (!state.enabled) {
+  console.log("Codex is already on the native route.");
+  process.exit(0);
+}
 if (!state.backupPath) throw new Error("ModelDock backup path is missing.");
 const backup = path.resolve(state.backupPath);
-await readFile(backup);
+try { await readFile(backup); } catch { throw new Error(`ModelDock backup is missing: ${backup}`); }
 try {
   await readFile(configPath);
   await copyFile(configPath, `${configPath}.native-recovery-${Date.now()}.bak`);
-  if (state.originalExisted) await copyFile(backup, configPath); else await rm(configPath, { force: true });
+  if (state.originalExisted) await copyFile(backup, configPath);
+  else await rm(configPath, { force: true });
 } catch (error) {
   if (error.code === "ENOENT" && state.originalExisted) await copyFile(backup, configPath);
   else if (error.code !== "ENOENT") throw error;
 }
-state.enabled = false; state.restartRequired = true; state.lastBackupPath = backup; state.changedAt = new Date().toISOString();
+state.enabled = false;
+state.restartRequired = true;
+state.lastBackupPath = backup;
+state.changedAt = new Date().toISOString();
 const temporary = `${statePath}.${process.pid}.tmp`;
 await writeFile(temporary, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
 await rename(temporary, statePath);
@@ -671,6 +824,7 @@ console.log(`Codex native route restored from ${backup}`);
 console.log("Fully quit and restart Codex.");
 NODE
 }
+
 repair_autostart() {
   if [ "$(uname -s)" != "Darwin" ] && [ "${MODELDOCK_FAKE_DARWIN:-}" != "1" ]; then
     echo "Start-at-login repair is macOS-only; on Windows use the installer's recover menu." >&2
@@ -699,6 +853,15 @@ repair_autostart() {
   PLIST_DIR="${MODELDOCK_AUTOSTART_PLIST_DIR:-$HOME/Library/LaunchAgents}"
   PLIST="$PLIST_DIR/com.modeldock.gateway.plist"
   mkdir -p "$PLIST_DIR"
+  # plist is XML: a user path containing & < > would otherwise break launchd.
+  xml_escape() {
+    printf '%s' "$1" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'
+  }
+  NODE_DIR="$(dirname "$NODE_BIN")"
+  PLIST_PATH="$(xml_escape "$NODE_DIR:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")"
+  PLIST_NODE="$(xml_escape "$NODE_BIN")"
+  PLIST_SERVER="$(xml_escape "$SERVER")"
+  PLIST_ROOT="$(xml_escape "$ROOT")"
   cat > "$PLIST" <<PLISTEOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -707,20 +870,20 @@ repair_autostart() {
   <key>Label</key><string>com.modeldock.gateway</string>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>PATH</key><string>$(dirname "$NODE_BIN"):/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-    <key>MODELDOCK_NODE_PATH</key><string>$NODE_BIN</string>
+    <key>PATH</key><string>$PLIST_PATH</string>
+    <key>MODELDOCK_NODE_PATH</key><string>$PLIST_NODE</string>
   </dict>
   <key>ProgramArguments</key>
   <array>
-    <string>$NODE_BIN</string>
-    <string>$SERVER</string>
+    <string>$PLIST_NODE</string>
+    <string>$PLIST_SERVER</string>
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>10</integer>
-  <key>WorkingDirectory</key><string>$ROOT</string>
-  <key>StandardOutPath</key><string>$ROOT/modeldock.log</string>
-  <key>StandardErrorPath</key><string>$ROOT/modeldock.log</string>
+  <key>WorkingDirectory</key><string>$PLIST_ROOT</string>
+  <key>StandardOutPath</key><string>$PLIST_ROOT/modeldock.log</string>
+  <key>StandardErrorPath</key><string>$PLIST_ROOT/modeldock.log</string>
 </dict>
 </plist>
 PLISTEOF
@@ -732,6 +895,8 @@ PLISTEOF
     exit 1
   fi
 }
+
+echo ""
 echo "ModelDock manual recovery"
 echo "1. Restart ModelDock gateway"
 echo "2. Restore Codex native route"
@@ -739,7 +904,13 @@ echo "3. Repair start-at-login"
 echo "Q. Quit"
 printf "Choose 1, 2, 3, or Q: "
 read -r choice
-case "$choice" in 1) restart_gateway ;; 2) restore_native ;; 3) repair_autostart ;; q|Q|"") exit 0 ;; *) echo "Unknown choice: $choice" >&2; exit 1 ;; esac
+case "$choice" in
+  1) restart_gateway ;;
+  2) restore_native ;;
+  3) repair_autostart ;;
+  q|Q|"") exit 0 ;;
+  *) echo "Unknown choice: $choice" >&2; exit 1 ;;
+esac
 EOF
 chmod +x "$RECOVER"
 

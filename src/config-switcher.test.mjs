@@ -139,6 +139,24 @@ test("re-enable after a crash that left the config managed does not poison the b
   assert.doesNotMatch(restored, /mcp_servers\.modeldock/);
 });
 
+test("crash recovery preserves that config.toml originally did not exist", async (t) => {
+  const codexHome = await mkdtemp(path.join(os.tmpdir(), "modeldock-config-switch-absent-"));
+  t.after(() => rm(codexHome, { recursive: true, force: true }));
+  const configPath = path.join(codexHome, "config.toml");
+  const switcher = new CodexConfigSwitcher({
+    codexHome,
+    baseUrl: "http://127.0.0.1:4097/v1",
+    model: "deepseek-v4-flash",
+  });
+
+  await switcher.enable();
+  assert.match(await readFile(configPath, "utf8"), /ModelDock original config existed: false/);
+  await rm(path.join(codexHome, "modeldock", "config-switch-state.json"), { force: true });
+  await switcher.enable();
+  await switcher.disable();
+  await assert.rejects(() => access(configPath), { code: "ENOENT" });
+});
+
 test("markOnboarded persists and survives enable/disable round trips", async (t) => {
   const { switcher } = await fixture(t);
   const fresh = await switcher.status();

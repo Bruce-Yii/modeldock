@@ -51,6 +51,70 @@ function Repair-Autostart {
   } finally { if ($runKey) { $runKey.Close() } }
 }
 
+function Restore-PreviousUpdate {
+  $rollbackRoot = Join-Path $root ".modeldock-rollback"
+  $marker = Join-Path $rollbackRoot "current"
+  if (-not (Test-Path -LiteralPath $marker -PathType Leaf)) { return $false }
+  $name = [System.IO.File]::ReadAllText($marker).Trim()
+  if (-not $name -or [System.IO.Path]::GetFileName($name) -ne $name) { throw "invalid update rollback marker" }
+  $rollbackDir = Join-Path $rollbackRoot $name
+  $manifestPath = Join-Path $rollbackDir "manifest.json"
+  $manifest = [System.IO.File]::ReadAllText($manifestPath) | ConvertFrom-Json
+  $rootPrefix = [System.IO.Path]::GetFullPath($root).TrimEnd('\') + '\'
+  $rollbackPrefix = [System.IO.Path]::GetFullPath($rollbackDir).TrimEnd('\') + '\'
+  $prepared = @()
+  $applied = 0
+  try {
+    foreach ($entry in $manifest.files) {
+      $relative = ([string]$entry.path).Replace('/', '\')
+      $target = [System.IO.Path]::GetFullPath((Join-Path $root $relative))
+      if (-not $target.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "rollback path escaped install root: $relative"
+      }
+      $stage = "$target.rollback-stage-$PID"
+      $current = "$target.rollback-current-$PID"
+      Remove-Item -LiteralPath $stage, $current -Force -ErrorAction SilentlyContinue
+      [System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($target)) | Out-Null
+      $currentExisted = Test-Path -LiteralPath $target -PathType Leaf
+      if ($currentExisted) { Copy-Item -LiteralPath $target -Destination $current -Force }
+      $restore = [bool]$entry.existed
+      if ($restore) {
+        $source = [System.IO.Path]::GetFullPath((Join-Path $rollbackDir $relative))
+        if (-not $source.StartsWith($rollbackPrefix, [System.StringComparison]::OrdinalIgnoreCase) -or
+            -not (Test-Path -LiteralPath $source -PathType Leaf)) {
+          throw "rollback file is missing: $relative"
+        }
+        Copy-Item -LiteralPath $source -Destination $stage -Force
+      }
+      $prepared += [pscustomobject]@{ Target = $target; Stage = $stage; Current = $current; CurrentExisted = $currentExisted; Restore = $restore }
+    }
+    foreach ($item in $prepared) {
+      if ($item.Restore) {
+        if (Test-Path -LiteralPath $item.Target -PathType Leaf) {
+          [System.IO.File]::Replace($item.Stage, $item.Target, $null)
+        } else {
+          Move-Item -LiteralPath $item.Stage -Destination $item.Target
+        }
+      } elseif (Test-Path -LiteralPath $item.Target) {
+        Remove-Item -LiteralPath $item.Target -Force
+      }
+      $applied += 1
+    }
+  } catch {
+    for ($index = $applied - 1; $index -ge 0; $index -= 1) {
+      $item = $prepared[$index]
+      if ($item.CurrentExisted) { Copy-Item -LiteralPath $item.Current -Destination $item.Target -Force }
+      else { Remove-Item -LiteralPath $item.Target -Force -ErrorAction SilentlyContinue }
+    }
+    throw
+  } finally {
+    foreach ($item in $prepared) {
+      Remove-Item -LiteralPath $item.Stage, $item.Current -Force -ErrorAction SilentlyContinue
+    }
+  }
+  return $true
+}
+
 function Restart-Gateway {
   Repair-Autostart
   $restart = Join-Path $root "scripts\restart.ps1"
@@ -59,14 +123,10 @@ function Restart-Gateway {
   }
   & powershell -NoProfile -ExecutionPolicy Bypass -File $restart
   if ($LASTEXITCODE -ne 0) {
-    # Roll back a bad self-update: if the new bundle never became healthy and the
-    # updater kept the previous one, restore it and restart once more so a broken
-    # release does not leave the gateway dead (and Codex routed at it).
-    $bundle = Join-Path $root "dist\modeldock.mjs"
-    $prev = "$bundle.prev"
-    if ((Test-Path -LiteralPath $prev) -and (Test-Path -LiteralPath $bundle)) {
-      Write-Output "New bundle did not become healthy; rolling back to the previous version."
-      Copy-Item -LiteralPath $prev -Destination $bundle -Force
+    # A bundle and its bridge/lifecycle helpers are one versioned unit. Restore
+    # the complete snapshot transactionally before retrying the old restart.
+    if (Restore-PreviousUpdate) {
+      Write-Output "New installed version did not become healthy; restored the complete previous version set."
       & powershell -NoProfile -ExecutionPolicy Bypass -File $restart
       if ($LASTEXITCODE -eq 0) { return }
     }

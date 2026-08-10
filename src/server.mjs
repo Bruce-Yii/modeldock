@@ -106,14 +106,29 @@ function withTierLabel(model) {
   return decorated;
 }
 
-// The slugs the Codex catalog publishes: every provider's models, with the owner suffix
-// where a bare id would be ambiguous. Used to decide whether a client-chosen model is
-// one this gate can actually serve.
+// Bare ids an older install could still reference: every model the default
+// provider (opencode-go) owns that is not a reserved native slot. gpt-5.6-luna is
+// excluded because its bare id belongs to the native GPT pipeline, not to us.
+function legacyBareIds(config) {
+  const ids = new Set();
+  const defaultProfile = profileById("opencode-go");
+  for (const model of defaultProfile?.availableModels || []) {
+    if (model?.id && !model.ownerQualified && model.status !== "unavailable") ids.add(model.id);
+  }
+  return ids;
+}
+
+// The slugs this gate can serve: every provider's published catalog plus the
+// legacy bare ids above. Used to decide whether a client-chosen model is one this
+// gate can route (anything else is native GPT traffic). The legacy bare ids keep
+// an old thread selection on the routed path (providerForModel sends it to
+// opencode-go) instead of letting isNativeModel misroute it to ChatGPT.
 function publishedModelIds(config) {
   const ids = new Set();
   for (const model of codexModelCatalog(config).models || []) {
     if (model?.slug) ids.add(model.slug);
   }
+  for (const id of legacyBareIds(config)) ids.add(id);
   return ids;
 }
 
@@ -1017,13 +1032,19 @@ export function createApp(services = createServices()) {
           result = await configSwitcher.enable();
           if (mode === "trial") {
             config.trialMode = true;
-            services.modelSelection.mainModel = TRIAL_MAIN_MODEL;
-            services.modelSelection.visionModel = TRIAL_VISION_MODEL;
-            services.configSwitcher.model = TRIAL_MAIN_MODEL;
+            // The catalog is fully owner-qualified, so the selected pair is
+            // stored and persisted in its published form too - a bare trial id
+            // would make the dashboard selected value disagree with the picker
+            // until the next restart.
+            const trialMain = publishedSlugFor(config.profileId, TRIAL_MAIN_MODEL);
+            const trialVision = publishedSlugFor(config.profileId, TRIAL_VISION_MODEL);
+            services.modelSelection.mainModel = trialMain;
+            services.modelSelection.visionModel = trialVision;
+            services.configSwitcher.model = trialMain;
             const trialEnv = {
               MODELDOCK_TRIAL: "1",
-              MODELDOCK_MAIN_MODEL: TRIAL_MAIN_MODEL,
-              MODELDOCK_VISION_MODEL: TRIAL_VISION_MODEL,
+              MODELDOCK_MAIN_MODEL: trialMain,
+              MODELDOCK_VISION_MODEL: trialVision,
             };
             if (nativeMerge !== undefined) trialEnv.MODELDOCK_NATIVE_MERGE = nativeMerge ? "1" : "0";
             writeEnvFile(trialEnv, config.envFile);
@@ -1085,14 +1106,18 @@ export function createApp(services = createServices()) {
   app.get("/api/profiles", (req, res) => res.json({ selected: config.profileId, options: profileOptions() }));
   app.post("/api/models", mutateConfig, (req, res) => {
     const current = services.modelSelection;
-    let nextMain = req.body?.mainModel === undefined ? current.mainModel : req.body.mainModel;
-    let nextVision = req.body?.visionModel === undefined ? current.visionModel : req.body.visionModel;
+    // Resolve a bare id to its published form first: the options list is fully
+    // owner-qualified, so a legacy/dashboard submission of "kimi-k2.5" must match
+    // the "kimi-k2.5@opencode-go" entry instead of 400ing on an exact-id lookup.
+    const qualify = (id) => publishedSlugFor(config.profileId, id);
+    let nextMain = qualify(req.body?.mainModel === undefined ? current.mainModel : req.body.mainModel);
+    let nextVision = qualify(req.body?.visionModel === undefined ? current.visionModel : req.body.visionModel);
     const nextProvider = req.body?.provider;
     // Trial mode pins the free pair and the opencode-go provider; only the mode
     // switch can move models while it is active.
     if (config.trialMode) {
-      nextMain = TRIAL_MAIN_MODEL;
-      nextVision = TRIAL_VISION_MODEL;
+      nextMain = qualify(TRIAL_MAIN_MODEL);
+      nextVision = qualify(TRIAL_VISION_MODEL);
     }
     if (!config.trialMode && nextProvider !== undefined && nextProvider !== config.profileId) {
       const known = profileOptions().some((entry) => entry.id === nextProvider);

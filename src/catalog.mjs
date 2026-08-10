@@ -1,6 +1,6 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { bareModelId, profileById, TRIAL_MAIN_MODEL, TRIAL_VISION_MODEL } from "./profiles.mjs";
+import { bareModelId, profileById, publishedSlugFor, TRIAL_MAIN_MODEL, TRIAL_VISION_MODEL } from "./profiles.mjs";
 import { readNativeCatalog } from "./native-catalog.mjs";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -32,8 +32,13 @@ export function baseInstructionsFor(config) {
 // that answers "what can this model do" for Codex.
 export function catalogFor(config) {
   const profile = config.profile || profileById(config.profileId || "opencode-go");
+  // Every published entry is owner-qualified, the main model included: a bare
+  // mainModel reference (legacy .env or a test fixture) is normalized to its
+  // published form so the catalog never carries an id whose label and route
+  // could disagree. Ids no profile owns (native GPT ids, unknown) pass through.
+  const mainModel = publishedSlugFor(config.profileId || profile.id, config.mainModel);
   const catalog = profile.modelCatalog({
-    mainModel: config.mainModel,
+    mainModel,
     visionModel: config.visionModel,
     baseInstructions: baseInstructionsFor(config),
   });

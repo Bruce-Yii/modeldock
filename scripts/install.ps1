@@ -222,11 +222,17 @@ if (-not $nodeExe) {
 # command starts with a quoted program path, so wrap the whole command in one extra
 # pair of quotes (the ""prog" args" form).
 $log = Join-Path $root "modeldock.log"
-# Rotate at startup, one previous generation (same policy as scripts/start-hidden.ps1):
+# Rotate at startup, one previous generation (like codex-router's log-rotation):
 # the log is append-only for the life of the process, so a cap on growth can only
-# be applied between runs.
+# be applied between runs. 32 MB keeps roughly a month of daily use. Rotation is
+# best-effort: a previous gateway whose handles have not released must not fail
+# this hidden start.
 if ((Test-Path -LiteralPath $log) -and ((Get-Item -LiteralPath $log).Length -gt 32MB)) {
+  try {
     Move-Item -LiteralPath $log -Destination "$log.1" -Force
+  } catch {
+    Write-Output "WARNING: could not rotate modeldock.log: $($_.Exception.Message)"
+  }
 }
 Start-Process -FilePath "cmd.exe" -ArgumentList "/c", "`"`"$nodeExe`" `"$server`" >> `"$log`" 2>&1`"" -WorkingDirectory $root -WindowStyle Hidden
 '@ | Out-File -FilePath $launcher -Encoding ascii
@@ -309,17 +315,12 @@ if ($listener) {
 }
 
 $log = Join-Path $root "modeldock.log"
-# Rotate at startup, one previous generation (same policy as start-hidden.ps1):
-# the log is append-only for the life of the process, so a cap on growth can
-# only be applied between runs.
-if ((Test-Path -LiteralPath $log) -and ((Get-Item -LiteralPath $log).Length -gt 32MB)) {
-  Move-Item -LiteralPath $log -Destination "$log.1" -Force
-}
 
 # The old gateway's stdout/stderr handles can linger for a moment after
-# Stop-Process. Wait for the log to become writable; if it stays locked, fall
-# back to a per-run log file so the redirect never races the dying process's
-# file handles.
+# Stop-Process. Wait for the log to become writable BEFORE rotating: an
+# in-place Move-Item on a still-locked file fails, and that failure used to
+# abort the restart. If it stays locked, fall back to a per-run log file so
+# the redirect never races the dying process's file handles.
 function Test-WritableFile($file) {
   try {
     $probe = [System.IO.File]::Open($file, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
@@ -341,6 +342,17 @@ if (-not $logsReady) {
   $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
   $log = Join-Path $root "modeldock-$stamp.log"
   Write-Status "WARNING: modeldock.log was still locked; using per-run log ($log)"
+} elseif ((Test-Path -LiteralPath $log) -and ((Get-Item -LiteralPath $log).Length -gt 32MB)) {
+  # Rotate at startup, one previous generation (same policy as start-hidden.ps1):
+  # the log is append-only for the life of the process, so a cap on growth can
+  # only be applied between runs. 32 MB keeps roughly a month of daily use.
+  try {
+    Move-Item -LiteralPath $log -Destination "$log.1" -Force
+  } catch {
+    # Rotation is best-effort now that the lock wait passed; a raced lock must
+    # not turn a restart into a failure.
+    Write-Status "WARNING: could not rotate modeldock.log: $($_.Exception.Message)"
+  }
 }
 
 # Prefer an explicit path, then a bundled Node under <root>\node (the installer
@@ -411,6 +423,9 @@ exit 1
 # Manual recovery menu: restart the gateway or restore the native Codex route.
 $recover = Join-Path $root "scripts\recover.ps1"
 @'
+# ModelDock manual recovery menu.
+# Choose gateway restart or restore the last native Codex configuration.
+
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 $port = 4097
@@ -418,7 +433,9 @@ $envFile = Join-Path $root ".env"
 if (Test-Path -LiteralPath $envFile) {
   $line = Select-String -Path $envFile -Pattern '^MODELDOCK_PORT=' | Select-Object -First 1
   $parsed = 0
-  if ($line -and [int]::TryParse(($line.Line -replace '^MODELDOCK_PORT=', ''), [ref]$parsed) -and $parsed -gt 0) { $port = $parsed }
+  if ($line -and [int]::TryParse(($line.Line -replace '^MODELDOCK_PORT=', ''), [ref]$parsed) -and $parsed -gt 0) {
+    $port = $parsed
+  }
 }
 
 # Start-at-login repair: when a start-at-login decision was recorded (the mark
@@ -459,6 +476,70 @@ function Repair-Autostart {
   } finally { if ($runKey) { $runKey.Close() } }
 }
 
+function Restore-PreviousUpdate {
+  $rollbackRoot = Join-Path $root ".modeldock-rollback"
+  $marker = Join-Path $rollbackRoot "current"
+  if (-not (Test-Path -LiteralPath $marker -PathType Leaf)) { return $false }
+  $name = [System.IO.File]::ReadAllText($marker).Trim()
+  if (-not $name -or [System.IO.Path]::GetFileName($name) -ne $name) { throw "invalid update rollback marker" }
+  $rollbackDir = Join-Path $rollbackRoot $name
+  $manifestPath = Join-Path $rollbackDir "manifest.json"
+  $manifest = [System.IO.File]::ReadAllText($manifestPath) | ConvertFrom-Json
+  $rootPrefix = [System.IO.Path]::GetFullPath($root).TrimEnd('\') + '\'
+  $rollbackPrefix = [System.IO.Path]::GetFullPath($rollbackDir).TrimEnd('\') + '\'
+  $prepared = @()
+  $applied = 0
+  try {
+    foreach ($entry in $manifest.files) {
+      $relative = ([string]$entry.path).Replace('/', '\')
+      $target = [System.IO.Path]::GetFullPath((Join-Path $root $relative))
+      if (-not $target.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "rollback path escaped install root: $relative"
+      }
+      $stage = "$target.rollback-stage-$PID"
+      $current = "$target.rollback-current-$PID"
+      Remove-Item -LiteralPath $stage, $current -Force -ErrorAction SilentlyContinue
+      [System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($target)) | Out-Null
+      $currentExisted = Test-Path -LiteralPath $target -PathType Leaf
+      if ($currentExisted) { Copy-Item -LiteralPath $target -Destination $current -Force }
+      $restore = [bool]$entry.existed
+      if ($restore) {
+        $source = [System.IO.Path]::GetFullPath((Join-Path $rollbackDir $relative))
+        if (-not $source.StartsWith($rollbackPrefix, [System.StringComparison]::OrdinalIgnoreCase) -or
+            -not (Test-Path -LiteralPath $source -PathType Leaf)) {
+          throw "rollback file is missing: $relative"
+        }
+        Copy-Item -LiteralPath $source -Destination $stage -Force
+      }
+      $prepared += [pscustomobject]@{ Target = $target; Stage = $stage; Current = $current; CurrentExisted = $currentExisted; Restore = $restore }
+    }
+    foreach ($item in $prepared) {
+      if ($item.Restore) {
+        if (Test-Path -LiteralPath $item.Target -PathType Leaf) {
+          [System.IO.File]::Replace($item.Stage, $item.Target, $null)
+        } else {
+          Move-Item -LiteralPath $item.Stage -Destination $item.Target
+        }
+      } elseif (Test-Path -LiteralPath $item.Target) {
+        Remove-Item -LiteralPath $item.Target -Force
+      }
+      $applied += 1
+    }
+  } catch {
+    for ($index = $applied - 1; $index -ge 0; $index -= 1) {
+      $item = $prepared[$index]
+      if ($item.CurrentExisted) { Copy-Item -LiteralPath $item.Current -Destination $item.Target -Force }
+      else { Remove-Item -LiteralPath $item.Target -Force -ErrorAction SilentlyContinue }
+    }
+    throw
+  } finally {
+    foreach ($item in $prepared) {
+      Remove-Item -LiteralPath $item.Stage, $item.Current -Force -ErrorAction SilentlyContinue
+    }
+  }
+  return $true
+}
+
 function Restart-Gateway {
   Repair-Autostart
   $restart = Join-Path $root "scripts\restart.ps1"
@@ -466,47 +547,80 @@ function Restart-Gateway {
     throw "restart.ps1 is missing from $root"
   }
   & powershell -NoProfile -ExecutionPolicy Bypass -File $restart
-  if ($LASTEXITCODE -ne 0) { throw "gateway restart failed" }
+  if ($LASTEXITCODE -ne 0) {
+    # A bundle and its bridge/lifecycle helpers are one versioned unit. Restore
+    # the complete snapshot transactionally before retrying the old restart.
+    if (Restore-PreviousUpdate) {
+      Write-Output "New installed version did not become healthy; restored the complete previous version set."
+      & powershell -NoProfile -ExecutionPolicy Bypass -File $restart
+      if ($LASTEXITCODE -eq 0) { return }
+    }
+    throw "gateway restart failed"
+  }
 }
+
 function Restore-Native {
+  $uri = "http://127.0.0.1:$port/api/config/disable"
   try {
-    Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$port/api/config/disable" -TimeoutSec 3 | Out-Null
+    Invoke-RestMethod -Method Post -Uri $uri -TimeoutSec 3 | Out-Null
     Write-Output "Codex native route restored through the running gateway."
     return
-  } catch { Write-Output "Gateway is unavailable; restoring from the local backup." }
+  } catch {
+    Write-Output "Gateway is unavailable; restoring from the local backup."
+  }
+
   $codexHome = if ($env:MODELDOCK_CODEX_HOME) { $env:MODELDOCK_CODEX_HOME } elseif ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE ".codex" }
   $statePath = Join-Path $codexHome "modeldock\config-switch-state.json"
   if (-not (Test-Path -LiteralPath $statePath)) { throw "ModelDock switch state was not found: $statePath" }
   $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
-  if (-not $state.enabled) { Write-Output "Codex is already on the native route."; return }
+  if (-not $state.enabled) {
+    Write-Output "Codex is already on the native route."
+    return
+  }
   $backup = [System.IO.Path]::GetFullPath([string]$state.backupPath)
   if (-not (Test-Path -LiteralPath $backup)) { throw "ModelDock backup is missing: $backup" }
   $config = Join-Path $codexHome "config.toml"
   if (Test-Path -LiteralPath $config) {
-    Copy-Item -LiteralPath $config -Destination "$config.native-recovery-$(Get-Date -Format yyyyMMdd-HHmmss).bak"
-    if (-not $state.originalExisted) { Remove-Item -LiteralPath $config -Force } else { Copy-Item -LiteralPath $backup -Destination $config -Force }
-  } elseif ($state.originalExisted) { Copy-Item -LiteralPath $backup -Destination $config -Force }
+    $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+    Copy-Item -LiteralPath $config -Destination "$config.native-recovery-$stamp.bak"
+    if (-not $state.originalExisted) { Remove-Item -LiteralPath $config -Force }
+    else { Copy-Item -LiteralPath $backup -Destination $config -Force }
+  } elseif ($state.originalExisted) {
+    Copy-Item -LiteralPath $backup -Destination $config -Force
+  }
   # Rebuild the state as a fresh ordered map: Windows PowerShell 5.1 throws when a
-  # property that ConvertFrom-Json did not create is set via dot assignment.
+  # property that ConvertFrom-Json did not create (here lastBackupPath) is set via
+  # dot assignment, so copy the existing keys and override the ones we change.
   $out = [ordered]@{}
   foreach ($p in $state.PSObject.Properties) { $out[$p.Name] = $p.Value }
-  $out['enabled'] = $false; $out['restartRequired'] = $true; $out['lastBackupPath'] = $backup
+  $out['enabled'] = $false
+  $out['restartRequired'] = $true
+  $out['lastBackupPath'] = $backup
   $out['changedAt'] = (Get-Date).ToUniversalTime().ToString("o")
   $tmp = "$statePath.$PID.tmp"
-  # Write UTF-8 without a BOM: Node reads this file as UTF-8 JSON.
+  # Write UTF-8 without a BOM: the gateway reads this file with Node's utf8 and a
+  # BOM would make JSON.parse fail (Set-Content -Encoding utf8 emits a BOM on 5.1).
   [System.IO.File]::WriteAllText($tmp, ($out | ConvertTo-Json -Depth 10), (New-Object System.Text.UTF8Encoding($false)))
   Move-Item -LiteralPath $tmp -Destination $statePath -Force
   Write-Output "Codex native route restored from $backup"
   Write-Output "Fully quit and restart Codex."
 }
+
+Write-Output ""
 Write-Output "ModelDock manual recovery"
 Write-Output "1. Restart ModelDock gateway"
 Write-Output "2. Restore Codex native route"
 Write-Output "Q. Quit"
 $choice = (Read-Host "Choose 1, 2, or Q").Trim().ToUpperInvariant()
 try {
-  if ($choice -eq "1") { Restart-Gateway } elseif ($choice -eq "2") { Restore-Native } elseif ($choice -ne "Q" -and $choice -ne "") { throw "Unknown choice: $choice" }
-} catch { Write-Error $_.Exception.Message; exit 1 }
+  if ($choice -eq "1") { Restart-Gateway }
+  elseif ($choice -eq "2") { Restore-Native }
+  elseif ($choice -eq "Q" -or $choice -eq "") { exit 0 }
+  else { throw "Unknown choice: $choice" }
+} catch {
+  Write-Error $_.Exception.Message
+  exit 1
+}
 '@ | Out-File -FilePath $recover -Encoding ascii
 
 # 2.5. Install the content-to-video skill into the Codex skills directory.

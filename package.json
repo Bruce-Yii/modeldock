@@ -10,7 +10,7 @@
   "scripts": {
     "start": "node src/server.mjs",
     "dev": "node --watch src/server.mjs",
-    "pretest": "node scripts/cleanup-sandbox.mjs",
+    "pretest": "node scripts/cleanup-sandbox.mjs && node scripts/sync-installer-helpers.mjs --check",
     "test": "node --test test/*.test.mjs src/*.test.mjs",
     "sandbox:clean": "node scripts/cleanup-sandbox.mjs",
     "test:install": "node --test test/install-mock.test.mjs test/install-macos-sim.test.mjs",
@@ -31,7 +31,8 @@
     "esbuild": "^0.28.1"
   },
   "overrides": {
-    "@hono/node-server": "2.0.12"
+    "@hono/node-server": "2.0.12",
+    "hono": "4.12.34"
   },
   "allowScripts": {
     "esbuild@0.28.1": true

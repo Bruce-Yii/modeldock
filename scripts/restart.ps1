@@ -71,17 +71,12 @@ if ($listener) {
 }
 
 $log = Join-Path $root "modeldock.log"
-# Rotate at startup, one previous generation (same policy as start-hidden.ps1):
-# the log is append-only for the life of the process, so a cap on growth can
-# only be applied between runs.
-if ((Test-Path -LiteralPath $log) -and ((Get-Item -LiteralPath $log).Length -gt 32MB)) {
-  Move-Item -LiteralPath $log -Destination "$log.1" -Force
-}
 
 # The old gateway's stdout/stderr handles can linger for a moment after
-# Stop-Process. Wait for the log to become writable; if it stays locked, fall
-# back to a per-run log file so the redirect never races the dying process's
-# file handles.
+# Stop-Process. Wait for the log to become writable BEFORE rotating: an
+# in-place Move-Item on a still-locked file fails, and that failure used to
+# abort the restart. If it stays locked, fall back to a per-run log file so
+# the redirect never races the dying process's file handles.
 function Test-WritableFile($file) {
   try {
     $probe = [System.IO.File]::Open($file, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
@@ -103,6 +98,17 @@ if (-not $logsReady) {
   $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
   $log = Join-Path $root "modeldock-$stamp.log"
   Write-Status "WARNING: modeldock.log was still locked; using per-run log ($log)"
+} elseif ((Test-Path -LiteralPath $log) -and ((Get-Item -LiteralPath $log).Length -gt 32MB)) {
+  # Rotate at startup, one previous generation (same policy as start-hidden.ps1):
+  # the log is append-only for the life of the process, so a cap on growth can
+  # only be applied between runs. 32 MB keeps roughly a month of daily use.
+  try {
+    Move-Item -LiteralPath $log -Destination "$log.1" -Force
+  } catch {
+    # Rotation is best-effort now that the lock wait passed; a raced lock must
+    # not turn a restart into a failure.
+    Write-Status "WARNING: could not rotate modeldock.log: $($_.Exception.Message)"
+  }
 }
 
 # Prefer an explicit path, then a bundled Node under <root>\node (the installer

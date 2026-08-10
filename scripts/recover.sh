@@ -8,8 +8,11 @@ ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 STATE_DIR="${MODELDOCK_STATE_DIR:-$ROOT}"
 PORT="${MODELDOCK_PORT:-4097}"
 if [ -f "$ROOT/.env" ]; then
-  ENV_PORT="$(sed -n 's/^MODELDOCK_PORT=//p' "$ROOT/.env" | tail -n 1)"
-  [ -n "$ENV_PORT" ] && PORT="$ENV_PORT"
+  ENV_PORT="$(sed -n 's/^MODELDOCK_PORT=//p' "$ROOT/.env" | tail -n 1 | tr -d '\r' || true)"
+  case "$ENV_PORT" in
+    ''|*[!0-9]*) ;;
+    *) [ "$ENV_PORT" -gt 0 ] && PORT="$ENV_PORT" ;;
+  esac
 fi
 
 # Resolve a Node binary the same bundled-first way as restart.sh. A self-contained
@@ -32,77 +35,78 @@ resolve_node() {
   command -v node || true
 }
 
+restore_previous_update() {
+  marker="$ROOT/.modeldock-rollback/current"
+  [ -f "$marker" ] || return 1
+  node_bin="$(resolve_node)"
+  [ -n "$node_bin" ] && [ -x "$node_bin" ] || return 1
+  "$node_bin" --input-type=module - "$ROOT" "$marker" <<'NODE'
+import fs from "node:fs";
+import path from "node:path";
+
+const [rootArg, marker] = process.argv.slice(2);
+const root = path.resolve(rootArg);
+const rollbackRoot = path.join(root, ".modeldock-rollback");
+const name = fs.readFileSync(marker, "utf8").trim();
+if (!name || path.basename(name) !== name) throw new Error("invalid update rollback marker");
+const rollbackDir = path.join(rollbackRoot, name);
+const manifest = JSON.parse(fs.readFileSync(path.join(rollbackDir, "manifest.json"), "utf8"));
+const prepared = [];
+let applied = 0;
+const remove = (file) => { try { fs.unlinkSync(file); } catch (error) { if (error.code !== "ENOENT") throw error; } };
+try {
+  for (const entry of manifest.files || []) {
+    const target = path.resolve(root, entry.path);
+    if (target !== root && !target.startsWith(`${root}${path.sep}`)) throw new Error(`rollback path escaped install root: ${entry.path}`);
+    const stage = `${target}.rollback-stage-${process.pid}`;
+    const current = `${target}.rollback-current-${process.pid}`;
+    remove(stage);
+    remove(current);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    const currentExisted = fs.existsSync(target);
+    if (currentExisted) fs.copyFileSync(target, current);
+    if (entry.existed) {
+      const source = path.resolve(rollbackDir, entry.path);
+      if (!source.startsWith(`${rollbackDir}${path.sep}`) || !fs.statSync(source).isFile()) throw new Error(`rollback file is missing: ${entry.path}`);
+      fs.copyFileSync(source, stage);
+    }
+    prepared.push({ target, stage, current, currentExisted, restore: Boolean(entry.existed) });
+  }
+  for (const item of prepared) {
+    if (item.restore) fs.renameSync(item.stage, item.target);
+    else remove(item.target);
+    applied += 1;
+  }
+} catch (error) {
+  for (let index = applied - 1; index >= 0; index -= 1) {
+    const item = prepared[index];
+    if (item.currentExisted) fs.copyFileSync(item.current, item.target);
+    else remove(item.target);
+  }
+  throw error;
+} finally {
+  for (const item of prepared) {
+    try { remove(item.stage); } catch {}
+    try { remove(item.current); } catch {}
+  }
+}
+NODE
+}
+
 restart_gateway() {
-  if [ ! -x "$ROOT/scripts/start-hidden.sh" ]; then
-    echo "start-hidden.sh is missing from $ROOT" >&2
+  restart="$ROOT/scripts/restart.sh"
+  if [ ! -x "$restart" ]; then
+    echo "restart.sh is missing from $ROOT" >&2
     exit 1
   fi
-  old_pid=""
-  has_lsof=0
-  if command -v lsof >/dev/null 2>&1; then has_lsof=1; fi
-  if [ "$has_lsof" -eq 1 ]; then
-    pid="$(lsof -ti "tcp:$PORT" 2>/dev/null | head -n 1 || true)"
-    if [ -n "$pid" ]; then
-      command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
-      case "$command" in
-        *"$ROOT"*) old_pid="$pid"; kill "$pid";;
-        *) echo "Refusing to stop an unrelated process on port $PORT." >&2; exit 1;;
-      esac
-    fi
-  fi
-  # Give the old process and its socket time to release before starting the
-  # replacement, so the new instance cannot fail with EADDRINUSE and the health
-  # probe below cannot be answered by the dying process (false healthy).
-  i=0
-  while [ "$i" -lt 20 ]; do
-    alive=""
-    if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then alive=1; fi
-    listening=""
-    if [ "$has_lsof" -eq 1 ] && [ -n "$(lsof -ti "tcp:$PORT" 2>/dev/null | head -n 1 || true)" ]; then listening=1; fi
-    if [ -z "$alive" ] && [ -z "$listening" ]; then break; fi
-    sleep 0.25
-    i=$((i + 1))
-  done
-  if [ "$i" -ge 20 ]; then
-    echo "Port $PORT did not release within 5s; aborting restart." >&2
-    exit 1
-  fi
-  "$ROOT/scripts/start-hidden.sh"
-  i=0
-  while [ "$i" -lt 40 ]; do
-    # No -f: a 503 before a token is set still proves the gateway is listening.
-    if curl -sS -o /dev/null --max-time 2 "http://127.0.0.1:$PORT/healthz" 2>/dev/null; then
-      if [ "$has_lsof" -eq 1 ]; then
-        new_pid="$(lsof -ti "tcp:$PORT" 2>/dev/null | head -n 1 || true)"
-        if [ -n "$new_pid" ] && [ "$new_pid" != "$old_pid" ]; then
-          echo "ModelDock gateway is healthy at http://127.0.0.1:$PORT (PID $new_pid)"
-          return
-        fi
-      else
-        echo "ModelDock gateway is healthy at http://127.0.0.1:$PORT"
-        return
-      fi
-    fi
-    sleep 0.25
-    i=$((i + 1))
-  done
-  # Roll back a bad self-update: if the current bundle never became healthy and the
-  # updater kept the previous one, restore it and try once more so a broken release
-  # does not leave the gateway dead (and Codex routed at it).
-  PREV="$ROOT/dist/modeldock.mjs.prev"
-  if [ -f "$PREV" ] && [ -f "$ROOT/dist/modeldock.mjs" ]; then
-    echo "New bundle did not become healthy; rolling back to the previous version." >&2
-    cp "$PREV" "$ROOT/dist/modeldock.mjs"
-    "$ROOT/scripts/start-hidden.sh"
-    i=0
-    while [ "$i" -lt 40 ]; do
-      if curl -sS -o /dev/null --max-time 2 "http://127.0.0.1:$PORT/healthz" 2>/dev/null; then
-        echo "Rolled back to the previous bundle; gateway is healthy at http://127.0.0.1:$PORT"
-        return
-      fi
-      sleep 0.25
-      i=$((i + 1))
-    done
+  if "$restart"; then return; else restart_status=$?; fi
+  # Codes 2 and 3 are ownership/PID-safety refusals, not a bad release. Never
+  # replace files while a listener we cannot safely stop may still be running.
+  if [ "$restart_status" -eq 2 ] || [ "$restart_status" -eq 3 ]; then exit "$restart_status"; fi
+  echo "New installed version did not become healthy; restoring the complete previous version set." >&2
+  if restore_previous_update && "$ROOT/scripts/restart.sh"; then
+    echo "Rolled back the complete installed version; gateway is healthy."
+    return
   fi
   echo "Gateway did not become healthy. Check $ROOT/modeldock.log" >&2
   exit 1

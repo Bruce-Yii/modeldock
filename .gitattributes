@@ -1,0 +1,3 @@
+# POSIX scripts must stay LF in every checkout: a CRLF working copy breaks
+# WSL-driven macOS-install simulations and any `sh` run from a Windows tree.
+*.sh text eol=lf

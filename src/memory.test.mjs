@@ -344,6 +344,71 @@ test("search rejects empty queries and punctuation-only input", () => {
   }
 });
 
+test("scope matching covers POSIX subdirectories, not just Windows backslashes", () => {
+  const { dir, memories } = memoryDir();
+  writeFileSync(path.join(memories, "MEMORY.md"), [
+    "# POSIX scoped baseline",
+    "",
+    "scope: posix project.",
+    "applies_to: cwd=/home/dev/stockscan; reuse_rule=current.",
+    "",
+    "## Reusable knowledge",
+    "",
+    "The POSIX project baseline is the stable version.",
+    "",
+  ].join("\n"), "utf8");
+  const store = storeFor(dir);
+  try {
+    store.captureCodexMemories(dir);
+    const hit = store.search({ query: "POSIX project baseline", scopeDir: "/home/dev/stockscan/subdir" });
+    assert.ok(hit.count >= 1, "a project subdirectory should match the parent scope");
+    assert.match(hit.text, /POSIX project baseline/);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("old superseded revisions are pruned while the newest history survives", () => {
+  const { dir } = memoryDir();
+  const store = storeFor(dir);
+  try {
+    for (let i = 1; i <= 12; i += 1) {
+      store.storeMemory({ content: `token${i} baseline`, key: "entry-key" });
+    }
+    const status = store.status();
+    assert.equal(status.source_revisions, 10, "only the newest MAX_REVISIONS_KEPT revisions remain");
+    const hit = store.search({ query: "token12 baseline" });
+    assert.equal(hit.count, 1, "the newest revision is still recallable");
+    const older = store.search({ query: "token1" });
+    assert.equal(older.count, 0, "pruned superseded revisions are gone from recall");
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("post-commit maintenance contention does not report a committed store as failed", () => {
+  const { dir } = memoryDir();
+  const store = storeFor(dir);
+  const globalFile = nodeDbPathFor(path.join(dir, "vault"), "global");
+  const lock = new DatabaseSync(globalFile);
+  try {
+    lock.exec("BEGIN EXCLUSIVE");
+    const startedAt = Date.now();
+    const result = store.storeMemory({ content: "committed under event contention", scopeDir: "D:/project", key: "locked-event" });
+    assert.equal(result.ok, true);
+    assert.ok(Date.now() - startedAt < 2000, "soft event maintenance must not wait for the canonical-write busy timeout");
+    const project = store.nodeDb(scopeNodeId("D:/project"));
+    assert.equal(project.prepare("SELECT COUNT(*) AS n FROM source_revisions").get().n, 1, "the capture was committed");
+  } finally {
+    try { lock.exec("ROLLBACK"); } catch { /* already released */ }
+    lock.close();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("stores project memories in independent nodes and exposes node aggregates", () => {
   const { dir } = memoryDir();
   const store = storeFor(dir);

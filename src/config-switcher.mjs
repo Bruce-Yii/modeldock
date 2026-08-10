@@ -22,6 +22,7 @@ function tomlString(value) {
 // fields live inside a sentinel block so detection and restore are exact.
 const MANAGED_BEGIN = /^\s*#\s*BEGIN\s+modeldock-managed\s*(?:#.*)?$/m;
 const MANAGED_END = /^\s*#\s*END\s+modeldock-managed\s*(?:#.*)?$/m;
+const MANAGED_ORIGINAL_EXISTED = /^\s*#\s*ModelDock original config existed:\s*(true|false)\s*$/im;
 const CODERX_ROUTER_BEGIN = /^\s*#\s*BEGIN\s+codex-router-managed\s*(?:#.*)?$/m;
 
 // Every top-level key ModelDock may write. Restoring a backup puts the user's own
@@ -186,7 +187,7 @@ function setTopLevel(lines, key, value) {
 // base URL is redirected to the local gate, and the realtime endpoints point at
 // OpenAI so Codex Voice never dials the loopback. The catalog file keeps naming
 // our models in the App picker (openai/codex#32119 only affects custom providers).
-export function buildManagedCodexConfig(source, { baseUrl, model, catalogFile = "", mcpUrl = "", mcpCommand = "", mcpArgs = [], mcpEnv = {} }) {
+export function buildManagedCodexConfig(source, { baseUrl, model, catalogFile = "", mcpUrl = "", mcpCommand = "", mcpArgs = [], mcpEnv = {}, originalExisted = true }) {
   const newline = source.includes("\r\n") ? "\r\n" : "\n";
   let lines = removeManagedRoute(source.replace(/\r\n/g, "\n").split("\n"));
   while (lines.length && !lines.at(-1).trim()) lines.pop();
@@ -195,6 +196,7 @@ export function buildManagedCodexConfig(source, { baseUrl, model, catalogFile = 
   const managed = [
     "# BEGIN modeldock-managed",
     "# Managed by ModelDock: keeps the built-in openai provider and points it at the local gate.",
+    `# ModelDock original config existed: ${originalExisted ? "true" : "false"}`,
     `openai_base_url = ${tomlString(baseUrl)}`,
   ];
   if (catalogFile) managed.push(`model_catalog_json = ${tomlString(catalogFile)}`);
@@ -339,8 +341,16 @@ export class CodexConfigSwitcher {
     let originalWasManaged = false;
     if (originalExisted && hasManagedRoute(original)) {
       originalWasManaged = true;
+      const existenceMarker = MANAGED_ORIGINAL_EXISTED.exec(original)?.[1]?.toLowerCase();
       const nl = original.includes("\r\n") ? "\r\n" : "\n";
       original = `${removeManagedRoute(original.replace(/\r\n/g, "\n").split("\n")).join("\n").replace(/\n/g, nl)}${nl}`;
+      // New managed configs carry this crash-recovery marker. For older configs,
+      // a managed-only file is the best available proof that config.toml did not
+      // exist before enable() wrote it.
+      if (existenceMarker === "false" || (!existenceMarker && !original.trim())) {
+        originalExisted = false;
+        original = "";
+      }
     }
     if (hasCodexRouterBlock(original)) {
       throw Object.assign(
@@ -371,6 +381,7 @@ export class CodexConfigSwitcher {
       mcpCommand: this.mcpCommand,
       mcpArgs: this.mcpArgs,
       mcpEnv: this.mcpEnv,
+      originalExisted,
     });
     // Defensive: the writer must never emit duplicates either (setTopLevel
     // dedupes `model`, the managed block owns its keys, but a future edit could
