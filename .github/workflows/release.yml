@@ -58,3 +58,21 @@ jobs:
             gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets[].name' | grep -qx "$f" \
               || { echo "asset $f missing from the published release" >&2; exit 1; }
           done
+
+  verify-install:
+    runs-on: windows-latest
+    needs: release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # Real end-to-end install verification, not the mock: downloads install.ps1
+      # from the main branch (the exact user bootstrap URL), installs the just-
+      # published release assets into a temp root, boots the gateway, checks
+      # /healthz, lists MCP tools through the installed bridge, restarts, and
+      # cleans up. Runs under Windows PowerShell 5.1 so the octet-stream byte[]
+      # checksum behavior of the real GitHub feed is exercised.
+      - name: Verify release installs end to end
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts\verify-release-install.ps1
