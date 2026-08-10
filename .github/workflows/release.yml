@@ -2,6 +2,8 @@ name: Release
 
 on:
   push:
+    # Only tag for real user-approved releases. Never push a v* tag for test,
+    # verification, or harness changes; those go to main without a version bump.
     tags: ["v*"]
 
 permissions:
