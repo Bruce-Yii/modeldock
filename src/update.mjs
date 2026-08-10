@@ -10,7 +10,7 @@
 
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -162,6 +162,15 @@ function stageFile(body, target) {
   // silently drop that mode bit.
   const mode = target.endsWith(".sh") ? 0o755 : 0o644;
   writeFileSync(tmp, body, { mode });
+  // Keep the previous bundle as .prev before replacing it: a checksum only proves
+  // the release was built that way, not that it boots on this machine/Node. If the
+  // new bundle fails to come up, the recover menu restores modeldock.mjs.prev so a
+  // bad update does not strand the user with a dead gateway and a switched config.
+  if (target.endsWith(`${path.sep}modeldock.mjs`) || target.endsWith("/modeldock.mjs")) {
+    if (existsSync(target)) {
+      try { copyFileSync(target, `${target}.prev`); } catch { /* best-effort */ }
+    }
+  }
   renameSync(tmp, target);
 }
 

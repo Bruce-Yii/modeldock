@@ -54,7 +54,20 @@ function Restart-Gateway {
     throw "restart.ps1 is missing from $root"
   }
   & powershell -NoProfile -ExecutionPolicy Bypass -File $restart
-  if ($LASTEXITCODE -ne 0) { throw "gateway restart failed" }
+  if ($LASTEXITCODE -ne 0) {
+    # Roll back a bad self-update: if the new bundle never became healthy and the
+    # updater kept the previous one, restore it and restart once more so a broken
+    # release does not leave the gateway dead (and Codex routed at it).
+    $bundle = Join-Path $root "dist\modeldock.mjs"
+    $prev = "$bundle.prev"
+    if ((Test-Path -LiteralPath $prev) -and (Test-Path -LiteralPath $bundle)) {
+      Write-Output "New bundle did not become healthy; rolling back to the previous version."
+      Copy-Item -LiteralPath $prev -Destination $bundle -Force
+      & powershell -NoProfile -ExecutionPolicy Bypass -File $restart
+      if ($LASTEXITCODE -eq 0) { return }
+    }
+    throw "gateway restart failed"
+  }
 }
 
 function Restore-Native {

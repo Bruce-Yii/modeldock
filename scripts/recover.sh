@@ -86,6 +86,24 @@ restart_gateway() {
     sleep 0.25
     i=$((i + 1))
   done
+  # Roll back a bad self-update: if the current bundle never became healthy and the
+  # updater kept the previous one, restore it and try once more so a broken release
+  # does not leave the gateway dead (and Codex routed at it).
+  PREV="$ROOT/dist/modeldock.mjs.prev"
+  if [ -f "$PREV" ] && [ -f "$ROOT/dist/modeldock.mjs" ]; then
+    echo "New bundle did not become healthy; rolling back to the previous version." >&2
+    cp "$PREV" "$ROOT/dist/modeldock.mjs"
+    "$ROOT/scripts/start-hidden.sh"
+    i=0
+    while [ "$i" -lt 40 ]; do
+      if curl -sS -o /dev/null --max-time 2 "http://127.0.0.1:$PORT/healthz" 2>/dev/null; then
+        echo "Rolled back to the previous bundle; gateway is healthy at http://127.0.0.1:$PORT"
+        return
+      fi
+      sleep 0.25
+      i=$((i + 1))
+    done
+  fi
   echo "Gateway did not become healthy. Check $ROOT/modeldock.log" >&2
   exit 1
 }

@@ -201,6 +201,11 @@ test("createUpdater.apply deploys the complete Windows install and rechecks at c
     oldFiles["scripts/start-hidden.sh"],
     "a non-current-platform helper must not be overwritten",
   );
+  assert.equal(
+    readFileSync(path.join(rootDir, "dist/modeldock.mjs.prev"), "utf8"),
+    oldFiles["dist/modeldock.mjs"],
+    "the previous bundle is kept as .prev so a bad update can be rolled back",
+  );
 });
 
 test("createUpdater.apply leaves an installed layout untouched when a helper is missing", async (t) => {

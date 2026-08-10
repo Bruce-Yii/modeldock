@@ -329,6 +329,19 @@ export class CodexConfigSwitcher {
       if (error.code !== "ENOENT") throw error;
       originalExisted = false;
     }
+    // Crash recovery: enable() only runs with state.enabled false, but a crash
+    // between the config write and the state write of a prior enable() leaves the
+    // config already managed while state says disabled. Backing that up as the
+    // "original" would poison the backup chain - a later disable, seeing the
+    // managed hash match, would restore a still-managed config and leave Codex
+    // routed at a dead gateway. Strip our managed route first so the backup we take
+    // is the true pre-ModelDock baseline.
+    let originalWasManaged = false;
+    if (originalExisted && hasManagedRoute(original)) {
+      originalWasManaged = true;
+      const nl = original.includes("\r\n") ? "\r\n" : "\n";
+      original = `${removeManagedRoute(original.replace(/\r\n/g, "\n").split("\n")).join("\n").replace(/\n/g, nl)}${nl}`;
+    }
     if (hasCodexRouterBlock(original)) {
       throw Object.assign(
         new Error("codex-router also manages openai_base_url; disable its integration before enabling ModelDock."),
@@ -341,8 +354,14 @@ export class CodexConfigSwitcher {
     if (originalExisted) assertConfigWriteSafe(original);
 
     const backupPath = path.join(this.codexHome, `config.toml.modeldock-backup-${timestamp()}-${randomUUID().slice(0, 8)}`);
-    if (originalExisted) await copyFile(this.configPath, backupPath);
-    else await writeFile(backupPath, "", { encoding: "utf8", flag: "wx", mode: 0o600 });
+    if (originalExisted && originalWasManaged) {
+      // Persist the stripped baseline, not the managed file still on disk.
+      await writeFile(backupPath, original, { encoding: "utf8", mode: 0o600 });
+    } else if (originalExisted) {
+      await copyFile(this.configPath, backupPath);
+    } else {
+      await writeFile(backupPath, "", { encoding: "utf8", flag: "wx", mode: 0o600 });
+    }
 
     const managed = buildManagedCodexConfig(original, {
       baseUrl: this.baseUrl,

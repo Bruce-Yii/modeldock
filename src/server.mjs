@@ -1,6 +1,6 @@
 import path from "node:path";
 import os from "node:os";
-import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import express from "express";
@@ -303,6 +303,28 @@ function configMutationGuard(config) {
     }
     if (!req.is("application/json")) {
       return res.status(415).json({ error: { type: "content_type_required", message: "Config changes require application/json." } });
+    }
+    return next();
+  };
+}
+
+// The MCP tool endpoint is reached by Codex / the stdio bridge, which are not
+// browsers and send no Origin header. Reject any request that DOES carry a
+// cross-origin Origin so a malicious web page (or a DNS-rebinding attack that
+// makes itself same-host) cannot drive vision_inspect/speak against this loopback
+// gateway. A full caller-key on /mcp would also stop non-browser local processes;
+// that is a larger change (the base URL written into config.toml would have to
+// carry the key) and is tracked separately.
+function crossOriginGuard(config) {
+  const allowedOrigins = new Set([
+    `http://${urlHost(config.host)}:${config.port}`,
+    `http://127.0.0.1:${config.port}`,
+    `http://localhost:${config.port}`,
+  ]);
+  return (req, res, next) => {
+    const origin = req.get("origin");
+    if (origin && !allowedOrigins.has(origin)) {
+      return res.status(403).json({ error: { type: "origin_not_allowed", message: "Cross-origin requests are not allowed on this endpoint." } });
     }
     return next();
   };
@@ -715,7 +737,12 @@ export function createServices(config = loadConfig()) {
         visionModel: modelSelection.visionModel,
       });
       mkdirSync(path.dirname(catalogFile), { recursive: true });
-      writeFileSync(catalogFile, JSON.stringify(catalog, null, 2), "utf8");
+      // Atomic replace: Codex reads this file on its own schedule, so a
+      // half-written JSON must never be observable. Same-directory rename is
+      // atomic on both Windows and POSIX.
+      const tmp = `${catalogFile}.${process.pid}.tmp`;
+      writeFileSync(tmp, JSON.stringify(catalog, null, 2), "utf8");
+      renameSync(tmp, catalogFile);
       return catalog.models?.length || 0;
     } catch (error) {
       console.log(`[gate] model catalog file write failed: ${error.message}`);
@@ -767,14 +794,35 @@ export function createServices(config = loadConfig()) {
 // pre-set req.body, so this outer middleware drains + decompresses zstd bodies
 // itself and hands the parsed JSON through. gzip/deflate/br stay with
 // body-parser, which supports them natively.
-function zstdRequestDecoder() {
-  const canZstd = typeof zlib.zstdDecompressSync === "function";
+function isCallerKeyEnforced() {
+  const raw = String(process.env.MODELDOCK_REQUIRE_CALLER_KEY || "").toLowerCase();
+  return raw === "" || !["0", "false", "off"].includes(raw);
+}
+
+function protectedRelayPath(pathname) {
+  return pathname === "/v1/responses"
+    || pathname === "/responses"
+    || pathname === "/v1/responses/compact"
+    || pathname === "/responses/compact"
+    || [...NATIVE_IMAGE_PATHS].includes(pathname);
+}
+
+function zstdRequestDecoder(callerKey) {
+  const canZstd = typeof zlib.zstdDecompress === "function";
   const maxInput = 16 * 1024 * 1024;
   const maxOutput = 64 * 1024 * 1024;
   return (req, res, next) => {
     if (String(req.headers["content-encoding"] || "").toLowerCase() !== "zstd") return next();
     if (!canZstd) {
       return res.status(415).json({ error: { type: "unsupported_encoding", message: "zstd request bodies require Node 23.8+ (run ModelDock on Node 24)." } });
+    }
+    const pathname = String(req.url || "").split("?", 1)[0];
+    const keyMatch = pathname.match(/^\/c\/([^/]+)/);
+    if (keyMatch && (!callerKey || !callerKeyEqual(keyMatch[1], callerKey))) {
+      return res.status(401).json({ error: { type: "invalid_caller_key", message: "Unknown caller key." } });
+    }
+    if (!keyMatch && protectedRelayPath(pathname) && isCallerKeyEnforced()) {
+      return res.status(401).json({ error: { type: "caller_key_required", message: "This gateway requires the keyed base URL." } });
     }
     const chunks = [];
     let received = 0;
@@ -792,18 +840,22 @@ function zstdRequestDecoder() {
     req.on("error", next);
     req.on("end", () => {
       if (tooLarge) return;
-      try {
-        const body = zlib.zstdDecompressSync(Buffer.concat(chunks));
-        if (body.length > maxOutput) {
-          return res.status(413).json({ error: { type: "payload_too_large", message: `zstd request decompresses beyond the ${maxOutput}-byte limit` } });
+      zlib.zstdDecompress(Buffer.concat(chunks), { maxOutputLength: maxOutput }, (error, body) => {
+        if (error) {
+          if (error.code === "ERR_BUFFER_TOO_LARGE") {
+            return res.status(413).json({ error: { type: "payload_too_large", message: `zstd request decompresses beyond the ${maxOutput}-byte limit` } });
+          }
+          return res.status(400).json({ error: { type: "bad_request", message: `zstd request decode failed: ${error.message}` } });
         }
-        req.headers["content-encoding"] = "identity";
-        req.headers["content-length"] = String(body.length);
-        req.body = JSON.parse(body.toString("utf8"));
-        next();
-      } catch (error) {
-        res.status(400).json({ error: { type: "bad_request", message: `zstd request decode failed: ${error.message}` } });
-      }
+        try {
+          req.headers["content-encoding"] = "identity";
+          req.headers["content-length"] = String(body.length);
+          req.body = JSON.parse(body.toString("utf8"));
+          next();
+        } catch (decodeError) {
+          res.status(400).json({ error: { type: "bad_request", message: `zstd request decode failed: ${decodeError.message}` } });
+        }
+      });
     });
   };
 }
@@ -829,7 +881,7 @@ export function createApp(services = createServices()) {
     },
   });
 
-  app.all("/mcp", (req, res) => mcpHandler(req, res, req.body));
+  app.all("/mcp", crossOriginGuard(config), (req, res) => mcpHandler(req, res, req.body));
   // Capability-key routes: the base_url written into config.toml carries the key
   // (/c/<key>/v1), so Codex authenticates implicitly while a hostile local web
   // page (which can POST to loopback but cannot read ~/.modeldock) cannot.
@@ -855,8 +907,7 @@ export function createApp(services = createServices()) {
   // the upstream tokens this process holds. MODELDOCK_REQUIRE_CALLER_KEY=0 (or
   // off/false) re-opens the bare paths for legacy configs.
   const callerKeyEnforced = () => {
-    const raw = String(process.env.MODELDOCK_REQUIRE_CALLER_KEY || "").toLowerCase();
-    return raw === "" || !["0", "false", "off"].includes(raw);
+    return isCallerKeyEnforced();
   };
   const bareRelay = (req, res) => {
     if (callerKeyEnforced()) {
@@ -1268,7 +1319,7 @@ export function createApp(services = createServices()) {
   // (which is registered inside createMcpExpressApp and cannot be reordered).
   const outer = express();
   outer.disable("x-powered-by");
-  outer.use(zstdRequestDecoder());
+  outer.use(zstdRequestDecoder(services.callerKey));
   outer.use(app);
   return { app: outer, close: () => mcpHandler.close?.(), services };
 }
