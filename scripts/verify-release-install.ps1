@@ -45,6 +45,10 @@ $env:MODELDOCK_SKIP_OPEN = "1"
 $env:MODELDOCK_CODEX_HOME = $codexHome
 $env:MODELDOCK_AUTOSTART_KEY = $autostartKey
 $env:MODELDOCK_AUTOSTART_NAME = $autostartName
+# A fresh install has no provider token, and /healthz intentionally returns 503
+# in that state. Use a disposable test token so the first-start check verifies
+# the actual launch path without contacting a real provider.
+$env:OPENCODE_GO_TOKEN = "release-verify-probe-token"
 
 function Write-Step($message) {
   Write-Output "verify: $message"
@@ -71,6 +75,16 @@ function Stop-TestGateway {
 function Stop-ProbeUpstream {
   if ($script:upstreamProcess -and -not $script:upstreamProcess.HasExited) {
     Stop-Process -Id $script:upstreamProcess.Id -Force -ErrorAction SilentlyContinue
+  }
+}
+
+function Gateway-LogTail {
+  $log = Join-Path $root "modeldock.log"
+  if (-not (Test-Path $log)) { return "(no gateway log at $log)" }
+  try {
+    return ((Get-Content -LiteralPath $log -Tail 30) -join "`n")
+  } catch {
+    return "(could not read gateway log: $($_.Exception.Message))"
   }
 }
 
@@ -103,7 +117,9 @@ try {
       Start-Sleep -Milliseconds 500
     }
   }
-  if (-not $healthy) { throw "gateway did not become healthy at $healthUrl" }
+  if (-not $healthy) {
+    throw "gateway did not become healthy at $healthUrl`n$(Gateway-LogTail)"
+  }
   Write-Step "gateway healthy"
 
   # The installer enables start-at-login by default; assert the Run key entry
@@ -149,7 +165,9 @@ try {
       Start-Sleep -Milliseconds 500
     }
   }
-  if (-not $healthy) { throw "gateway did not recover after restart" }
+  if (-not $healthy) {
+    throw "gateway did not recover after restart`n$(Gateway-LogTail)"
+  }
   Write-Step "gateway healthy after restart"
 
   # Point the installed gateway at a local deterministic Responses upstream.
@@ -200,7 +218,9 @@ try {
       Start-Sleep -Milliseconds 500
     }
   }
-  if (-not $healthy) { throw "gateway did not become healthy after stream-probe restart" }
+  if (-not $healthy) {
+    throw "gateway did not become healthy after stream-probe restart`n$(Gateway-LogTail)"
+  }
   Write-Step "gateway healthy with stream probe upstream"
 
   Write-Step "verifying completed stream closes cleanly"
