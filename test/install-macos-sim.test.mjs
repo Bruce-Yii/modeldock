@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { readFileSync, existsSync, mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { createServer } from "node:http";
 import { spawn, execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const isWindows = process.platform === "win32";
@@ -55,13 +56,14 @@ function writeFakeMacTools(binDir) {
 
 // Env shared by the install.sh sandbox. `fakeBin` must already exist and be
 // executable on the POSIX side before install.sh runs.
-function sandboxEnv({ root, fakeBin, launchctlLog, releaseUrl, bridgeUrl, skillBaseUrl, port }) {
+function sandboxEnv({ root, fakeBin, launchctlLog, releaseUrl, bridgeUrl, sumsUrl, skillBaseUrl, port }) {
   return {
     MODELDOCK_ROOT: root,
     MODELDOCK_STATE_DIR: `${root}/.modeldock`,
     MODELDOCK_AUTOSTART_PLIST_DIR: `${root}/LaunchAgents`,
     MODELDOCK_RELEASE_URL: releaseUrl,
     MODELDOCK_BRIDGE_URL: bridgeUrl,
+    MODELDOCK_SUMS_URL: sumsUrl,
     MODELDOCK_SKILL_BASE_URL: skillBaseUrl,
     MODELDOCK_CODEX_HOME: `${root}/codex-home`,
     MODELDOCK_SKIP_OPEN: "1",
@@ -85,6 +87,12 @@ test("install.sh macOS branch: plist, launchctl, marker (WSL or direct)", async 
     let data = null;
     if (req.url === "/modeldock.mjs") data = bundle;
     else if (req.url === "/mcp-standalone.mjs") data = bridge;
+    else if (req.url === "/SHA256SUMS") {
+      data = Buffer.from(
+        `${createHash("sha256").update(bundle).digest("hex")}  modeldock.mjs\n` +
+          `${createHash("sha256").update(bridge).digest("hex")}  mcp-standalone.mjs\n`,
+      );
+    }
     else if (req.url.startsWith("/skills/content-to-video/")) {
       const rel = req.url.slice("/skills/content-to-video/".length).split("/");
       const file = path.join(skillRoot, ...rel);
@@ -109,6 +117,7 @@ test("install.sh macOS branch: plist, launchctl, marker (WSL or direct)", async 
   const installer = path.join(repoRoot, "scripts", "install.sh");
   const releaseUrl = `http://127.0.0.1:${assetPort}/modeldock.mjs`;
   const bridgeUrl = `http://127.0.0.1:${assetPort}/mcp-standalone.mjs`;
+  const sumsUrl = `http://127.0.0.1:${assetPort}/SHA256SUMS`;
   const skillBaseUrl = `http://127.0.0.1:${assetPort}/skills/content-to-video`;
   const probe = createServer();
   const appPort = await listen(probe);
@@ -119,7 +128,7 @@ test("install.sh macOS branch: plist, launchctl, marker (WSL or direct)", async 
   let err = "";
   const env = isWindows
     ? undefined
-    : { ...process.env, ...sandboxEnv({ root: installDir, fakeBin, launchctlLog, releaseUrl, bridgeUrl, skillBaseUrl, port: appPort }) };
+    : { ...process.env, ...sandboxEnv({ root: installDir, fakeBin, launchctlLog, releaseUrl, bridgeUrl, sumsUrl, skillBaseUrl, port: appPort }) };
   if (isWindows) {
     // Drive install.sh from inside WSL: the sandbox dir is on the Windows side,
     // and the fake node/uname/launchctl shims live there too. The runner script
@@ -135,6 +144,7 @@ test("install.sh macOS branch: plist, launchctl, marker (WSL or direct)", async 
       launchctlLog: wslLaunchctlLog,
       releaseUrl,
       bridgeUrl,
+      sumsUrl,
       skillBaseUrl,
       port: appPort,
     });

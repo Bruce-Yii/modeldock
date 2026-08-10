@@ -155,6 +155,37 @@ echo "  downloading MCP stdio bridge..."
 curl -fL --progress-bar "$BRIDGE_URL" -o "$BRIDGE"
 echo "  saved $BRIDGE"
 
+# Integrity: releases publish a SHA256SUMS covering every asset. Verify the two
+# files just downloaded against it and refuse to leave a corrupt install behind.
+# MODELDOCK_SUMS_URL redirects the lookup (mock-install tests).
+SUMS_URL="${MODELDOCK_SUMS_URL:-https://github.com/$REPO/releases/latest/download/SHA256SUMS}"
+if command -v sha256sum >/dev/null 2>&1; then
+  HASH_CMD="sha256sum"
+else
+  HASH_CMD="shasum -a 256"
+fi
+verify_download() {
+  file="$1"
+  name="$2"
+  sums="$(curl -fsSL --max-time 60 "$SUMS_URL" 2>/dev/null || true)"
+  line="$(printf '%s\n' "$sums" | grep -E "^[0-9a-f]{64}[[:space:]]+\*?${name}[[:space:]]*$" | head -n 1 || true)"
+  if [ -z "$line" ]; then
+    echo "ERROR: SHA256SUMS has no entry for $name; refusing to keep an unverified download" >&2
+    rm -f "$file"
+    exit 1
+  fi
+  expected="$(printf '%s' "$line" | awk '{print tolower($1)}')"
+  actual="$($HASH_CMD "$file" 2>/dev/null | awk '{print tolower($1)}')"
+  if [ "$actual" != "$expected" ]; then
+    echo "ERROR: checksum mismatch for $name (expected $expected, got $actual)" >&2
+    rm -f "$file"
+    exit 1
+  fi
+}
+verify_download "$BUNDLE" "modeldock.mjs"
+verify_download "$BRIDGE" "mcp-standalone.mjs"
+echo "  release assets verified against SHA256SUMS"
+
 # Background launcher (same content as the repo's scripts/start-hidden.sh). Written by
 # the installer so a single-file download still gets autostart + self-update restarts.
 LAUNCHER="$ROOT/scripts/start-hidden.sh"

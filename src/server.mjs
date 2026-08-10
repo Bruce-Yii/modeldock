@@ -680,7 +680,9 @@ export function createServices(config = loadConfig()) {
   });
   const autostart = createAutostart();
   autostart.refresh().catch(() => {});
-  const updater = createUpdater();
+  // Re-check periodically so the Update button stays current without a restart;
+  // the check is fire-and-forget and costs one small API call every 6h.
+  const updater = createUpdater({ autoCheckMs: 6 * 60 * 60 * 1000 });
   updater.check().catch(() => {});
   const routeAffinity = new RouteAffinity();
   const runtime = { profile: mutableConfig.profile, profileId: mutableConfig.profileId };

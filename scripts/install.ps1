@@ -150,6 +150,35 @@ Write-Host "  downloading MCP stdio bridge..."
 Invoke-WebRequest -UseBasicParsing -Uri $bridgeUrl -OutFile $bridge
 Write-Host ("  saved {0} ({1:N2} MB)" -f $bridge, ((Get-Item $bridge).Length / 1MB))
 
+# Integrity: releases publish a SHA256SUMS covering every asset. Verify the two
+# files we just downloaded against it and refuse to leave a corrupt install
+# behind. MODELDOCK_SUMS_URL redirects the lookup (mock-install tests).
+$sumsUrl = if ($env:MODELDOCK_SUMS_URL) { $env:MODELDOCK_SUMS_URL } else { "https://github.com/$repo/releases/latest/download/SHA256SUMS" }
+function Assert-Downloaded([string]$file, [string]$name) {
+  $sumsText = (Invoke-WebRequest -UseBasicParsing -Uri $sumsUrl -TimeoutSec 60).Content
+  $line = ($sumsText -split "`r?`n") | Where-Object { $_ -match "(?i)^[0-9a-f]{64}\s+\*?$([regex]::Escape($name))\s*$" } | Select-Object -First 1
+  if (-not $line) {
+    Remove-Item -LiteralPath $file -Force
+    throw "SHA256SUMS has no entry for $name; refusing to keep an unverified download"
+  }
+  $expected = ($line -split '\s+')[0].ToLowerInvariant()
+  $hasher = [System.Security.Cryptography.SHA256]::Create()
+  try {
+    $actual = [System.BitConverter]::ToString(
+      $hasher.ComputeHash([System.IO.File]::ReadAllBytes($file))
+    ).Replace("-", "").ToLowerInvariant()
+  } finally {
+    $hasher.Dispose()
+  }
+  if ($actual -ne $expected) {
+    Remove-Item -LiteralPath $file -Force
+    throw "Checksum mismatch for $name (expected $expected, got $actual)"
+  }
+}
+Assert-Downloaded $bundle "modeldock.mjs"
+Assert-Downloaded $bridge "mcp-standalone.mjs"
+Write-Host "  release assets verified against SHA256SUMS"
+
 # Hidden launcher (same content as the repo's scripts/start-hidden.ps1). Written by the
 # installer so a single-file download still gets autostart + self-update restarts.
 $launcher = Join-Path $root "scripts\start-hidden.ps1"
@@ -297,7 +326,9 @@ if (-not $nodeExe) {
 $server = Join-Path $root "src\server.mjs"
 if (-not (Test-Path -LiteralPath $server)) { $server = Join-Path $root "dist\modeldock.mjs" }
 
-Start-Process -FilePath $nodeExe -ArgumentList $server -WorkingDirectory $root -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+# Quote the script path so an install dir with a space (e.g. "Chen Bao") is not
+# split into two argv entries by node's CRT.
+Start-Process -FilePath $nodeExe -ArgumentList "`"$server`"" -WorkingDirectory $root -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
 Write-Output "restart.ps1: started gateway from $root (logs: $logDir)"
 
 for ($i = 0; $i -lt 40; $i += 1) {
@@ -388,10 +419,12 @@ function Restore-Native {
     Copy-Item -LiteralPath $config -Destination "$config.native-recovery-$(Get-Date -Format yyyyMMdd-HHmmss).bak"
     if (-not $state.originalExisted) { Remove-Item -LiteralPath $config -Force } else { Copy-Item -LiteralPath $backup -Destination $config -Force }
   } elseif ($state.originalExisted) { Copy-Item -LiteralPath $backup -Destination $config -Force }
-  $state.enabled = $false; $state.restartRequired = $true; $state.lastBackupPath = $backup
-  $state.changedAt = (Get-Date).ToUniversalTime().ToString("o")
+  $out = [ordered]@{}
+  foreach ($p in $state.PSObject.Properties) { $out[$p.Name] = $p.Value }
+  $out['enabled'] = $false; $out['restartRequired'] = $true; $out['lastBackupPath'] = $backup
+  $out['changedAt'] = (Get-Date).ToUniversalTime().ToString("o")
   $tmp = "$statePath.$PID.tmp"
-  $state | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $tmp -Encoding utf8
+  [System.IO.File]::WriteAllText($tmp, ($out | ConvertTo-Json -Depth 10), (New-Object System.Text.UTF8Encoding($false)))
   Move-Item -LiteralPath $tmp -Destination $statePath -Force
   Write-Output "Codex native route restored from $backup"
   Write-Output "Fully quit and restart Codex."
