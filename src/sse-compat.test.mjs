@@ -129,3 +129,96 @@ test("synthesizeEvent emits the SSE framing", () => {
   assert.match(ev, /^event: response\.completed\r\ndata: /);
   assert.match(ev, /\r\n\r\n$/);
 });
+
+// A web stream that enqueues a buffer then dies with a transport error.
+// The error is deferred so the enqueued data is consumed first, like a real
+// connection that delivers bytes and then resets.
+function truncatedStream(chunk, error = new Error("upstream connection reset")) {
+  return new ReadableStream({
+    start(controller) {
+      if (chunk) controller.enqueue(Buffer.from(chunk));
+      setTimeout(() => controller.error(error), 10);
+    },
+  });
+}
+
+test("upstream stream error synthesizes response.incomplete, never completed", async () => {
+  const state = new SseCompatState();
+  const res = { write: () => true, end: () => {}, once: () => res, on: () => res, removeListener: () => res };
+  const chunks = [];
+  res.write = (chunk) => { chunks.push(Buffer.from(chunk).toString("utf8")); return true; };
+  const body = truncatedStream(`event: response.output_text.delta\r\ndata: ${JSON.stringify({
+    type: "response.output_text.delta", item_id: "i1", output_index: 0, content_index: 0, delta: "hi",
+  })}\r\n\r\n`);
+  const result = await pipeCompatStream(body, res, null, null, state);
+  const types = parseSse(chunks.join("")).map((e) => e.type);
+  assert.equal(result.truncated, true, "truncated flagged for the caller");
+  assert.equal(result.interrupted, false, "not a client abort");
+  assert.ok(types.includes("response.incomplete"), "incomplete synthesized");
+  assert.ok(!types.includes("response.completed"), "never a fake completed");
+  const inc = parseSse(chunks.join("")).find((e) => e.type === "response.incomplete");
+  assert.equal(inc.response.status, "incomplete");
+  assert.deepEqual(inc.response.incomplete_details, { reason: "adapter_eof" });
+  const added = types.indexOf("response.output_item.added");
+  const done = types.indexOf("response.output_item.done");
+  const incomplete = types.indexOf("response.incomplete");
+  assert.ok(added >= 0 && done > added && incomplete > done, `open item closed before terminal: ${types.join(",")}`);
+});
+
+test("upstream error after a terminal completed stays a completed turn", async () => {
+  const state = new SseCompatState();
+  const res = { write: () => true, end: () => {}, once: () => res, on: () => res, removeListener: () => res };
+  const chunks = [];
+  res.write = (chunk) => { chunks.push(Buffer.from(chunk).toString("utf8")); return true; };
+  const completed = `event: response.completed\r\ndata: ${JSON.stringify({
+    type: "response.completed", response: { id: "r1", status: "completed", output: [] },
+  })}\r\n\r\n`;
+  const result = await pipeCompatStream(truncatedStream(completed), res, null, null, state);
+  const types = parseSse(chunks.join("")).map((e) => e.type);
+  assert.equal(result.truncated, false, "a late teardown error after the terminal is not a truncation");
+  assert.ok(types.includes("response.completed"), "original completed preserved");
+  assert.ok(!types.includes("response.incomplete"), "no second terminal event");
+});
+
+test("upstream error with zero events still ends with response.incomplete", async () => {
+  const state = new SseCompatState();
+  const res = { write: () => true, end: () => {}, once: () => res, on: () => res, removeListener: () => res };
+  const chunks = [];
+  res.write = (chunk) => { chunks.push(Buffer.from(chunk).toString("utf8")); return true; };
+  const result = await pipeCompatStream(truncatedStream(null), res, null, null, state);
+  const parsed = parseSse(chunks.join(""));
+  const types = parsed.map((e) => e.type);
+  assert.equal(result.truncated, true);
+  assert.ok(types.includes("response.created"), "response envelope synthesized for the incomplete");
+  assert.ok(types.includes("response.incomplete"), "incomplete synthesized without any event");
+});
+
+test("client abort marks the stream interrupted without writing a terminal", async () => {
+  const state = new SseCompatState();
+  const chunks = [];
+  const onceHandlers = {};
+  const res = {
+    write: (chunk) => { chunks.push(Buffer.from(chunk).toString("utf8")); return true; },
+    end: () => {},
+    on: () => res,
+    once: (ev, fn) => { (onceHandlers[ev] ??= []).push(fn); return res; },
+    removeListener: () => res,
+  };
+  const fireClose = () => { for (const fn of onceHandlers.close ?? []) fn(); };
+  // An upstream that keeps producing: the client disconnects before it ends.
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(Buffer.from(`event: response.output_text.delta\r\ndata: ${JSON.stringify({
+        type: "response.output_text.delta", item_id: "i1", output_index: 0, content_index: 0, delta: "hi",
+      })}\r\n\r\n`));
+    },
+  });
+  const pending = pipeCompatStream(body, res, null, null, state);
+  fireClose();
+  const result = await pending;
+  assert.equal(result.interrupted, true, "client abort flagged");
+  assert.equal(result.truncated, false, "not an upstream truncation");
+  const text = chunks.join("");
+  assert.ok(!text.includes("response.incomplete"), "no terminal written to a gone client");
+  assert.ok(!text.includes("response.completed"), "no terminal written to a gone client");
+});

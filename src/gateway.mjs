@@ -779,6 +779,7 @@ export async function pipeFreeStream(upstreamBody, res, tee, failedMessage, onFi
   let sseBuffer = "";
   let responseId = "";
   let usage;
+  let interrupted = false;
   let outStream = null;
   const writeOut = (text) => {
     if (!res.write(text)) outStream?.pause();
@@ -902,11 +903,14 @@ export async function pipeFreeStream(upstreamBody, res, tee, failedMessage, onFi
     res.once("error", (error) => { cleanup(); settle(error); });
     res.once("close", () => {
       cleanup();
-      if (!settled) stream.destroy();
+      if (!settled) {
+        interrupted = true;
+        stream.destroy();
+      }
       settle();
     });
   });
-  return { bytes, empty: holding && !sawOutput, usage };
+  return { bytes, empty: holding && !sawOutput, usage, interrupted };
 }
 
 // Native passthrough for a Responses request. Unlike the routed path there is no
@@ -1627,6 +1631,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     let upstreamBody = upstream.body;
     let freeEmpty = false;
     let interrupted = false;
+    let truncated = false;
     if (target.free && normalizedPayload.stream !== true) {
       const raw = await upstream.text();
       let parsed = null;
@@ -1682,6 +1687,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       const result = await pipeFreeStream(upstreamBody, res, tee, freeEmptyError?.body.error.message, markFirstResponse, compat);
       bytesOut = result.bytes;
       freeEmpty = result.empty;
+      interrupted = result.interrupted;
       if (result.usage) usage = result.usage;
     } else if (config.sseCompat && normalizedPayload.stream === true) {
       // SSE-compat layer: synthesize the lifecycle events (created /
@@ -1690,6 +1696,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       const result = await pipeCompatStream(upstreamBody, res, tee, markFirstResponse);
       bytesOut = result.bytes;
       interrupted = result.interrupted;
+      truncated = result.truncated;
     } else {
       const piped = await pipeGatewayStream(upstreamBody, res, tee, markFirstResponse);
       bytesOut = piped.bytes;
@@ -1755,11 +1762,17 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     }
     // inputTokens/outputTokens ride on the trace record: the dashboard's
     // context-token waveform plots recent[].inputTokens per completed call.
+    const failureStatus = interrupted ? 499 : truncated ? 502 : upstream.status;
+    const failureError = interrupted
+      ? "client disconnected"
+      : truncated
+        ? "upstream stream ended prematurely"
+        : undefined;
     finish?.({
-      ok: !interrupted,
-      httpStatus: interrupted ? 499 : upstream.status,
+      ok: !interrupted && !truncated,
+      httpStatus: failureStatus,
       upstream: target.provider,
-      error: interrupted ? "client disconnected" : undefined,
+      error: failureError,
       bytesOut,
       inputTokens: traceUsage?.input_tokens || 0,
       outputTokens: traceUsage?.output_tokens || 0,
@@ -1785,7 +1798,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       model: normalizedPayload.model,
       provider: target.provider,
       route: route.reason,
-      status: interrupted ? 499 : upstream.status,
+      status: failureStatus,
       durationMs: Date.now() - startedAt,
       inputTokens: traceUsage?.input_tokens,
       outputTokens: traceUsage?.output_tokens,
@@ -1796,8 +1809,8 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       threadId,
     });
     return {
-      ok: !interrupted,
-      httpStatus: interrupted ? 499 : upstream.status,
+      ok: !interrupted && !truncated,
+      httpStatus: failureStatus,
       route,
       usage: traceUsage,
       bytesOut,

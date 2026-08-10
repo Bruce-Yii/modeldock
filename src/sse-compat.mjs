@@ -238,18 +238,42 @@ export class SseCompatState {
     };
     return synthesizeEvent("response.completed", { type: "response.completed", response });
   }
+
+  // Synthesize the terminal for a transport-level interruption (upstream
+  // stream error / premature EOF). Unlike completedEvent(), the status is
+  // "incomplete" with incomplete_details.reason="adapter_eof" (same shape as
+  // opencodex RC1): a stream that ended without a terminal event is a
+  // truncated turn, and pretending it finished cleanly is the failure mode.
+  incompleteEvent() {
+    const response = {
+      id: this.responseId || this.id("resp"),
+      object: "response",
+      status: "incomplete",
+      output: [],
+      incomplete_details: { reason: "adapter_eof" },
+    };
+    return synthesizeEvent("response.incomplete", { type: "response.incomplete", response });
+  }
 }
 
 // Pipe `upstreamBody` to the client, synthesizing missing lifecycle events.
 // `tee` still receives every original chunk untouched (usage extraction keeps
 // working); only the bytes written to the client are augmented.
+//
+// Terminal classification uses transport-layer signals only, never the event
+// layer: an upstream stream error or a client abort is a truncated stream and
+// ends with `response.incomplete` (reason adapter_eof) / `interrupted:true`;
+// a clean EOF ends the turn, so a missing `response.completed` is still
+// synthesized rather than misreported as a truncation (models that drop the
+// terminal envelope, e.g. glm-5.1, must not be flagged as interrupted).
 export async function pipeCompatStream(upstreamBody, res, tee, markFirstResponse, state = new SseCompatState()) {
   if (!upstreamBody) {
     res.end();
-    return { bytes: 0, interrupted: false, synthesized: 0 };
+    return { bytes: 0, interrupted: false, truncated: false, synthesized: 0 };
   }
   let bytes = 0;
   let interrupted = false;
+  let truncated = false;
   let synthesized = 0;
   let sseBuffer = "";
   let outStream = null;
@@ -323,7 +347,26 @@ export async function pipeCompatStream(upstreamBody, res, tee, markFirstResponse
       res.end();
       settle();
     });
-    stream.once("error", settle);
+    stream.once("error", () => {
+      // Transport-level interruption: the upstream stream died before a
+      // terminal event. Synthesize response.incomplete (never completed) so
+      // the client sees a truncated turn instead of a clean finish. The error
+      // is absorbed here - rejecting would make the caller append a second
+      // terminal (response.failed) on top of this one.
+      tee?.end?.();
+      if (!state.completed) {
+        truncated = true;
+        // ensureCreated is idempotent: an error before any event still gets
+        // the response envelope so the client can attach the incomplete to it.
+        emit([...state.ensureCreated(), ...state.closeOpenParts(), ...state.closeOpenItems(), state.incompleteEvent()]);
+      }
+      try {
+        res.end();
+      } catch {
+        res.destroy();
+      }
+      settle();
+    });
     const onDrain = () => outStream?.resume();
     res.on("drain", onDrain);
     const cleanup = () => res.removeListener("drain", onDrain);
@@ -331,9 +374,12 @@ export async function pipeCompatStream(upstreamBody, res, tee, markFirstResponse
     res.once("error", (error) => { cleanup(); settle(error); });
     res.once("close", () => {
       cleanup();
-      if (!settled) stream.destroy();
+      if (!settled) {
+        interrupted = true;
+        stream.destroy();
+      }
       settle();
     });
   });
-  return { bytes, interrupted, synthesized };
+  return { bytes, interrupted, truncated, synthesized };
 }
