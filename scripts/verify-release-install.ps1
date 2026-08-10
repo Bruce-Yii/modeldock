@@ -49,10 +49,8 @@ $env:MODELDOCK_AUTOSTART_NAME = $autostartName
 # in that state. Use a disposable test token so the first-start check verifies
 # the actual launch path without contacting a real provider.
 $env:OPENCODE_GO_TOKEN = "release-verify-probe-token"
-# The memory vault is opt-in (MODELDOCK_MEMORY=1); the release probe asserts
-# the full six-tool surface, so verify the memory-enabled layout and keep its
-# vault inside the throwaway work dir.
-$env:MODELDOCK_MEMORY = "1"
+# The memory vault is always on; the release probe asserts the full six-tool
+# surface and keeps its vault inside the throwaway work dir.
 $env:MODELDOCK_MEMORY_DIR = Join-Path $work "memory"
 
 function Write-Step($message) {

@@ -408,9 +408,9 @@ export function loadConfig() {
     mediaDir: process.env.MODELDOCK_MEDIA_DIR
       ? path.resolve(process.env.MODELDOCK_MEDIA_DIR)
       : path.join(os.homedir(), ".modeldock", "media"),
-    // Persistent memory vault (recall_memory tool). Off by default: the gateway
-    // stays thin until MODELDOCK_MEMORY=1 opts into capture + index + recall.
-    memoryEnabled: ["1", "true", "on", "yes"].includes(String(process.env.MODELDOCK_MEMORY || "").toLowerCase()),
+    // Persistent memory vault (recall_memory tool). Always on; MODELDOCK_MEMORY=0
+    // opts out for the rare install that wants to stay thin.
+    memoryEnabled: !["0", "false", "off", "no"].includes(String(process.env.MODELDOCK_MEMORY || "").toLowerCase()),
     memoryDir: process.env.MODELDOCK_MEMORY_DIR
       ? path.resolve(process.env.MODELDOCK_MEMORY_DIR)
       : path.join(os.homedir(), ".modeldock", "memory"),
