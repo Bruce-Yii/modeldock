@@ -50,7 +50,8 @@ restart_gateway() {
   "$ROOT/scripts/start-hidden.sh"
   i=0
   while [ "$i" -lt 40 ]; do
-    if curl -fsS --max-time 2 "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1; then
+    # No -f: a 503 before a token is set still proves the gateway is listening.
+    if curl -sS -o /dev/null --max-time 2 "http://127.0.0.1:$PORT/healthz" 2>/dev/null; then
       if [ "$has_lsof" -eq 1 ]; then
         new_pid="$(lsof -ti "tcp:$PORT" 2>/dev/null | head -n 1 || true)"
         if [ -n "$new_pid" ] && [ "$new_pid" != "$old_pid" ]; then

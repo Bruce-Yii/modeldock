@@ -131,7 +131,10 @@ $server = Join-Path $root "src\server.mjs"
 if (-not (Test-Path -LiteralPath $server)) { $server = Join-Path $root "dist\modeldock.mjs" }
 
 try {
-  Start-Process -FilePath $nodeExe -ArgumentList $server -WorkingDirectory $root -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+  # Quote the script path: an installed layout under a home dir with a space
+  # (e.g. "C:\Users\Chen Bao\.modeldock") would otherwise be split by node's CRT
+  # into two argv entries and fail with "Cannot find module".
+  Start-Process -FilePath $nodeExe -ArgumentList "`"$server`"" -WorkingDirectory $root -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
 } catch {
   Write-Status "ERROR: failed to start gateway: $($_.Exception.Message)"
   exit 1
@@ -141,13 +144,17 @@ Write-Status "restart.ps1: started gateway from $root (logs: $logDir)"
 for ($i = 0; $i -lt 40; $i += 1) {
   Start-Sleep -Milliseconds 250
   try {
-    $health = Invoke-RestMethod -Uri "http://127.0.0.1:$port/healthz" -TimeoutSec 2
-    if ($health.ok) {
-      Write-Status "restart.ps1: gateway healthy at http://127.0.0.1:$port"
+    Invoke-WebRequest -Uri "http://127.0.0.1:$port/healthz" -TimeoutSec 2 -UseBasicParsing | Out-Null
+    Write-Status "restart.ps1: gateway healthy at http://127.0.0.1:$port"
+    exit 0
+  } catch {
+    # A returned HTTP status (e.g. 503 before a token is configured) still proves
+    # the gateway is up and listening - only a connection failure means it is not.
+    if ($_.Exception.Response) {
+      Write-Status "restart.ps1: gateway up at http://127.0.0.1:$port (awaiting token)"
       exit 0
     }
-  } catch {
-    # Gateway still booting; keep polling.
+    # Otherwise still booting / connection refused; keep polling.
   }
 }
 

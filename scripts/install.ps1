@@ -334,13 +334,17 @@ Write-Output "restart.ps1: started gateway from $root (logs: $logDir)"
 for ($i = 0; $i -lt 40; $i += 1) {
   Start-Sleep -Milliseconds 250
   try {
-    $health = Invoke-RestMethod -Uri "http://127.0.0.1:$port/healthz" -TimeoutSec 2
-    if ($health.ok) {
-      Write-Output "restart.ps1: gateway healthy at http://127.0.0.1:$port"
+    Invoke-WebRequest -Uri "http://127.0.0.1:$port/healthz" -TimeoutSec 2 -UseBasicParsing | Out-Null
+    Write-Output "restart.ps1: gateway healthy at http://127.0.0.1:$port"
+    exit 0
+  } catch {
+    # A returned HTTP status (e.g. 503 before a token is set) still proves the
+    # gateway is up; only a connection failure means it is not.
+    if ($_.Exception.Response) {
+      Write-Output "restart.ps1: gateway up at http://127.0.0.1:$port (awaiting token)"
       exit 0
     }
-  } catch {
-    # Gateway still booting; keep polling.
+    # Otherwise still booting; keep polling.
   }
 }
 

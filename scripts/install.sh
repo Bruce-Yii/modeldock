@@ -341,19 +341,22 @@ if (-not $nodeExe) {
 $server = Join-Path $root "src\server.mjs"
 if (-not (Test-Path -LiteralPath $server)) { $server = Join-Path $root "dist\modeldock.mjs" }
 
-Start-Process -FilePath $nodeExe -ArgumentList $server -WorkingDirectory $root -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+# Quote the script path so an install dir with a space is not split into two argv entries.
+Start-Process -FilePath $nodeExe -ArgumentList "`"$server`"" -WorkingDirectory $root -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
 Write-Output "restart.ps1: started gateway from $root (logs: $logDir)"
 
 for ($i = 0; $i -lt 40; $i += 1) {
   Start-Sleep -Milliseconds 250
   try {
-    $health = Invoke-RestMethod -Uri "http://127.0.0.1:$port/healthz" -TimeoutSec 2
-    if ($health.ok) {
-      Write-Output "restart.ps1: gateway healthy at http://127.0.0.1:$port"
+    Invoke-WebRequest -Uri "http://127.0.0.1:$port/healthz" -TimeoutSec 2 -UseBasicParsing | Out-Null
+    Write-Output "restart.ps1: gateway healthy at http://127.0.0.1:$port"
+    exit 0
+  } catch {
+    if ($_.Exception.Response) {
+      Write-Output "restart.ps1: gateway up at http://127.0.0.1:$port (awaiting token)"
       exit 0
     }
-  } catch {
-    # Gateway still booting; keep polling.
+    # Otherwise still booting; keep polling.
   }
 }
 
@@ -490,7 +493,8 @@ wait_for_health() {
   old_pid="${1:-}"
   i=0
   while [ "$i" -lt 40 ]; do
-    if curl -fsS --max-time 2 "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1; then
+    # No -f: a 503 (up but awaiting a token) still proves the process is listening.
+    if curl -sS -o /dev/null --max-time 2 "http://127.0.0.1:$PORT/healthz" 2>/dev/null; then
       new_pid="$(find_listener_pid)"
       if [ -z "$old_pid" ] || [ -z "$new_pid" ] || [ "$new_pid" != "$old_pid" ]; then
         status "restart.sh: gateway healthy at http://127.0.0.1:$PORT"
@@ -616,7 +620,8 @@ restart_gateway() {
   "$ROOT/scripts/start-hidden.sh"
   i=0
   while [ "$i" -lt 40 ]; do
-    if curl -fsS --max-time 2 "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1; then
+    # No -f: a 503 before a token is set still proves the gateway is listening.
+    if curl -sS -o /dev/null --max-time 2 "http://127.0.0.1:$PORT/healthz" 2>/dev/null; then
       if [ "$has_lsof" -eq 1 ]; then
         new_pid="$(lsof -ti "tcp:$PORT" 2>/dev/null | head -n 1 || true)"
         if [ -n "$new_pid" ] && [ "$new_pid" != "$old_pid" ]; then

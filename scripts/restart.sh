@@ -122,7 +122,10 @@ wait_for_health() {
   old_pid="${1:-}"
   i=0
   while [ "$i" -lt 40 ]; do
-    if curl -fsS --max-time 2 "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1; then
+    # No -f: a 503 (gateway up but no token yet) still proves the process is
+    # listening. -f would treat that as a failure and loop until the timeout,
+    # reporting a healthy fresh install as "did not start".
+    if curl -sS -o /dev/null --max-time 2 "http://127.0.0.1:$PORT/healthz" 2>/dev/null; then
       new_pid="$(find_listener_pid)"
       if [ -z "$old_pid" ] || [ -z "$new_pid" ] || [ "$new_pid" != "$old_pid" ]; then
         status "restart.sh: gateway healthy at http://127.0.0.1:$PORT"

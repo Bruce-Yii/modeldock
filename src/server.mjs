@@ -455,6 +455,16 @@ async function probeImageSupport(modelId, config) {
 // image escalation, affinity).
 async function relayGatewayRequest(req, res, services) {
   const { config, metrics, mediaStore, routeAffinity, modelSelection } = services;
+  // Abort the upstream call when Codex disconnects (user hits stop, or its own
+  // timeout fires). Without this, a client that drops during the pre-first-byte
+  // "thinking" wait or a buffered leg (compaction arrayBuffer, free non-stream
+  // text) leaves the upstream fetch running to completion - burning tokens - and
+  // Codex's retry then issues a duplicate. The streaming leg already tears down
+  // on res "close"; the signal covers the phases before/around it.
+  const controller = new AbortController();
+  res.on("close", () => {
+    if (!res.writableFinished) controller.abort();
+  });
   const result = await relayGatewayResponses(req.body, res, {
     config,
     metrics,
@@ -467,6 +477,7 @@ async function relayGatewayRequest(req, res, services) {
     // The native passthrough leg forwards these to ChatGPT's backend untouched.
     incomingHeaders: req.headers,
     requestUrl: req.originalUrl,
+    signal: controller.signal,
   });
   if (result?.route?.reason === "client_selected" && modelSelection && result.route.model !== modelSelection.mainModel) {
     modelSelection.mainModel = result.route.model;

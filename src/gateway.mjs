@@ -847,10 +847,16 @@ export async function pipeFreeStream(upstreamBody, res, tee, failedMessage, onFi
       settle();
     });
     stream.once("error", settle);
-    res.once("drain", () => outStream?.resume());
-    res.once("finish", () => settle());
-    res.once("error", settle);
+    // "on", not "once": writeOut pauses the upstream on every backpressure event,
+    // so the drain that resumes it must fire every time too. With "once" the second
+    // pause never gets a matching resume and the stream (and the promise) hangs.
+    const onDrain = () => outStream?.resume();
+    res.on("drain", onDrain);
+    const cleanup = () => res.removeListener("drain", onDrain);
+    res.once("finish", () => { cleanup(); settle(); });
+    res.once("error", (error) => { cleanup(); settle(error); });
     res.once("close", () => {
+      cleanup();
       if (!settled) stream.destroy();
       settle();
     });

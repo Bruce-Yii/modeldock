@@ -86,12 +86,19 @@ function Restore-Native {
   } elseif ($state.originalExisted) {
     Copy-Item -LiteralPath $backup -Destination $config -Force
   }
-  $state.enabled = $false
-  $state.restartRequired = $true
-  $state.lastBackupPath = $backup
-  $state.changedAt = (Get-Date).ToUniversalTime().ToString("o")
+  # Rebuild the state as a fresh ordered map: Windows PowerShell 5.1 throws when a
+  # property that ConvertFrom-Json did not create (here lastBackupPath) is set via
+  # dot assignment, so copy the existing keys and override the ones we change.
+  $out = [ordered]@{}
+  foreach ($p in $state.PSObject.Properties) { $out[$p.Name] = $p.Value }
+  $out['enabled'] = $false
+  $out['restartRequired'] = $true
+  $out['lastBackupPath'] = $backup
+  $out['changedAt'] = (Get-Date).ToUniversalTime().ToString("o")
   $tmp = "$statePath.$PID.tmp"
-  $state | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $tmp -Encoding utf8
+  # Write UTF-8 without a BOM: the gateway reads this file with Node's utf8 and a
+  # BOM would make JSON.parse fail (Set-Content -Encoding utf8 emits a BOM on 5.1).
+  [System.IO.File]::WriteAllText($tmp, ($out | ConvertTo-Json -Depth 10), (New-Object System.Text.UTF8Encoding($false)))
   Move-Item -LiteralPath $tmp -Destination $statePath -Force
   Write-Output "Codex native route restored from $backup"
   Write-Output "Fully quit and restart Codex."
