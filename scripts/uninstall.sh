@@ -22,40 +22,57 @@ if [ -f "$OWNER_FILE" ]; then
   OWNER_PID=$(sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$OWNER_FILE" | head -n 1)
 fi
 
-find_listener_pid() {
-  if command -v lsof >/dev/null 2>&1; then
-    lsof -nP -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null | head -n 1 || true
-  elif command -v ss >/dev/null 2>&1; then
-    ss -tlnpH "sport = :$PORT" 2>/dev/null | grep -o 'pid=[0-9]*' | head -n 1 | cut -d= -f2 || true
-  elif command -v fuser >/dev/null 2>&1; then
-    fuser "$PORT/tcp" 2>/dev/null | tr ' ' '\n' | sed '/^$/d' | head -n 1 || true
-  else
-    true
+find_node() {
+  if [ -n "${MODELDOCK_NODE_PATH:-}" ] && [ -x "$MODELDOCK_NODE_PATH" ]; then
+    printf '%s\n' "$MODELDOCK_NODE_PATH"
+    return
   fi
+  for candidate in "$ROOT"/node/v*/bin/node; do
+    [ -x "$candidate" ] && { printf '%s\n' "$candidate"; return; }
+  done
+  command -v node 2>/dev/null || true
 }
+NODE_BIN="$(find_node)"
 
 # Confirm the recorded PID is really our gateway before killing it: after a reboot
 # the owner file can name a PID that has since been reused by an unrelated process.
-# Accept it only if it is the current listener on our port, or its command line
-# references this install root.
+# The owner fields and the exact gateway entry path must both match.
 owner_is_ours() {
   pid="$1"
-  [ -n "$pid" ] || return 1
-  listener="$(find_listener_pid)"
-  [ -n "$listener" ] && [ "$listener" = "$pid" ] && return 0
-  cmd="$(ps -p "$pid" -o command= 2>/dev/null || true)"
-  case "$cmd" in
-    *"$ROOT"*) return 0 ;;
-    *"$STATE_DIR"*) return 0 ;;
-  esac
-  return 1
+  [ -n "$pid" ] && [ -n "$NODE_BIN" ] || return 1
+  "$NODE_BIN" --input-type=module - "$OWNER_FILE" "$pid" "$ROOT" "$PORT" <<'NODE'
+import { execFileSync } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
+
+const [ownerFile, pid, root, port] = process.argv.slice(2);
+try {
+  const owner = JSON.parse(fs.readFileSync(ownerFile, "utf8"));
+  const thisRoot = path.resolve(root);
+  if (Number(owner?.pid) !== Number(pid) || Number(owner?.port) !== Number(port) || path.resolve(String(owner?.root || "")) !== thisRoot) {
+    process.exit(1);
+  }
+  const candidates = [path.join(thisRoot, "src", "server.mjs"), path.join(thisRoot, "dist", "modeldock.mjs")];
+  let matches = false;
+  if (process.platform === "linux") {
+    const argv = fs.readFileSync(`/proc/${pid}/cmdline`).toString("utf8").split("\0").filter(Boolean);
+    matches = argv.some((arg) => candidates.includes(path.resolve(arg)));
+  } else {
+    const command = execFileSync("ps", ["-p", pid, "-o", "command="], { encoding: "utf8" });
+    matches = candidates.some((candidate) => command.includes(candidate));
+  }
+  process.exit(matches ? 0 : 1);
+} catch {
+  process.exit(1);
+}
+NODE
 }
 
 if [ -n "$OWNER_PID" ] && kill -0 "$OWNER_PID" 2>/dev/null && owner_is_ours "$OWNER_PID"; then
   kill "$OWNER_PID" 2>/dev/null || true
   echo "Stopped gateway process $OWNER_PID"
 elif [ -n "$OWNER_PID" ] && kill -0 "$OWNER_PID" 2>/dev/null; then
-  echo "WARNING: recorded PID $OWNER_PID is not listening on port $PORT and does not look like this install; not killing (possible PID reuse)."
+  echo "WARNING: recorded PID $OWNER_PID could not be verified as this install; not killing (possible PID reuse)."
 else
   echo "WARNING: no live ModelDock-owned gateway found on port $PORT; nothing was stopped."
 fi

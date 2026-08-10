@@ -300,21 +300,34 @@ if ($listener) {
   # MODELDOCK_STATE_DIR redirect, or the guard reads a file the gateway never wrote.
   $stateDir = if ($env:MODELDOCK_STATE_DIR) { $env:MODELDOCK_STATE_DIR } else { Join-Path $env:USERPROFILE ".modeldock" }
   $ownerFile = Join-Path $stateDir "owner-$port.json"
-  if ((Test-Path $ownerFile) -and (-not $args.Contains("-Force"))) {
+  $forceTakeover = $args -contains "-Force"
+  if (-not $forceTakeover) {
+    $owned = $false
     try {
+      if (-not (Test-Path -LiteralPath $ownerFile)) { throw "owner record is missing" }
       $owner = Get-Content $ownerFile -Raw | ConvertFrom-Json
-      if ($owner.root -and $owner.pid -eq $oldPid) {
-        $ownerRoot = [System.IO.Path]::GetFullPath($owner.root)
-        $thisRoot = [System.IO.Path]::GetFullPath($root)
-        if ($ownerRoot -ne $thisRoot) {
-          Write-Status "ERROR: port $port is owned by a gateway from '$ownerRoot' (PID $oldPid); this script runs from '$thisRoot'."
-          Write-Status "Re-run with -Force to take the port over deliberately."
-          exit 1
-        }
+      $ownerRoot = [System.IO.Path]::GetFullPath([string]$owner.root)
+      $thisRoot = [System.IO.Path]::GetFullPath($root)
+      if ([int]$owner.pid -ne [int]$oldPid -or [int]$owner.port -ne $port -or $ownerRoot -ne $thisRoot) {
+        throw "owner record does not match this listener and install root"
       }
+      $processInfo = Get-CimInstance Win32_Process -Filter "ProcessId = $oldPid" -ErrorAction Stop
+      $commandLine = [string]$processInfo.CommandLine
+      $sourceEntry = [System.IO.Path]::GetFullPath((Join-Path $root "src\server.mjs"))
+      $bundleEntry = [System.IO.Path]::GetFullPath((Join-Path $root "dist\modeldock.mjs"))
+      $owned = $commandLine.IndexOf($sourceEntry, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+          $commandLine.IndexOf($bundleEntry, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+      if (-not $owned) { throw "listener command does not run this ModelDock install" }
     } catch {
-      # Unreadable owner file: fall through and behave as before.
+      Write-Status "ERROR: refusing to stop PID $oldPid on port $port because ownership could not be verified: $($_.Exception.Message)"
+      Write-Status "Re-run with -Force to take the port over deliberately."
+      exit 2
     }
+  }
+  $currentListener = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($currentListener -and $currentListener.OwningProcess -ne $oldPid -and (-not $forceTakeover)) {
+    Write-Status "ERROR: the listener on port $port changed during ownership verification; refusing to stop it."
+    exit 2
   }
   Write-Status "restart.ps1: stopping gateway (PID $oldPid, port $port)"
   Stop-Process -Id $oldPid -Force
@@ -544,29 +557,33 @@ check_owner() {
   [ "$FORCE" -eq 0 ] || return 0
   state_dir="${MODELDOCK_STATE_DIR:-$HOME/.modeldock}"
   owner_file="$state_dir/owner-$PORT.json"
-  [ -f "$owner_file" ] || return 0
-  "$NODE_BIN" --input-type=module - "$owner_file" "$OLD_PID" "$ROOT" <<'NODE'
+  "$NODE_BIN" --input-type=module - "$owner_file" "$OLD_PID" "$ROOT" "$PORT" <<'NODE'
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
-const [ownerFile, oldPid, root] = process.argv.slice(2);
+const [ownerFile, oldPid, root, port] = process.argv.slice(2);
 try {
   const owner = JSON.parse(fs.readFileSync(ownerFile, "utf8"));
-  if (owner?.root && Number(owner.pid) === Number(oldPid)) {
-    const ownerRoot = path.resolve(owner.root);
-    const thisRoot = path.resolve(root);
-    if (ownerRoot !== thisRoot) {
-      const first = `ERROR: port ${owner.port || ""} is owned by a gateway from '${ownerRoot}' (PID ${oldPid}); this script runs from '${thisRoot}'.`;
-      const second = "Re-run with --force to take the port over deliberately.";
-      console.log(first);
-      console.log(second);
-      console.error(first);
-      console.error(second);
-      process.exit(2);
-    }
+  const ownerRoot = path.resolve(String(owner?.root || ""));
+  const thisRoot = path.resolve(root);
+  if (Number(owner?.pid) !== Number(oldPid) || Number(owner?.port) !== Number(port) || ownerRoot !== thisRoot) {
+    throw new Error("owner record does not match this listener and install root");
   }
-} catch {
-  // Unreadable owner file: match restart.ps1 and behave as before.
+  const candidates = [path.join(thisRoot, "src", "server.mjs"), path.join(thisRoot, "dist", "modeldock.mjs")];
+  let commandMatches = false;
+  if (process.platform === "linux") {
+    const argv = fs.readFileSync(`/proc/${oldPid}/cmdline`).toString("utf8").split("\0").filter(Boolean);
+    commandMatches = argv.some((arg) => candidates.includes(path.resolve(arg)));
+  } else {
+    const command = execFileSync("ps", ["-p", oldPid, "-o", "command="], { encoding: "utf8" });
+    commandMatches = candidates.some((candidate) => command.includes(candidate));
+  }
+  if (!commandMatches) throw new Error("listener command does not run this ModelDock install");
+} catch (error) {
+  console.error(`ERROR: refusing to stop PID ${oldPid} on port ${port} because ownership could not be verified: ${error.message}`);
+  console.error("Re-run with --force to take the port over deliberately.");
+  process.exit(2);
 }
 NODE
 }
@@ -611,6 +628,11 @@ if try_launchd_restart; then
 fi
 
 if [ -n "$OLD_PID" ]; then
+  current_pid="$(find_listener_pid)"
+  if [ "$FORCE" -eq 0 ] && [ -n "$current_pid" ] && [ "$current_pid" != "$OLD_PID" ]; then
+    status "ERROR: the listener on port $PORT changed during ownership verification; refusing to stop it"
+    exit 2
+  fi
   status "restart.sh: stopping gateway (PID $OLD_PID, port $PORT)"
   kill "$OLD_PID" 2>/dev/null || true
   i=0

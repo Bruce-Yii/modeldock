@@ -363,7 +363,7 @@ export function loadConfig() {
   };
   // How the managed [mcp_servers.modeldock] entry connects: "stdio" (default) spawns
   // src/mcp-standalone.mjs as a Codex-owned child that survives gateway restarts;
-  // "url" points Codex at the gateway's own streamable-HTTP /mcp endpoint instead.
+  // "url" points Codex at the gateway's caller-key-protected HTTP MCP endpoint instead.
   const mcpTransportRaw = (process.env.MODELDOCK_MCP_TRANSPORT || "stdio").trim().toLowerCase();
   const mcpTransport = ["stdio", "url"].includes(mcpTransportRaw) ? mcpTransportRaw : "stdio";
 

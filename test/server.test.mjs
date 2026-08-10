@@ -43,7 +43,15 @@ test("serves both local MCP tools over Streamable HTTP", async (t) => {
   });
 
   const client = new Client({ name: "test-client", version: "1.0.0" });
-  await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${server.address().port}/mcp`)));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const request = { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }) };
+  const bare = await fetch(`${base}/mcp`, request);
+  assert.equal(bare.status, 401);
+  assert.equal((await bare.json()).error.type, "caller_key_required");
+  const wrong = await fetch(`${base}/c/not-the-caller-key-but-long-enough/mcp`, request);
+  assert.equal(wrong.status, 401);
+  assert.equal((await wrong.json()).error.type, "invalid_caller_key");
+  await client.connect(new StreamableHTTPClientTransport(new URL(`${base}/c/${instance.services.callerKey}/mcp`)));
   t.after(() => client.close());
   const result = await client.listTools();
   assert.deepEqual(result.tools.map((tool) => tool.name).sort(), ["hear", "speak", "vision_inspect", "web_search_exa"]);

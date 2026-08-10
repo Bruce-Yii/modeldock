@@ -13,7 +13,7 @@ const port = instance.server.address().port;
 // base URL like Codex does, not the bare /v1 path. The suffix stays `/v1/...`
 // on each call, so the prefix is `/c/<key>` without the trailing `/v1`.
 const baseUrl = `http://127.0.0.1:${port}/c/${instance.services.callerKey}`;
-const mcpUrl = `http://127.0.0.1:${port}/mcp`;
+const mcpUrl = `${baseUrl}/mcp`;
 const result = { baseUrl, responses: {}, mcp: {}, web: {}, vision: {} };
 let client;
 

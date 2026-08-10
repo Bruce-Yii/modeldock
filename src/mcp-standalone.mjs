@@ -4,7 +4,7 @@
 // by src/config-switcher.mjs uses command/args instead of url), so its lifetime
 // is owned by Codex and gateway restarts never kill it. Tools are registered
 // locally - tools/list works even while the gateway is down - while web search
-// and vision calls are forwarded to the gateway's /mcp endpoint. Speech tools
+// and vision calls are forwarded to the gateway's keyed MCP endpoint. Speech tools
 // (speak/hear) run fully local and never touch the gateway.
 //
 // Never write to stdout outside the MCP protocol: stdout is the transport.

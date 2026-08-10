@@ -20,9 +20,10 @@ args = ["C:\\Users\\you\\modeldock\\src\\mcp-standalone.mjs"]
 env = { "MODELDOCK_GATEWAY_URL" = "http://127.0.0.1:4097" }
 
 # With MODELDOCK_MCP_TRANSPORT=url in .env, the managed block points at the
-# gateway's streamable-HTTP /mcp endpoint instead:
+# gateway's caller-key-protected streamable-HTTP MCP endpoint instead. The
+# dashboard writes the real key; do not copy this placeholder literally:
 # [mcp_servers.modeldock]
-# url = "http://127.0.0.1:4097/mcp"
+# url = "http://127.0.0.1:4097/c/<caller-key>/mcp"
 
 # The legacy `model_provider = "modeldock_go"` shape (a custom provider with an
 # experimental_bearer_token) is migrated in place when ModelDock re-enables the

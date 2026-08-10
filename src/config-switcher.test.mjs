@@ -26,7 +26,7 @@ async function fixture(t) {
     switcher: new CodexConfigSwitcher({
       codexHome,
       baseUrl: "http://127.0.0.1:4097/v1",
-      mcpUrl: "http://127.0.0.1:4097/mcp",
+      mcpUrl: "http://127.0.0.1:4097/c/test-caller-key/mcp",
       model: "deepseek-v4-flash",
     }),
   };
@@ -37,7 +37,7 @@ test("managed config keeps the built-in provider and redirects its base URL", ()
     baseUrl: "http://127.0.0.1:4097/c/callerkey/v1",
     model: "deepseek-v4-flash",
     catalogFile: "C:/Users/x/.modeldock/codex-model-catalog.json",
-    mcpUrl: "http://127.0.0.1:4097/mcp",
+    mcpUrl: "http://127.0.0.1:4097/c/test-caller-key/mcp",
   });
   assert.match(managed, /^model = "deepseek-v4-flash"/m);
   assert.match(managed, /^openai_base_url = "http:\/\/127\.0\.0\.1:4097\/c\/callerkey\/v1"$/m);
@@ -52,7 +52,7 @@ test("managed config keeps the built-in provider and redirects its base URL", ()
   assert.match(managed, /\[features\]\nmulti_agent = true/);
   assert.match(managed, /\[mcp_servers\.docs\]/);
   assert.match(managed, /\[mcp_servers\.modeldock\]\n# Managed by ModelDock: web_search_exa/);
-  assert.match(managed, /url = "http:\/\/127\.0\.0\.1:4097\/mcp"/);
+  assert.match(managed, /url = "http:\/\/127\.0\.0\.1:4097\/c\/test-caller-key\/mcp"/);
   // The managed keys must stay above the first table so the TOML stays valid.
   const table = managed.indexOf("[features]");
   const openaiBase = managed.indexOf("openai_base_url");
@@ -73,12 +73,12 @@ test("managed config writes the stdio bridge when mcpCommand is set", () => {
     model: "deepseek-v4-flash",
     mcpCommand: "C:/Program Files/nodejs/node.exe",
     mcpArgs: ["D:/projects/modeldock/src/mcp-standalone.mjs"],
-    mcpEnv: { MODELDOCK_GATEWAY_URL: "http://127.0.0.1:4097" },
+    mcpEnv: { MODELDOCK_GATEWAY_URL: "http://127.0.0.1:4097/c/test-caller-key" },
   });
   assert.match(managed, /\[mcp_servers\.modeldock\]/);
   assert.match(managed, /command = "C:\/Program Files\/nodejs\/node\.exe"/);
   assert.match(managed, /args = \["D:\/projects\/modeldock\/src\/mcp-standalone\.mjs"\]/);
-  assert.match(managed, /env = \{ "MODELDOCK_GATEWAY_URL" = "http:\/\/127\.0\.0\.1:4097" \}/);
+  assert.match(managed, /env = \{ "MODELDOCK_GATEWAY_URL" = "http:\/\/127\.0\.0\.1:4097\/c\/test-caller-key" \}/);
   assert.doesNotMatch(
     managed,
     /\[mcp_servers\.modeldock\][\s\S]*?^url = /m,

@@ -19,7 +19,7 @@ import { CodexConfigSwitcher } from "./config-switcher.mjs";
 import { createAutostart } from "./autostart.mjs";
 import { createUpdater, localVersion } from "./update.mjs";
 import { clearOwnerFile, describeOwnerConflict, writeOwnerFile } from "./instance-owner.mjs";
-import { CALLER_PATH_PREFIX, callerBasePath, callerKeyEqual, loadOrCreateCallerKey } from "./caller-key.mjs";
+import { CALLER_PATH_PREFIX, callerBasePath, callerKeyEqual, callerRootPath, loadOrCreateCallerKey } from "./caller-key.mjs";
 import { validateProviderToken } from "./token-validate.mjs";
 import { RouteAffinity } from "./router.mjs";
 import { PROVIDER_SEPARATOR, applyCustomProfile, bareModelId, profileOptions, profileById, providerForModel, publishedSlugFor, tokenFor, TRIAL_MAIN_MODEL, TRIAL_VISION_MODEL } from "./profiles.mjs";
@@ -327,9 +327,8 @@ function configMutationGuard(config) {
 // browsers and send no Origin header. Reject any request that DOES carry a
 // cross-origin Origin so a malicious web page (or a DNS-rebinding attack that
 // makes itself same-host) cannot drive vision_inspect/speak against this loopback
-// gateway. A full caller-key on /mcp would also stop non-browser local processes;
-// that is a larger change (the base URL written into config.toml would have to
-// carry the key) and is tracked separately.
+// gateway. The route also carries the caller capability key; Origin filtering
+// remains useful defense in depth for browser callers that somehow learn it.
 function crossOriginGuard(config) {
   const allowedOrigins = new Set([
     `http://${urlHost(config.host)}:${config.port}`,
@@ -713,10 +712,11 @@ export function createServices(config = loadConfig()) {
   // The capability key rides in the base URL Codex reads from config.toml, so a
   // hostile local web page cannot reach the relay endpoints (see caller-key.mjs).
   const callerKey = mutableConfig.callerKey || loadOrCreateCallerKey();
-  const mcpUrl = `http://${urlHost(mutableConfig.host)}:${mutableConfig.port}/mcp`;
+  const gatewayUrl = `http://${urlHost(mutableConfig.host)}:${mutableConfig.port}`;
+  const mcpUrl = `${gatewayUrl}${callerRootPath(callerKey)}/mcp`;
   const configSwitcher = new CodexConfigSwitcher({
     codexHome: mutableConfig.codexHome,
-    baseUrl: `http://${urlHost(mutableConfig.host)}:${mutableConfig.port}${callerBasePath(callerKey)}`,
+    baseUrl: `${gatewayUrl}${callerBasePath(callerKey)}`,
     // stdio (default) spawns the standalone bridge as a Codex-owned child so gateway
     // restarts never kill the session's MCP tools; url keeps the old HTTP wiring.
     mcpUrl: mutableConfig.mcpTransport === "url" ? mcpUrl : "",
@@ -896,7 +896,6 @@ export function createApp(services = createServices()) {
     },
   });
 
-  app.all("/mcp", crossOriginGuard(config), (req, res) => mcpHandler(req, res, req.body));
   // Capability-key routes: the base_url written into config.toml carries the key
   // (/c/<key>/v1), so Codex authenticates implicitly while a hostile local web
   // page (which can POST to loopback but cannot read ~/.modeldock) cannot.
@@ -904,6 +903,11 @@ export function createApp(services = createServices()) {
     if (services.callerKey && callerKeyEqual(req.params.key, services.callerKey)) return next();
     return res.status(401).json({ error: { type: "invalid_caller_key", message: "Unknown caller key; re-enable the Codex switch to refresh the URL." } });
   };
+  const guardMcpOrigin = crossOriginGuard(config);
+  app.all(`${CALLER_PATH_PREFIX}/:key/mcp`, guardMcpOrigin, requireCallerKey, (req, res) => mcpHandler(req, res, req.body));
+  app.all("/mcp", guardMcpOrigin, (_req, res) => res.status(401).json({
+    error: { type: "caller_key_required", message: "This MCP endpoint requires the keyed URL; re-enable the Codex switch." },
+  }));
   app.post(`${CALLER_PATH_PREFIX}/:key/v1/responses`, requireCallerKey, (req, res) => relayGatewayRequest(req, res, services));
   app.post(`${CALLER_PATH_PREFIX}/:key/v1/responses/compact`, requireCallerKey, (req, res) => relayGatewayRequest(req, res, services));
   app.post(`${CALLER_PATH_PREFIX}/:key/responses/compact`, requireCallerKey, (req, res) => relayGatewayRequest(req, res, services));
@@ -1444,7 +1448,7 @@ if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToP
   console.log(`ModelDock OpenCode Go gate listening at ${instance.url}`);
   console.log(`Dashboard: ${instance.url}/`);
   console.log(`Responses: ${instance.url}/v1/responses`);
-  console.log(`MCP: ${instance.url}/mcp`);
+  console.log("MCP: caller-key-protected endpoint configured for Codex");
   const missingTokens = Object.entries(instance.services.config.tokens || { "opencode-go": instance.services.config.goToken })
     .filter(([, token]) => !token)
     .map(([provider]) => provider);
