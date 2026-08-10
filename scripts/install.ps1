@@ -3,7 +3,9 @@
 # User-side bootstrap: runs BEFORE Node is guaranteed to exist, so it must stay a
 # plain PowerShell script (an .mjs installer would need Node already - chicken and egg).
 #
-#   powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/architectds/modeldock/main/scripts/install.ps1 | iex"
+#   $installer = Join-Path $env:TEMP "modeldock-install.ps1"
+#   Invoke-WebRequest -UseBasicParsing "https://github.com/architectds/modeldock/releases/latest/download/install.ps1" -OutFile $installer
+#   powershell -NoProfile -ExecutionPolicy Bypass -File $installer
 #
 # What it does:
 #   1. Use Node >= 22 (a bundled copy under <root>\node wins, then PATH). If none

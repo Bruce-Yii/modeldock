@@ -61,7 +61,9 @@ keep working the way they do on the native channel.
 Windows:
 
 ```
-powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/architectds/modeldock/main/scripts/install.ps1 | iex"
+$installer = Join-Path $env:TEMP "modeldock-install.ps1"
+Invoke-WebRequest -UseBasicParsing "https://github.com/architectds/modeldock/releases/latest/download/install.ps1" -OutFile $installer
+powershell -NoProfile -ExecutionPolicy Bypass -File $installer
 ```
 
 macOS:
@@ -206,7 +208,9 @@ DeepSeek V4 Flash 又快又便宜，但它看不见、听不到、不会说话�
 Windows：
 
 ```
-powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/architectds/modeldock/main/scripts/install.ps1 | iex"
+$installer = Join-Path $env:TEMP "modeldock-install.ps1"
+Invoke-WebRequest -UseBasicParsing "https://github.com/architectds/modeldock/releases/latest/download/install.ps1" -OutFile $installer
+powershell -NoProfile -ExecutionPolicy Bypass -File $installer
 ```
 
 macOS：
@@ -325,7 +329,9 @@ Codex はこれら 5 つをツールとして追加し、会話履歴は書き�
 Windows：
 
 ```
-powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/architectds/modeldock/main/scripts/install.ps1 | iex"
+$installer = Join-Path $env:TEMP "modeldock-install.ps1"
+Invoke-WebRequest -UseBasicParsing "https://github.com/architectds/modeldock/releases/latest/download/install.ps1" -OutFile $installer
+powershell -NoProfile -ExecutionPolicy Bypass -File $installer
 ```
 
 macOS：
@@ -456,7 +462,9 @@ compaction fonctionnent comme sur le canal natif.
 Windows :
 
 ```
-powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/architectds/modeldock/main/scripts/install.ps1 | iex"
+$installer = Join-Path $env:TEMP "modeldock-install.ps1"
+Invoke-WebRequest -UseBasicParsing "https://github.com/architectds/modeldock/releases/latest/download/install.ps1" -OutFile $installer
+powershell -NoProfile -ExecutionPolicy Bypass -File $installer
 ```
 
 macOS :
@@ -591,7 +599,9 @@ streaming y la compactación funcionan como en el canal nativo.
 Windows:
 
 ```
-powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/architectds/modeldock/main/scripts/install.ps1 | iex"
+$installer = Join-Path $env:TEMP "modeldock-install.ps1"
+Invoke-WebRequest -UseBasicParsing "https://github.com/architectds/modeldock/releases/latest/download/install.ps1" -OutFile $installer
+powershell -NoProfile -ExecutionPolicy Bypass -File $installer
 ```
 
 macOS:
