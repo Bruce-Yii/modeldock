@@ -9,7 +9,7 @@ import { translateUpstreamError, freeEmptyOutputError } from "./error-translatio
 import { RouteAffinity, routeResponsesRequest } from "./router.mjs";
 import { extractResponseUsage } from "./metrics.mjs";
 import { externalModelForAlias } from "./native-alias.mjs";
-import { normalizeAssistantContent, pipeCompatStream } from "./sse-compat.mjs";
+import { SseCompatState, normalizeAssistantContent, pipeCompatStream } from "./sse-compat.mjs";
 
 // Hosted / special tool types Codex can emit that the Go and DeepSeek upstreams
 // reject. The catalog declarations are the primary control; stripping here is the
@@ -767,7 +767,7 @@ export function freeResponseFailure(parsed) {
 // free-tier guidance. Non-free traffic and upstream failures are untouched -
 // only a response.completed block starts the hold. The tee still receives every
 // chunk so usage extraction keeps working.
-export async function pipeFreeStream(upstreamBody, res, tee, failedMessage, onFirstResponse) {
+export async function pipeFreeStream(upstreamBody, res, tee, failedMessage, onFirstResponse, compat = null) {
   if (!upstreamBody) {
     res.end();
     return { bytes: 0, empty: false, usage: undefined };
@@ -796,6 +796,12 @@ export async function pipeFreeStream(upstreamBody, res, tee, failedMessage, onFi
         continue;
       }
       if (usage === undefined) usage = extractResponseUsage(parsed);
+      // SSE-compat: synthesize the missing lifecycle envelope around the
+      // original event (see sse-compat.mjs). Runs before the free-empty
+      // accounting so synthesized parents are ordered before their children.
+      if (compat) {
+        for (const ev of compat.before(parsed)) writeOut(ev);
+      }
       const kind = parsed?.type;
       if (kind === "response.completed") {
         completed = true;
@@ -877,6 +883,10 @@ export async function pipeFreeStream(upstreamBody, res, tee, failedMessage, onFi
         }
       } else if (sseBuffer) {
         writeOut(sseBuffer);
+      }
+      // SSE-compat: the upstream ended without a terminal event - synthesize it.
+      if (compat && !compat.completed && compat.sawOutputEvent) {
+        writeOut(compat.completedEvent());
       }
       res.end();
       settle();
@@ -1668,7 +1678,8 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       res.flushHeaders();
     }
     if (target.free && normalizedPayload.stream === true) {
-      const result = await pipeFreeStream(upstreamBody, res, tee, freeEmptyError?.body.error.message, markFirstResponse);
+      const compat = config.sseCompat ? new SseCompatState() : null;
+      const result = await pipeFreeStream(upstreamBody, res, tee, freeEmptyError?.body.error.message, markFirstResponse, compat);
       bytesOut = result.bytes;
       freeEmpty = result.empty;
       if (result.usage) usage = result.usage;
